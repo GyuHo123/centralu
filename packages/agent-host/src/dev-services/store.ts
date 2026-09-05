@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import type { ProjectInfo, SessionInfo, StoredMessage } from '@cc/protocol'
+import type { ProjectInfo, SavedCommand, SessionInfo, StoredMessage } from '@cc/protocol'
 import { sessionLiveDefaults } from '@cc/protocol'
 
 /**
@@ -911,20 +911,29 @@ export class Store {
    * project list — and with it the sidebar — down with it; the worst it can cost is a menu
    * you have to fill in again.
    */
-  projectCommands(projectId: string): string[] {
+  projectCommands(projectId: string): SavedCommand[] {
     const row = this.db.prepare(`SELECT commands FROM projects WHERE id = ?`).get(projectId) as
       { commands: string } | undefined
     if (!row) return []
     try {
       const parsed = JSON.parse(row.commands) as unknown
-      return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : []
+      if (!Array.isArray(parsed)) return []
+      // 옛 행은 문자열 배열이다 (별칭 이전, ~2026-09-06) — 읽을 때 승격하고, 다음 저장이 새 모양으로 굳힌다
+      return parsed.flatMap((c): SavedCommand[] => {
+        if (typeof c === 'string') return [{ command: c }]
+        if (c && typeof c === 'object' && typeof (c as { command?: unknown }).command === 'string') {
+          const label = (c as { label?: unknown }).label
+          return [{ command: (c as { command: string }).command, ...(typeof label === 'string' && label ? { label } : {}) }]
+        }
+        return []
+      })
     } catch {
       return []
     }
   }
 
   /** The whole list at once — add and delete both arrive here as "it looks like this now" */
-  setProjectCommands(projectId: string, commands: readonly string[]): void {
+  setProjectCommands(projectId: string, commands: readonly SavedCommand[]): void {
     this.db.prepare(`UPDATE projects SET commands = ? WHERE id = ?`).run(JSON.stringify(commands), projectId)
   }
 

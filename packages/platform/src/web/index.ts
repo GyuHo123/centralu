@@ -4,6 +4,7 @@ import type {
   ApprovalScope,
   CreateSessionParams,
   NormalizedEvent,
+  SavedCommand,
   ToolName,
   QuestionAnswer,
   UpdateSettingsParams,
@@ -201,7 +202,7 @@ class WebProjectPort implements ProjectPort {
   remove(projectId: string) {
     return this.rpc.call('projects.delete', { projectId })
   }
-  setCommands(projectId: string, commands: string[]) {
+  setCommands(projectId: string, commands: SavedCommand[]) {
     return this.rpc.call('projects.setCommands', { projectId, commands })
   }
 

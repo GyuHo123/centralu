@@ -4,6 +4,7 @@ import type {
   Attachment,
   CommandRunInfo,
   NormalizedEvent,
+  SavedCommand,
   PermissionPreset,
   ProjectInfo,
   QuestionAnswer,
@@ -599,7 +600,7 @@ export type AppState = {
    * Replace this project's saved shell commands (issue #44).
    * Adding one and deleting one both arrive here as "the list is this now".
    */
-  setProjectCommands(projectId: string, commands: string[]): Promise<void>
+  setProjectCommands(projectId: string, commands: SavedCommand[]): Promise<void>
   /** 워크트리 프로비저닝 설정 저장 (#69) — 새 세션 창의 워크트리 영역이 부른다 */
   saveWorktreeSetup(projectId: string, setup: { command: string; copyFiles: string[] } | null): Promise<void>
   /** host의 실행 장부를 읽는다 — 증거 패널이 프로젝트를 볼 때. UI만 리로드돼도 도는 명령이 보이게 */

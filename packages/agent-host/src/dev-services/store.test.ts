@@ -698,15 +698,25 @@ describe('v15 이관 — 프로젝트가 등록한 셸 명령을 기억한다', 
     expect(first.schemaVersion).toBe(LATEST_SCHEMA)
     // 없던 프로젝트에는 없는 것이 맞다 — 빈 목록이 곧 '아직 등록한 적 없음'이다
     expect(first.projectCommands('p1')).toEqual([])
-    first.setProjectCommands('p1', ['pnpm test', 'pnpm e2e'])
+    first.setProjectCommands('p1', [{ command: 'pnpm test', label: '테스트' }, { command: 'pnpm e2e' }])
     first.close()
 
     const second = new Store(file)
-    expect(second.projectCommands('p1')).toEqual(['pnpm test', 'pnpm e2e'])
-    // schema.sql이 user_version을 1로 되돌려 단계가 매번 다시 도는 구조다 —
-    // 두 번째 열기가 컬럼을 다시 만들어 목록을 비우면 안 된다
-    expect(second.listProjects().map((p) => p.id)).toEqual(['p1'])
+    expect(second.projectCommands('p1')).toEqual([
+      { command: 'pnpm test', label: '테스트' },
+      { command: 'pnpm e2e' },
+    ])
+    // 별칭 이전(~2026-09-06)의 행은 문자열 배열이다 — 읽을 때 승격된다
     second.close()
+    const raw2 = new Database(file)
+    raw2.prepare(`UPDATE projects SET commands = ? WHERE id = 'p1'`).run('["pnpm dev","pnpm lint"]')
+    raw2.close()
+    const third = new Store(file)
+    expect(third.projectCommands('p1')).toEqual([{ command: 'pnpm dev' }, { command: 'pnpm lint' }])
+    // schema.sql이 user_version을 1로 되돌려 단계가 매번 다시 도는 구조다 —
+    // 다시 열기가 컬럼을 다시 만들어 목록을 비우면 안 된다
+    expect(third.listProjects().map((p) => p.id)).toEqual(['p1'])
+    third.close()
     rmSync(dir, { recursive: true, force: true })
   })
 

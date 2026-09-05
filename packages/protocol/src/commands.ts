@@ -244,6 +244,18 @@ export function sessionLiveDefaults(): Pick<
   }
 }
 
+/**
+ * 저장된 셸 명령 하나 (#44, 별칭은 2026-09-06 사용자 요청).
+ * `command`가 정체성이다 — 실행 장부(commandRuns)·host PTY 명부·로그 버퍼가 전부
+ * 이 문자열로 키를 잡는다. `label`은 표시 전용이고, 보여줄 때는 항상 command를
+ * 곁들인다 (이름이 몰래 딴 명령을 뜻하게 되는 표류 방지).
+ */
+export const SavedCommand = z.object({
+  command: z.string(),
+  label: z.string().optional(),
+})
+export type SavedCommand = z.infer<typeof SavedCommand>
+
 export const ProjectInfo = z.object({
   id: z.string(),
   path: z.string(),
@@ -260,10 +272,14 @@ export const ProjectInfo = z.object({
    * (which is why `agents.commands` carries a `ready` flag), and the project is already
    * in the store in one piece, so there is no reason to invent that distinction here.
    *
-   * The string is the command itself, with no name beside it. A row therefore shows
-   * exactly what it will run, and there is no label that can drift away from it.
+   * A row used to be the bare command string so that "there is no label that can drift
+   * away from it". The label came back by user request (2026-09-06) — `pnpm dev` reads
+   * worse than "데브 서버" at a glance — but the drift argument still shapes the rule:
+   * every surface that shows the label **also shows the command**, so a name can never
+   * silently mean something else. The command string stays the identity everywhere
+   * (run ledger, host PTY registry); the label is display-only.
    */
-  commands: z.array(z.string()).default([]),
+  commands: z.array(SavedCommand).default([]),
   /**
    * 워크트리 프로비저닝 (#69). 새 워크트리는 빈 작업대다 — 추적 파일만 있고
    * node_modules도 gitignored .env도 없다. 생성 순서: 워크트리 → 파일 복사 → 셋업
@@ -676,8 +692,8 @@ export const RpcMethods = {
    * cost a `git status` — the caller already has everything else about the project.
    */
   'projects.setCommands': {
-    params: z.object({ projectId: z.string(), commands: z.array(z.string()) }),
-    result: z.array(z.string()),
+    params: z.object({ projectId: z.string(), commands: z.array(SavedCommand) }),
+    result: z.array(SavedCommand),
   },
   /**
    * 워크트리 매니저 자리를 만든다 (#76) — 자식이 하나도 없을 때도.

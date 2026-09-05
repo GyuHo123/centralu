@@ -124,6 +124,8 @@ export function TerminalPane({ projectId }: { projectId: string }) {
  */
 function CommandTerminal({ projectId, run }: { projectId: string; run: CommandRunInfo }) {
   const stopCommand = useStore((s) => s.stopCommand)
+  // 별칭 규칙 (2026-09-06): 이름을 보여주는 자리는 명령도 같이 보여준다 — 이름은 표류할 수 있다
+  const label = useStore((s) => s.projects[projectId]?.commands.find((c) => c.command === run.command)?.label)
   return (
     <div
       className="flex min-h-0 flex-1 flex-col border-b border-edge last:border-b-0"
@@ -131,6 +133,7 @@ function CommandTerminal({ projectId, run }: { projectId: string; run: CommandRu
     >
       <div className="flex items-center gap-1.5 px-2 py-0.5">
         <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-chalk" aria-label="running" />
+        {label && <span className="truncate text-[10px] text-ash">{label}</span>}
         <span className="readout truncate text-[10px] text-slate" title={run.command}>
           {run.command}
         </span>

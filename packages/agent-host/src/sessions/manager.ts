@@ -21,6 +21,7 @@ import type {
   PermissionPreset,
   QuestionAnswer,
   ProjectInfo,
+  SavedCommand,
   SessionInfo,
   SessionState,
   StoredMessage,
@@ -614,11 +615,17 @@ export class SessionManager {
    * shell; the approval machinery exists for what an agent proposes, and running these
    * through it would put a permission prompt in front of what the person just typed.
    */
-  setProjectCommands(projectId: string, commands: readonly string[]): string[] {
+  setProjectCommands(projectId: string, commands: readonly SavedCommand[]): SavedCommand[] {
     if (!this.store.listProjects().some((p) => p.id === projectId)) {
       throw Object.assign(new Error('Project not found'), { code: 'internal' })
     }
-    const clean = commands.map((c) => c.trim()).filter(Boolean)
+    // 빈 명령은 버리고, 빈 별칭은 별칭 없음으로 — 라벨은 표시 전용이라 정규화만 하면 된다
+    const clean = commands.flatMap((c): SavedCommand[] => {
+      const command = c.command.trim()
+      if (!command) return []
+      const label = c.label?.trim()
+      return [{ command, ...(label ? { label } : {}) }]
+    })
     this.store.setProjectCommands(projectId, clean)
     return clean
   }

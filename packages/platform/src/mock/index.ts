@@ -13,6 +13,7 @@ import type {
   ExternalSession,
   NormalizedEvent,
   ProjectInfo,
+  SavedCommand,
   SessionInfo,
   StoredMessage,
   UsageSnapshot,
@@ -1064,10 +1065,15 @@ export class MockPlatform implements Platform {
      * **host와 똑같이 빈 줄을 걷어낸다.** 목이 실물보다 너그러우면 E2E는 초록인데
      * 실제 앱에서만 다르게 동작하는 자리가 생긴다 — 이 파일 머리말의 계약이 그것이다.
      */
-    setCommands: async (projectId: string, commands: string[]) => {
+    setCommands: async (projectId: string, commands: SavedCommand[]) => {
       const p = this.projectsList.find((x) => x.id === projectId)
       if (!p) throw Object.assign(new Error('Project not found'), { code: 'internal' })
-      p.commands = commands.map((c) => c.trim()).filter(Boolean)
+      p.commands = commands.flatMap((c): SavedCommand[] => {
+        const command = c.command.trim()
+        if (!command) return []
+        const label = c.label?.trim()
+        return [{ command, ...(label ? { label } : {}) }]
+      })
       return [...p.commands]
     },
     // 실물과 같은 규칙 (#69): 빈 설정은 null로 눕는다 — 목이 더 너그러우면 계약이 흩어진다

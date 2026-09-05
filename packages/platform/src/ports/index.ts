@@ -13,6 +13,7 @@ import type {
   GitFileStatus,
   NormalizedEvent,
   ProjectInfo,
+  SavedCommand,
   SessionInfo,
   StoredMessage,
   UsageSnapshot,
@@ -171,7 +172,7 @@ export interface ProjectPort {
    * What comes back is what was actually stored — the host drops blank entries, so it can
    * differ from what was sent.
    */
-  setCommands(projectId: string, commands: string[]): Promise<string[]>
+  setCommands(projectId: string, commands: SavedCommand[]): Promise<SavedCommand[]>
   /** 워크트리 프로비저닝 설정 저장 (#69). null이면 지운다 */
   setWorktreeSetup(projectId: string, setup: { command: string; copyFiles: string[] } | null): Promise<void>
   /**

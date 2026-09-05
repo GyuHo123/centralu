@@ -549,6 +549,38 @@ test('명령어 창: 오케스트레이터에는 없다 — 프로젝트가 없�
   await expect(page.getByTestId('run-open')).toBeHidden()
 })
 
+test('명령 별칭: 이름이 앞서고 명령이 받친다 — 목록·실행 줄·터미널 패널 모두 (2026-09-06)', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', '작업')
+
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm dev')
+  await page.getByTestId('run-add-name').fill('데브 서버')
+  await page.getByTestId('run-add').click()
+  // 이름을 보여주는 자리는 명령도 같이 보여준다 — 이름이 몰래 딴 명령을 뜻하게 되는 표류 방지
+  await expect(page.getByTestId('run-command-0')).toContainText('데브 서버')
+  await expect(page.getByTestId('run-command-0')).toContainText('pnpm dev')
+
+  await page.getByTestId('run-command-0').click()
+  await page.getByTestId('run-exec').click()
+  await expect(page.getByTestId('run-selected')).toContainText('데브 서버 · pnpm dev')
+  await page.keyboard.press('Escape')
+
+  // 터미널 패널의 명령 터미널에도 둘 다
+  await page.getByTestId('evidence-tab-terminal').click()
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toContainText('데브 서버')
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toContainText('pnpm dev')
+
+  // 별칭 고치기 — hover에 나오는 버튼으로, Enter로 저장
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-command-0').hover()
+  await page.getByTestId('run-rename-0').click()
+  await page.getByTestId('run-rename-input-0').fill('로컬 서버')
+  await page.getByTestId('run-rename-input-0').press('Enter')
+  await expect(page.getByTestId('run-command-0')).toContainText('로컬 서버')
+  await expect(page.getByTestId('run-command-0')).toContainText('pnpm dev')
+})
+
 /*
  * ── 실행 중 명령의 터미널 패널 투영 (#60 최종 형태, 사용자 결정 2026-09-06) ──
  *
