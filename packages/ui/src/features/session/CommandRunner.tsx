@@ -95,14 +95,18 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
     /* 바깥 여백을 누르면 닫힌다 — 창 자체(mousedown이 안쪽에서 시작)는 무시 */
     <div
       ref={rootRef}
-      className="absolute inset-0 z-40 flex items-center justify-center bg-void/70 p-4"
+      className="absolute inset-0 z-40 flex items-start justify-end bg-void/40 px-2 pb-4 pt-8"
       data-testid="run-menu"
       onMouseDown={(e) => {
         if (e.target === rootRef.current) onClose()
       }}
     >
-      {/* 목록 몇 줄에 칸 전부는 과하다 — 창은 내용만큼만 서고, 로그를 열면 아래로 자란다 */}
-      <div className="flex max-h-full w-[min(560px,100%)] flex-col overflow-hidden rounded border border-edge bg-panel shadow-[0_16px_48px_-8px_rgb(0_0_0/0.9)]">
+      {/*
+        헤더의 ▶ 아래에 드롭다운으로 붙는다 (사용자 요청 2026-09-06 — 가운데 모달은
+        목록 몇 줄에 과한 무게였다). 위에서 내려오는 cc-drop이 출처를 말해 준다.
+        창은 내용만큼만 서고, 로그를 열면 아래로 자란다.
+      */}
+      <div className="cc-drop flex max-h-full w-[min(560px,100%)] flex-col overflow-hidden rounded border border-edge bg-panel shadow-[0_16px_48px_-8px_rgb(0_0_0/0.9)]">
         <div className="flex items-center gap-1.5 border-b border-edge px-3 py-1.5">
           <span className="text-[11px] uppercase tracking-[0.12em] text-slate">Commands</span>
           <span className="ml-auto">
