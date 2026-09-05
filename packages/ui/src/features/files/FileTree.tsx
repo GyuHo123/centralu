@@ -467,7 +467,7 @@ function RowMenu({ state, close }: { state: MenuState; close: () => void }) {
   const rootRef = useRef<HTMLDivElement>(null)
 
   /*
-   * 바깥 클릭과 Escape로 닫는다 (SessionSettings·RunMenu와 같은 처리).
+   * 바깥 클릭과 Escape로 닫는다 (SessionSettings와 같은 처리).
    * **자기 자신은 빼야 한다** — mousedown은 click보다 먼저 와서, 안쪽까지 닫아 버리면
    * 항목을 누르는 순간 메뉴가 사라지고 클릭은 어디에도 닿지 않는다.
    */

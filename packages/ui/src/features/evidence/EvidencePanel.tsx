@@ -62,6 +62,14 @@ export function EvidencePanel() {
    * about a mapping that a reorder does not move. Position digits would also silently
    * retarget muscle memory every time a tab is dragged.
    */
+  /*
+   * 명령 실행 장부를 이 프로젝트로 읽어 둔다 (#60 이관). 터미널 탭을 열어야만 읽으면
+   * UI 리로드 뒤 뱃지가 어둡다 — 돌고 있는 데브 서버는 탭을 열기 전에도 사실이다.
+   */
+  useEffect(() => {
+    if (projectId) void useStore.getState().loadCommandRuns(projectId)
+  }, [projectId])
+
   useEffect(() => {
     if (!projectId) return
     const onKey = (e: KeyboardEvent) => {
@@ -290,6 +298,7 @@ function TabGroup({
             groups={groups}
             onLayout={onLayout}
             onPick={setPanelTab}
+            projectId={projectId}
           />
         ))}
       </nav>
@@ -367,6 +376,7 @@ function TabButton({
   groups,
   onLayout,
   onPick,
+  projectId,
 }: {
   id: PanelTab
   active: boolean
@@ -374,10 +384,18 @@ function TabButton({
   groups: PanelGroup[]
   onLayout: (groups: PanelGroup[]) => void
   onPick: (tab: PanelTab) => void
+  projectId: string
 }) {
   // Each button keeps its own drop edge so the line is drawn on that button only —
   // the same call as the sidebar rows, for the same reason.
   const [edge, setEdge] = useState<'left' | 'right' | null>(null)
+  /*
+   * 터미널 탭의 실행 뱃지 (#60 이관) — 데브 서버를 켜 두고 다른 탭을 보고 있어도
+   * "돌고 있다"는 사실이 탭에 남아야 한다. 이 구멍(창 닫으면 무표시)이 이관의 이유였다.
+   */
+  const running = useStore((s) =>
+    id === 'terminal' ? Object.values(s.commandRuns[projectId] ?? {}).some((r) => r.running) : false,
+  )
 
   return (
     <button
@@ -410,6 +428,13 @@ function TabButton({
       } ${dropLine(edge)}`}
     >
       {TAB_LABELS[id]}
+      {running && (
+        <span
+          className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-chalk align-middle"
+          data-testid="terminal-tab-running"
+          aria-label="a command is running"
+        />
+      )}
     </button>
   )
 }
@@ -481,6 +506,8 @@ function CollapsedRail({ projectId, isRepo }: { projectId: string; isRepo: boole
   const sc = useShortcut()
   const touched = useTouchedCount(projectId)
   const [count, setCount] = useState<number | null>(null)
+  // 패널을 접어도 "명령이 돌고 있다"는 사실은 접히면 안 된다 (#60 이관의 이유)
+  const running = useStore((s) => Object.values(s.commandRuns[projectId] ?? {}).some((r) => r.running))
 
   useEffect(() => {
     if (!isRepo) {
@@ -520,6 +547,16 @@ function CollapsedRail({ projectId, isRepo }: { projectId: string; isRepo: boole
           title={`${count} changed files`}
         >
           {count}
+        </button>
+      )}
+      {running && (
+        <button
+          className="flex items-center justify-center rounded px-1 py-1"
+          onClick={() => togglePanel(true)}
+          data-testid="evidence-rail-running"
+          title="A command is running — open the terminal tab"
+        >
+          <span className="size-1.5 animate-pulse rounded-full bg-chalk" />
         </button>
       )}
       {/* 세로쓰기 — 접힌 띠가 무엇의 띠인지 말해준다 */}

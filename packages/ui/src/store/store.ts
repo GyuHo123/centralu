@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { SessionInfo } from '@cc/protocol'
 import type {
   Attachment,
+  CommandRunInfo,
   NormalizedEvent,
   PermissionPreset,
   ProjectInfo,
@@ -423,6 +424,14 @@ export type AppState = {
   /** 세션 목록 폭(px) */
   sidebarWidth: number
   /**
+   * 프로젝트별 명령 실행 상태 — host `commands.state`의 투영 (#60 → 터미널 패널로 이관).
+   * 로그 본문은 host 버퍼가 들고, 여기는 뱃지가 읽을 사실(도는가 · 몇 번으로 끝났나)만
+   * 든다. 스토어에 있는 이유: "돌고 있다"는 실행 창만의 사정이 아니라 탭 뱃지·접힌
+   * 띠가 같이 읽어야 하는 사실이라서다 — 데브 서버 켜 두고 화면을 옮기면 어디서도
+   * 안 보이던 구멍이 이 조각의 출발점이다. projectId → command → 마지막 실행.
+   */
+  commandRuns: Record<string, Record<string, CommandRunInfo>>
+  /**
    * 넓은 표면. 코드·diff는 360px 패널에서 읽을 수 없다.
    * 대화 위에 덮었다가 esc로 걷는다 — 돌아오면 대화는 스크롤 위치까지 그대로다.
    */
@@ -593,13 +602,12 @@ export type AppState = {
   setProjectCommands(projectId: string, commands: string[]): Promise<void>
   /** 워크트리 프로비저닝 설정 저장 (#69) — 새 세션 창의 워크트리 영역이 부른다 */
   saveWorktreeSetup(projectId: string, setup: { command: string; copyFiles: string[] } | null): Promise<void>
-  /**
-   * Run one of the project's saved commands in that project's terminal (issue #44).
-   *
-   * Takes the **session**, not the project, because the session is what answers both
-   * questions at once: whose terminal this belongs in, and where the person has to be
-   * standing to see it.
-   */
+  /** host의 실행 장부를 읽는다 — 증거 패널이 프로젝트를 볼 때. UI만 리로드돼도 도는 명령이 보이게 */
+  loadCommandRuns(projectId: string): Promise<void>
+  /** 저장된 명령을 실행한다 (#44 → #60). 같은 명령이 돌고 있으면 host가 죽이고 새로 시작한다 */
+  runCommand(projectId: string, command: string): Promise<void>
+  /** 데브 서버를 끈다 — 결말은 terminal.onExit으로 돌아와 commandRuns에 적힌다. 로그는 남는다 */
+  stopCommand(projectId: string, command: string): Promise<void>
   createSession(
     projectId: string,
     opts?: {
@@ -1020,6 +1028,7 @@ export const useStore = create<AppState>((set, get) => ({
   panelSplit: 0.5,
   panelWidth: PANEL_DEFAULT,
   sidebarWidth: SIDEBAR_DEFAULT,
+  commandRuns: {} as Record<string, Record<string, CommandRunInfo>>,
   overlay: null,
   inboxOpen: false,
   toast: null,
@@ -1067,6 +1076,27 @@ export const useStore = create<AppState>((set, get) => ({
         set({ connection })
         // 끊겼다가 돌아왔다 — 돌던 세션을 되살린다
         if (connection === 'connected' && was !== 'connected') void get().recoverAfterReconnect()
+      }),
+      /*
+       * 명령 실행의 결말 (#60) — runId가 terminalId 자리를 탄다. 셸 터미널의 exit는
+       * commandRuns에 그 id가 없으니 조용히 지나간다. 화면 부품이 아니라 여기서 듣는
+       * 이유: 로그를 보던 창이 닫혀 있어도 뱃지는 꺼져야 한다.
+       */
+      platform.terminal.onExit((e) => {
+        set((s) => {
+          for (const [pid, runs] of Object.entries(s.commandRuns)) {
+            for (const [cmd, r] of Object.entries(runs)) {
+              if (r.runId !== e.terminalId || !r.running) continue
+              return {
+                commandRuns: {
+                  ...s.commandRuns,
+                  [pid]: { ...runs, [cmd]: { ...r, running: false, exitCode: e.exitCode } },
+                },
+              }
+            }
+          }
+          return {}
+        })
       }),
     )
 
@@ -2121,6 +2151,46 @@ export const useStore = create<AppState>((set, get) => ({
         toast: `Could not save commands: ${(e as Error).message}`,
       }))
     }
+  },
+
+  async loadCommandRuns(projectId) {
+    const platform = get().platform
+    if (!platform) return
+    try {
+      const runs = await platform.commands.state(projectId)
+      set((s) => ({
+        commandRuns: {
+          ...s.commandRuns,
+          [projectId]: Object.fromEntries(runs.map((r) => [r.command, r])),
+        },
+      }))
+    } catch {
+      // 못 읽었으면 다음에 패널이 열릴 때 다시 읽는다 — 뱃지가 잠깐 어두운 것뿐이다
+    }
+  },
+
+  async runCommand(projectId, command) {
+    const platform = get().platform
+    if (!platform) return
+    try {
+      // 크기는 로그 창(CommandLog)이 붙으면서 실측으로 다시 맞춘다 — 여기는 시작값일 뿐
+      const info = await platform.commands.run(projectId, command, 100, 30)
+      set((s) => ({
+        commandRuns: {
+          ...s.commandRuns,
+          [projectId]: { ...s.commandRuns[projectId], [command]: info },
+        },
+      }))
+    } catch (e) {
+      // 조용한 실패 금지 — 안 떴는데 뜬 줄 알면 로그를 기다리게 된다
+      set({ toast: `Could not run: ${(e as Error).message}` })
+    }
+  },
+
+  async stopCommand(projectId, command) {
+    await get()
+      .platform?.commands.stop(projectId, command)
+      .catch(() => {})
   },
 
   async createSession(projectId, opts) {

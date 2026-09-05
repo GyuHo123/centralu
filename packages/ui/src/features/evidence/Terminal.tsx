@@ -6,6 +6,7 @@ import type { TerminalInfo } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { CloseIcon, PlusIcon } from '../../components/icons.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
+import { useStore } from '../../store/store.js'
 
 /**
  * 프로젝트 터미널 (여러 개).
@@ -87,6 +88,8 @@ export function TerminalPane({ projectId }: { projectId: string }) {
         </p>
       )}
 
+      <CommandsSection projectId={projectId} />
+
       <div className="flex min-h-0 flex-1 flex-col" data-testid="terminal-stack">
         {/*
           닫을 id는 TerminalView가 넘겨준다 — 재시작하면 host가 **새 id**를 발급하는데,
@@ -98,6 +101,235 @@ export function TerminalPane({ projectId }: { projectId: string }) {
       </div>
     </section>
   )
+}
+
+const NO_COMMANDS: string[] = []
+
+/**
+ * 자주 쓰는 명령어 (#44 → #60에서 창 → 터미널 패널의 붙박이로).
+ *
+ * 창(CommandRunnerOverlay)이던 시절의 문제는 창이라는 것 자체였다: 데브 서버를
+ * 돌려놓고 창을 닫으면 — 특히 그리드에서 칸을 내리면 — 돌고 있다는 사실이 화면
+ * 어디에도 없었다. 실행 메커니즘은 그대로다: host의 **명령 전용 PTY**(셸에 타이핑이
+ * 아니다 — 그래서 죽는 순간이 exit 이벤트로 온다), 명령별 마지막 실행 로그 하나가
+ * host 버퍼에(재실행 전까지). 여기는 그 장부(store.commandRuns)의 투영일 뿐이라
+ * 접었다 펴도 지울 것도 저장할 것도 없다.
+ *
+ * 접힘 규칙: 기본은 **도는 동안 펴짐** — 끝나면(정상이든 크래시든) 한 줄로 접히고
+ * 종료 코드가 그 줄에 남는다. 크래시 로그는 줄을 누르면 다시 펴 볼 수 있다.
+ * 사람이 손댄 접힘/펴짐은 그 명령의 다음 실행까지 기본을 이긴다.
+ */
+function CommandsSection({ projectId }: { projectId: string }) {
+  const commands = useStore((s) => s.projects[projectId]?.commands ?? NO_COMMANDS)
+  const runs = useStore((s) => s.commandRuns[projectId])
+  const save = useStore((s) => s.setProjectCommands)
+  const runCommand = useStore((s) => s.runCommand)
+  const stopCommand = useStore((s) => s.stopCommand)
+  const loadCommandRuns = useStore((s) => s.loadCommandRuns)
+  const [draft, setDraft] = useState('')
+  /** 사람이 정한 접힘/펴짐 — 없으면 "도는 동안 펴짐"이 기본이다 */
+  const [expand, setExpand] = useState<Record<string, boolean>>({})
+
+  // UI가 리로드돼도 host의 실행은 계속이다 — 열릴 때 장부를 다시 읽어야 뱃지가 참이다
+  useEffect(() => {
+    void loadCommandRuns(projectId)
+  }, [loadCommandRuns, projectId])
+
+  const add = () => {
+    const next = draft.trim()
+    if (!next) return
+    setDraft('')
+    void save(projectId, [...commands, next])
+  }
+
+  const run = (c: string) => {
+    // 실행은 사람의 접힘 결정을 지운다 — 새 실행은 기본(도는 동안 펴짐)으로 돌아간다
+    setExpand(({ [c]: _drop, ...rest }) => rest)
+    void runCommand(projectId, c)
+  }
+
+  return (
+    <section className="flex max-h-[50%] shrink-0 flex-col border-b border-edge" data-testid="commands-section">
+      <div className="px-3 pt-1">
+        <span className="text-[10px] uppercase tracking-[0.12em] text-slate">Commands</span>
+      </div>
+      <div className="min-h-0 overflow-y-auto">
+        {commands.map((c, i) => {
+          const r = runs?.[c]
+          const open = expand[c] ?? !!r?.running
+          return (
+            <div key={`${i}-${c}`} data-testid={`cmd-row-${i}`}>
+              <div className="group/cmd flex items-center gap-1.5 px-2 py-1">
+                {/* 이름 줄이 곧 접힘/펴짐 과녁 — 로그는 host에 있으니 펴는 건 공짜다 */}
+                <button
+                  type="button"
+                  data-testid={`cmd-toggle-${i}`}
+                  onClick={() => setExpand((prev) => ({ ...prev, [c]: !open }))}
+                  className="readout min-w-0 flex-1 truncate text-left text-[11px] text-ash transition-colors hover:text-chalk"
+                  title={open ? `${c} — collapse log` : `${c} — expand log`}
+                >
+                  {c}
+                </button>
+                {r?.running && (
+                  <span
+                    className="size-1.5 shrink-0 animate-pulse rounded-full bg-chalk"
+                    data-testid={`cmd-running-${i}`}
+                    aria-label="running"
+                  />
+                )}
+                {r && !r.running && (
+                  <span className="readout shrink-0 text-[10px] text-slate" data-testid={`cmd-exit-${i}`}>
+                    exit {r.exitCode ?? '?'}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  data-testid={`cmd-run-${i}`}
+                  onClick={() => run(c)}
+                  className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] text-chalk transition-colors hover:border-graphite"
+                >
+                  {r?.running ? 'Restart' : 'Run'}
+                </button>
+                {r?.running && (
+                  <button
+                    type="button"
+                    data-testid={`cmd-stop-${i}`}
+                    onClick={() => void stopCommand(projectId, c)}
+                    className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] text-ash transition-colors hover:border-graphite hover:text-chalk"
+                  >
+                    Stop
+                  </button>
+                )}
+                {/* 지우기는 실행과 다른 과녁 — 잘못 눌러 되돌릴 수 없는 쪽은 hover에만 보인다 */}
+                <button
+                  type="button"
+                  data-testid={`cmd-delete-${i}`}
+                  aria-label={`Remove ${c}`}
+                  onClick={() => void save(projectId, commands.filter((_, j) => j !== i))}
+                  className="shrink-0 rounded px-0.5 text-slate opacity-0 transition-opacity hover:text-chalk focus:opacity-100 group-hover/cmd:opacity-100"
+                >
+                  <CloseIcon size={10} />
+                </button>
+              </div>
+              {open && r && (
+                <div className="h-40 shrink-0 border-t border-edge/60" data-testid={`cmd-log-${i}`}>
+                  {/* runId가 정체성 — 재실행이면 새 스트림을 처음부터 다시 그린다 */}
+                  <CommandLog key={r.runId} projectId={projectId} command={c} runId={r.runId} />
+                </div>
+              )}
+            </div>
+          )
+        })}
+        {/* 등록 — 마지막 줄은 언제나 하나 더 추가하는 줄 (쓰고 싶은 순간이 곧 등록하는 순간) */}
+        <div className="flex items-center gap-1.5 px-2 py-1">
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') add()
+            }}
+            placeholder="Add a command (runs in the project directory)"
+            data-testid="cmd-add-input"
+            className="readout min-w-0 flex-1 rounded border border-edge bg-void px-1.5 py-0.5 text-[11px] text-chalk placeholder:text-slate focus:border-graphite focus:outline-none"
+          />
+          <button
+            type="button"
+            data-testid="cmd-add"
+            onClick={add}
+            className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] text-ash transition-colors hover:border-graphite hover:text-chalk"
+          >
+            Add
+          </button>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * 명령 로그 하나 (읽기 전용 xterm — 색을 살리는 가장 싼 길이 터미널 에뮬레이터다).
+ * 화면 복원은 host의 로그 버퍼가 한다: 붙는 순간 지금까지의 출력을 통째로 받고,
+ * 그 뒤는 터미널과 같은 스트림(runId가 terminalId 자리)을 듣는다.
+ */
+function CommandLog({ projectId, command, runId }: { projectId: string; command: string; runId: string }) {
+  const platform = usePlatform()
+  const hostRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = hostRef.current
+    if (!el) return
+
+    const term = new Xterm({
+      fontSize: 11,
+      fontFamily: "ui-monospace, 'SF Mono', Menlo, monospace",
+      theme: { background: '#121212', foreground: '#e9e9e9', cursor: '#121212', selectionBackground: '#2a2a2a' },
+      disableStdin: true,
+      scrollback: 5000,
+      allowProposedApi: true,
+    })
+    const fit = new FitAddon()
+    term.loadAddon(fit)
+    term.open(el)
+
+    const lastDims = { cols: 0, rows: 0 }
+    const syncSize = () => {
+      try {
+        fit.fit()
+      } catch {
+        // 아직 레이아웃이 없을 때가 있다 — 다음 기회에 맞춘다
+      }
+      const { cols, rows } = term
+      if (cols < 2 || rows < 2) return
+      if (cols === lastDims.cols && rows === lastDims.rows) return
+      lastDims.cols = cols
+      lastDims.rows = rows
+      void platform.commands.resize(projectId, command, cols, rows).catch(() => {})
+    }
+    syncSize()
+
+    // 지금까지의 로그를 통째로 — 그 뒤의 조각과 순서가 어긋나지 않게 스트림 구독을 먼저 건다
+    const pendingChunks: string[] = []
+    let replayed = false
+    const offOutput = platform.terminal.onOutput((e) => {
+      if (e.terminalId !== runId) return
+      if (replayed) term.write(e.data)
+      else pendingChunks.push(e.data)
+    })
+    const offExit = platform.terminal.onExit((e) => {
+      if (e.terminalId !== runId) return
+      term.write(`\r\n\x1b[2m— exited${e.exitCode !== null ? ` (${e.exitCode})` : ''} —\x1b[0m\r\n`)
+    })
+    void platform.commands
+      .log(projectId, command)
+      .then((run) => {
+        // 재실행으로 다른 runId가 됐다면 이 뷰는 곧 교체된다 — 옛 로그를 그리지 않는다
+        if (!run || run.runId !== runId) return
+        term.write(run.history)
+        for (const chunk of pendingChunks.splice(0)) term.write(chunk)
+        replayed = true
+        if (!run.running && run.exitCode !== null) {
+          term.write(`\r\n\x1b[2m— exited (${run.exitCode}) —\x1b[0m\r\n`)
+        }
+      })
+      .catch(() => {})
+
+    let pending = 0
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(pending)
+      pending = requestAnimationFrame(syncSize)
+    })
+    ro.observe(el)
+
+    return () => {
+      cancelAnimationFrame(pending)
+      ro.disconnect()
+      offOutput()
+      offExit()
+      term.dispose()
+    }
+  }, [platform, projectId, command, runId])
+
+  return <div ref={hostRef} className="h-full px-1 py-1" data-testid={`cmd-log-surface-${runId}`} />
 }
 
 /**

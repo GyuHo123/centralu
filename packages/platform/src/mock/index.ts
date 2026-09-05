@@ -1148,6 +1148,14 @@ export class MockPlatform implements Platform {
     for (const h of this.termHandlers) h({ terminalId, data })
   }
 
+  /** 테스트용: 셸이 죽은 상황 — 명령 실행(runId)이 아닌 exit도 같은 레인을 탄다 */
+  emitTerminalExit(terminalId: string, exitCode: number | null): void {
+    for (const [, list] of this.terminalState.byCwd) {
+      for (const t of list) if (t.id === terminalId) t.alive = false
+    }
+    for (const h of this.termExitHandlers) h({ terminalId, exitCode })
+  }
+
   private cwdOf(projectId: string): string {
     return this.projectsList.find((p) => p.id === projectId)?.path ?? projectId
   }

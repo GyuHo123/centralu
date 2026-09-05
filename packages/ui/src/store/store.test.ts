@@ -44,6 +44,7 @@ beforeEach(() => {
     wakeLocked: {},
     notices: [],
     toast: null,
+    commandRuns: {},
     notifyPolicy: DEFAULT_NOTIFY_POLICY,
   })
 })
@@ -1046,5 +1047,62 @@ describe('스킬 제안', () => {
     expect(mock.skillList).toEqual([{ name: 'weekly-report', content: '금요일마다 요약' }])
     expect(useStore.getState().skillProposals).toEqual([])
     expect(useStore.getState().toast).toMatch(/Skill saved/)
+  })
+})
+
+describe('명령 실행 장부 (#60 → 터미널 패널 이관)', () => {
+  it('runCommand는 프로젝트·명령 아래 실행을 적고, exit 이벤트가 결말을 적는다', async () => {
+    const mock = new MockPlatform()
+    await useStore.getState().attach(mock)
+    const p = await useStore.getState().addProject('/tmp/cmd')
+
+    await useStore.getState().runCommand(p.id, 'pnpm dev')
+    let r = useStore.getState().commandRuns[p.id]!['pnpm dev']!
+    expect(r.running).toBe(true)
+
+    // 데브 서버가 죽었다 — runId가 terminalId 자리를 타고 exit가 온다
+    mock.exitCommand(p.id, 'pnpm dev', 1)
+    r = useStore.getState().commandRuns[p.id]!['pnpm dev']!
+    expect(r.running).toBe(false)
+    expect(r.exitCode).toBe(1)
+  })
+
+  it('셸 터미널의 exit는 장부를 건드리지 않는다 — 아는 runId만 결말로 받는다', async () => {
+    const mock = new MockPlatform()
+    await useStore.getState().attach(mock)
+    const p = await useStore.getState().addProject('/tmp/cmd2')
+    await useStore.getState().runCommand(p.id, 'pnpm dev')
+
+    // 모르는 terminalId (셸 터미널이 죽은 상황)
+    mock.emitTerminalExit('shell-1', 0)
+    expect(useStore.getState().commandRuns[p.id]!['pnpm dev']!.running).toBe(true)
+
+    // 같은 방사구로 **아는** runId가 오면 결말이 적힌다 — 위 무시가 공허하지 않다는 증명
+    mock.emitTerminalExit(useStore.getState().commandRuns[p.id]!['pnpm dev']!.runId, 0)
+    expect(useStore.getState().commandRuns[p.id]!['pnpm dev']!.running).toBe(false)
+  })
+
+  it('loadCommandRuns는 host 장부를 투영한다 — UI가 리로드돼도 도는 명령이 보인다', async () => {
+    const mock = new MockPlatform()
+    // UI(스토어)가 모르는 사이 host에서 이미 돌고 있던 실행
+    const p0 = await mock.projects.add('/tmp/cmd3')
+    await mock.commands.run(p0.id, 'pnpm dev', 80, 24)
+
+    await useStore.getState().attach(mock)
+    expect(useStore.getState().commandRuns[p0.id]).toBeUndefined()
+    await useStore.getState().loadCommandRuns(p0.id)
+    expect(useStore.getState().commandRuns[p0.id]!['pnpm dev']!.running).toBe(true)
+  })
+
+  it('stopCommand의 결말도 exit 이벤트로 돌아온다 (130 = SIGINT 관례)', async () => {
+    const mock = new MockPlatform()
+    await useStore.getState().attach(mock)
+    const p = await useStore.getState().addProject('/tmp/cmd4')
+    await useStore.getState().runCommand(p.id, 'pnpm dev')
+
+    await useStore.getState().stopCommand(p.id, 'pnpm dev')
+    const r = useStore.getState().commandRuns[p.id]!['pnpm dev']!
+    expect(r.running).toBe(false)
+    expect(r.exitCode).toBe(130)
   })
 })
