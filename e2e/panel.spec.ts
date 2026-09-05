@@ -372,12 +372,11 @@ test('git 저장소가 아니면 기록 탭도 깃 탭처럼 비활성이다', a
 })
 
 /*
- * ── 자주 쓰는 명령어 (#44 → #60에서 창 → 터미널 패널의 붙박이) ──────────
+ * ── 자주 쓰는 명령어 (#44 → #60에서 창으로) ──────────────────────────
  *
- * 실행 메커니즘은 #60 그대로다: host의 명령 전용 PTY 하나, 명령별 마지막 실행
- * 로그 하나. 화면만 옮겼다 — 창(오버레이)은 닫으면 무표시가 됐고, 그리드에서 칸을
- * 내리면 돌고 있는 데브 서버가 화면 어디에도 없었다. 붙박이는 그 사실을 탭 뱃지와
- * 접힌 띠까지 이어 나른다. 여기서 보는 것은 **그 이어짐**과 로그의 약속이다.
+ * 등록·실행·삭제·로그가 한 창 안에 있다. 터미널 탭과는 별개의 실행 경로다:
+ * 명령별 프로세스 하나, 마지막 실행 로그 하나. 여기서 보는 것은 **명령이 어느
+ * 프로젝트로 가는가**와 **로그가 약속대로 남는가**다.
  */
 
 /** 목의 실행 장부 — 어느 프로젝트의 어떤 명령이 돌(았)는지 */
@@ -392,124 +391,113 @@ async function commandRuns(page: Page): Promise<{ key: string; running: boolean;
   })
 }
 
-async function openTerminalTab(page: Page) {
-  await page.getByTestId('evidence-tab-terminal').click()
-  await expect(page.getByTestId('commands-section')).toBeVisible()
-}
-
-test('명령 실행: 등록 → 실행이면 로그가 흐르고, 끝나면 접히며 종료 코드가 남는다', async ({ page }) => {
+test('명령어 창: 등록 → 선택 → 실행이면 로그가 흐르고, 끝나면 종료 코드가 남는다', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', '작업')
-  await openTerminalTab(page)
 
-  await page.getByTestId('cmd-add-input').fill('pnpm test')
-  await page.getByTestId('cmd-add').click()
-  await expect(page.getByTestId('cmd-row-0')).toContainText('pnpm test')
-  // 등록은 실행이 아니다 — 실행 버튼이 따로 있다 (#60 설계 그대로)
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm test')
+  await page.getByTestId('run-add').click()
+  await expect(page.getByTestId('run-command-0')).toContainText('pnpm test')
+
+  // 선택은 실행이 아니다 — 실행 버튼이 따로 있다 (#60 설계)
+  await page.getByTestId('run-command-0').click()
   expect(await commandRuns(page)).toEqual([])
+  await page.getByTestId('run-exec').click()
 
-  await page.getByTestId('cmd-run-0').click()
-  // 도는 동안: 점 + 자동으로 펴진 로그 + 탭 뱃지
-  await expect(page.getByTestId('cmd-running-0')).toBeVisible()
-  await expect(page.getByTestId('cmd-log-0')).toBeVisible()
-  await expect(page.getByTestId('terminal-tab-running')).toBeVisible()
+  // 돌고 있다는 표시 + 로그 스트림
+  await expect(page.getByTestId('run-running-0')).toBeVisible()
   await page.evaluate(() => {
     const w = window as never as { __mock: any; __store: any }
     const pid = Object.keys(w.__store.getState().projects)[0]
     w.__mock.emitCommandOutput(pid, 'pnpm test', '테스트 3개 통과\r\n')
   })
-  await expect(page.getByTestId('cmd-log-0')).toContainText('테스트 3개 통과')
+  await expect(page.getByTestId('run-log')).toContainText('테스트 3개 통과')
 
-  // 단발성의 결말: 한 줄로 접히고 종료 코드가 그 줄에 남는다 — 로그는 host에 그대로다
+  // 단발성의 결말: 끝나면 종료 코드가 뱃지로 남는다
   await page.evaluate(() => {
     const w = window as never as { __mock: any; __store: any }
     const pid = Object.keys(w.__store.getState().projects)[0]
     w.__mock.exitCommand(pid, 'pnpm test', 0)
   })
-  await expect(page.getByTestId('cmd-exit-0')).toContainText('exit 0')
-  await expect(page.getByTestId('cmd-log-0')).toBeHidden()
-  await expect(page.getByTestId('terminal-tab-running')).toBeHidden()
+  await expect(page.getByTestId('run-exit-0')).toContainText('exit 0')
 
-  // 줄을 누르면 마지막 로그가 다시 펴진다 — 재실행 전까지 남는다는 약속 (사용자 결정)
-  await page.getByTestId('cmd-toggle-0').click()
-  await expect(page.getByTestId('cmd-log-0')).toContainText('테스트 3개 통과')
+  // 로그는 창을 닫았다 열어도 남는다 — 같은 명령을 다시 실행하기 전까지 (사용자 결정)
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('run-menu')).toBeHidden()
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-command-0').click()
+  await expect(page.getByTestId('run-log')).toContainText('테스트 3개 통과')
 
   // 재실행은 로그를 교체한다 — 옛 로그가 새 실행 앞에 섞이면 안 된다
-  await page.getByTestId('cmd-run-0').click()
-  await expect(page.getByTestId('cmd-running-0')).toBeVisible()
-  await expect(page.getByTestId('cmd-log-0')).not.toContainText('테스트 3개 통과')
+  await page.getByTestId('run-exec').click()
+  await expect(page.getByTestId('run-log')).not.toContainText('테스트 3개 통과')
+  await expect(page.getByTestId('run-running-0')).toBeVisible()
 })
 
-test('명령 실행: 데브 서버는 Stop으로 끄고, 로그는 남는다 — 도는 동안은 접어도 보인다', async ({ page }) => {
+test('명령어 창: 데브 서버는 Stop으로 끄고, 로그는 남는다', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', '작업')
-  await openTerminalTab(page)
 
-  await page.getByTestId('cmd-add-input').fill('pnpm dev')
-  await page.getByTestId('cmd-add').click()
-  await page.getByTestId('cmd-run-0').click()
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm dev')
+  await page.getByTestId('run-add').click()
+  await page.getByTestId('run-command-0').click()
+  await page.getByTestId('run-exec').click()
   await page.evaluate(() => {
     const w = window as never as { __mock: any; __store: any }
     const pid = Object.keys(w.__store.getState().projects)[0]
     w.__mock.emitCommandOutput(pid, 'pnpm dev', '서버가 5173에서 듣는 중\r\n')
   })
-  await expect(page.getByTestId('cmd-log-0')).toContainText('5173')
+  await expect(page.getByTestId('run-log')).toContainText('5173')
 
-  // 패널을 접어도 "돌고 있다"는 사실은 접히지 않는다 — 이 구멍이 이관의 이유였다
-  await page.getByTestId('evidence-close').click()
-  await expect(page.getByTestId('evidence-rail-running')).toBeVisible()
-  await page.getByTestId('evidence-rail-running').click()
-  await expect(page.getByTestId('commands-section')).toBeVisible()
-
-  await page.getByTestId('cmd-stop-0').click()
-  // 멈추면 접히고 종료 코드가 남는다 — 로그는 그대로다 (종료도 결과다)
-  await expect(page.getByTestId('cmd-exit-0')).toBeVisible()
-  await page.getByTestId('cmd-toggle-0').click()
-  await expect(page.getByTestId('cmd-log-0')).toContainText('5173')
+  await page.getByTestId('run-stop').click()
+  // 멈추면 실행 중 표시가 내려가고, 로그는 그대로다 — 종료도 결과다
+  await expect(page.getByTestId('run-exit-0')).toBeVisible()
+  await expect(page.getByTestId('run-log')).toContainText('5173')
 })
 
-test('명령 실행: 등록한 명령은 탭을 떠났다 와도 그대로 있다', async ({ page }) => {
+test('명령어 창: 등록한 명령은 창을 닫았다 열어도 그대로 있다', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', '작업')
-  await openTerminalTab(page)
-  await page.getByTestId('cmd-add-input').fill('pnpm lint')
-  await page.getByTestId('cmd-add').click()
 
-  await page.getByTestId('evidence-tab-files').click()
-  await expect(page.getByTestId('commands-section')).toBeHidden()
-  await openTerminalTab(page)
-  await expect(page.getByTestId('cmd-row-0')).toContainText('pnpm lint')
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm lint')
+  await page.getByTestId('run-add').click()
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('run-menu')).toBeHidden()
+
+  await page.getByTestId('run-open').click()
+  await expect(page.getByTestId('run-command-0')).toContainText('pnpm lint')
 })
 
-test('명령 실행: 지우기는 실행과 다른 과녁이다 — 지웠는데 돌면 되돌릴 수 없다', async ({ page }) => {
+test('명령어 창: 지우기는 실행과 다른 과녁이다 — 지웠는데 돌면 되돌릴 수 없다', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', '작업')
-  await openTerminalTab(page)
 
+  await page.getByTestId('run-open').click()
   for (const cmd of ['pnpm test', 'pnpm lint']) {
-    await page.getByTestId('cmd-add-input').fill(cmd)
-    await page.getByTestId('cmd-add').click()
+    await page.getByTestId('run-add-input').fill(cmd)
+    await page.getByTestId('run-add').click()
   }
-  await expect(page.getByTestId('cmd-row-1')).toContainText('pnpm lint')
+  await expect(page.getByTestId('run-command-1')).toContainText('pnpm lint')
 
-  await page.getByTestId('cmd-row-0').hover()
-  await page.getByTestId('cmd-delete-0').click()
+  await page.getByTestId('run-delete-0').click()
 
   // 남은 것이 위로 올라온다 — 지운 자리가 빈 줄로 남으면 안 된다
-  await expect(page.getByTestId('cmd-row-0')).toContainText('pnpm lint')
-  await expect(page.getByTestId('cmd-row-1')).toBeHidden()
+  await expect(page.getByTestId('run-command-0')).toContainText('pnpm lint')
+  await expect(page.getByTestId('run-command-1')).toBeHidden()
   // 그리고 아무것도 돌지 않았다
   expect(await commandRuns(page)).toEqual([])
 })
 
 /**
- * 그리드 칸의 실행 버튼이 **그 칸의 프로젝트**로 데려가는가.
+ * 그리드 칸의 실행 버튼이 **그 칸의 프로젝트**로 보내는가.
  *
- * 오버레이 시절 이 버튼은 칸 안에 창을 띄웠다. 지금은 지름길이다: 그 칸의 세션을
- * 포커스로 올리고 터미널 탭을 편다. 직전까지 보던 프로젝트(알파)가 아니라 누른
- * 칸(베타)의 명령이 보여야 한다 — 명령은 프로젝트의 것이다.
+ * 화면에 보이는 터미널을 기준으로 삼았다면 여기서 갈린다: 그리드에는 증거 레인이 아예
+ * 없고, 직전까지 보던 프로젝트는 알파다. 명령은 누른 칸의 세션이 사는 곳으로 가야 한다.
  */
-test('명령 버튼: 그리드 칸에서 누르면 그 칸 프로젝트의 터미널 탭으로 간다', async ({ page }) => {
+test('명령어 창: 명령은 누른 칸의 프로젝트로 간다 — 직전에 보던 프로젝트가 아니라', async ({ page }) => {
   await setup(page)
   await page.evaluate(async () => {
     await (window as never as { __store: any }).__store.getState().addProject('/tmp/beta')
@@ -517,10 +505,11 @@ test('명령 버튼: 그리드 칸에서 누르면 그 칸 프로젝트의 터�
   const alpha = await newSession(page, 'alpha', 'claude', '알파 작업')
   const beta = await newSession(page, 'beta', 'claude', '베타 작업')
 
-  // 베타가 포커스인 동안 명령을 등록해 두고
-  await openTerminalTab(page)
-  await page.getByTestId('cmd-add-input').fill('pnpm build')
-  await page.getByTestId('cmd-add').click()
+  // 베타 세션에 명령을 등록해 두고
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm build')
+  await page.getByTestId('run-add').click()
+  await page.keyboard.press('Escape')
 
   // 화면은 알파를 보고 있게 만든 다음 그리드로 간다
   await page.evaluate(
@@ -531,13 +520,10 @@ test('명령 버튼: 그리드 칸에서 누르면 그 칸 프로젝트의 터�
   await expect(page.getByTestId(`grid-panel-${beta}`)).toBeVisible()
 
   await page.getByTestId(`grid-panel-${beta}`).getByTestId('run-open').click()
-  await expect(page.getByTestId('commands-section')).toBeVisible()
-  await expect(page.getByTestId('cmd-row-0')).toContainText('pnpm build')
+  await page.getByTestId('run-command-0').click()
+  await page.getByTestId('run-exec').click()
 
-  await page.getByTestId('cmd-run-0').click()
-  await expect(page.getByTestId('cmd-running-0')).toBeVisible()
-
-  // 베타의 것으로 기록됐다
+  // 베타의 것으로 기록됐다 — 로그도 그 칸 안에서 보이므로 화면을 옮길 필요가 없다 (#60)
   const runs = await commandRuns(page)
   expect(runs).toHaveLength(1)
   const betaProjectId = await page.evaluate(() => {
@@ -548,7 +534,7 @@ test('명령 버튼: 그리드 칸에서 누르면 그 칸 프로젝트의 터�
   expect(runs[0]!.key.startsWith(betaProjectId)).toBe(true)
 })
 
-test('명령 버튼: 오케스트레이터에는 없다 — 프로젝트가 없으니 돌릴 디렉토리도 없다', async ({ page }) => {
+test('명령어 창: 오케스트레이터에는 없다 — 프로젝트가 없으니 돌릴 디렉토리도 없다', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', '작업')
   await expect(page.getByTestId('run-open')).toBeVisible()
@@ -559,8 +545,82 @@ test('명령 버튼: 오케스트레이터에는 없다 — 프로젝트가 없�
     await st.askOrchestrator('hello') // 첫 질문이 세션을 만든다
   })
   await expect(page.getByTestId('session-name')).toContainText('Orchestrator')
-  // 눌러도 아무것도 없는 곳으로 가는 버튼은 없는 편이 정직하다
+  // 열어도 아무것도 들어갈 수 없는 메뉴는 빈 메뉴보다 없는 편이 정직하다
   await expect(page.getByTestId('run-open')).toBeHidden()
+})
+
+/*
+ * ── 실행 중 명령의 터미널 패널 투영 (#60 최종 형태, 사용자 결정 2026-09-06) ──
+ *
+ * 창을 닫아도 — 그리드에서 칸을 내려도 — 돌고 있는 명령은 터미널 패널에 터미널
+ * 하나로 서 있어야 한다. 그리고 어떤 이유로든 끝나면(정상·크래시·Stop) 그 터미널은
+ * **내려간다**: 여기는 "지금 돌고 있는 것"의 자리고, 지난 로그의 정본은 실행 창이다.
+ */
+
+test('돌고 있는 명령은 터미널 패널에 터미널로 선다 — 끝나면 어떤 이유로든 내려간다', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', '작업')
+
+  // 실행 창에서 데브 서버를 켜고 창을 닫는다
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm dev')
+  await page.getByTestId('run-add').click()
+  await page.getByTestId('run-command-0').click()
+  await page.getByTestId('run-exec').click()
+  await expect(page.getByTestId('run-running-0')).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  // 터미널 탭: 셸 옆에 명령 터미널이 서 있고, 로그가 흐르고, 탭에 점이 남는다
+  await page.getByTestId('evidence-tab-terminal').click()
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toBeVisible()
+  await expect(page.getByTestId('terminal-tab-running')).toBeVisible()
+  await page.evaluate(() => {
+    const w = window as never as { __mock: any; __store: any }
+    const pid = Object.keys(w.__store.getState().projects)[0]
+    w.__mock.emitCommandOutput(pid, 'pnpm dev', '서버가 5173에서 듣는 중\r\n')
+  })
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toContainText('5173')
+
+  // 패널을 접어도 "돌고 있다"는 접히지 않는다 — 점을 누르면 다시 열린다
+  await page.getByTestId('evidence-close').click()
+  await expect(page.getByTestId('evidence-rail-running')).toBeVisible()
+  await page.getByTestId('evidence-rail-running').click()
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toBeVisible()
+
+  // 크래시 — 터미널이 내려가고 뱃지도 꺼진다. 로그는 실행 창에 남는다
+  await page.evaluate(() => {
+    const w = window as never as { __mock: any; __store: any }
+    const pid = Object.keys(w.__store.getState().projects)[0]
+    w.__mock.exitCommand(pid, 'pnpm dev', 1)
+  })
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toBeHidden()
+  await expect(page.getByTestId('terminal-tab-running')).toBeHidden()
+
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-command-0').click()
+  await expect(page.getByTestId('run-exit-0')).toContainText('exit 1')
+  await expect(page.getByTestId('run-log')).toContainText('5173')
+})
+
+test('명령 터미널의 ×는 정지다 — Stop의 결말(exit)로 터미널이 내려가고 셸은 산다', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', '작업')
+
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm dev')
+  await page.getByTestId('run-add').click()
+  await page.getByTestId('run-command-0').click()
+  await page.getByTestId('run-exec').click()
+  await page.keyboard.press('Escape')
+
+  await page.getByTestId('evidence-tab-terminal').click()
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toBeVisible()
+  await page.getByTestId('cmd-term-stop-pnpm dev').click()
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toBeHidden()
+
+  // 내려간 것은 명령 칸뿐이다 — 셸 터미널은 그대로 산다
+  const shells = page.getByTestId('terminal-stack').locator('[data-testid^="terminal-mock-term-"]')
+  await expect(shells.first()).toBeVisible()
 })
 
 /*

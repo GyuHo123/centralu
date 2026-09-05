@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal as Xterm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import type { TerminalInfo } from '@cc/protocol'
+import type { CommandRunInfo, TerminalInfo } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { CloseIcon, PlusIcon } from '../../components/icons.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
@@ -23,6 +23,17 @@ export function TerminalPane({ projectId }: { projectId: string }) {
   const platform = usePlatform()
   const [terminals, setTerminals] = useState<TerminalInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /*
+   * 실행 중인 자주 쓰는 명령 (#60, 사용자 결정 2026-09-06) — **도는 동안만** 터미널
+   * 하나로 선다. 어떤 이유로든 끝나면(정상·크래시·Stop) 그 터미널은 내려간다:
+   * 장부의 running이 꺼지는 순간이 곧 철거다. 지난 로그는 실행 창(CommandRunner)이
+   * 정본으로 들고 있다 — 여기는 "지금 돌고 있는 것"의 자리다.
+   * 레코드 참조를 그대로 골라야 한다 — 셀렉터가 매번 새 배열을 만들면 무한 리렌더다.
+   */
+  const cmdRuns = useStore((s) => s.commandRuns[projectId])
+  const runningCmds = Object.values(cmdRuns ?? {})
+    .filter((r) => r.running)
+    .sort((a, b) => a.startedAt - b.startedAt)
 
   /*
    * 요청 세대 번호. 목록을 기다리는 사이 프로젝트를 바꾸면 늦은 응답이
@@ -88,9 +99,11 @@ export function TerminalPane({ projectId }: { projectId: string }) {
         </p>
       )}
 
-      <CommandsSection projectId={projectId} />
-
       <div className="flex min-h-0 flex-1 flex-col" data-testid="terminal-stack">
+        {/* 명령 터미널이 위 — 방금 실행한 것이 스크롤 없이 보여야 한다. 셸은 늘 그 아래 산다 */}
+        {runningCmds.map((r) => (
+          <CommandTerminal key={r.runId} projectId={projectId} run={r} />
+        ))}
         {/*
           닫을 id는 TerminalView가 넘겨준다 — 재시작하면 host가 **새 id**를 발급하는데,
           목록의 t.terminalId로 닫으면 죽은 옛 id를 닫아서 닫기가 영영 안 먹었다.
@@ -103,146 +116,39 @@ export function TerminalPane({ projectId }: { projectId: string }) {
   )
 }
 
-const NO_COMMANDS: string[] = []
-
 /**
- * 자주 쓰는 명령어 (#44 → #60에서 창 → 터미널 패널의 붙박이로).
+ * 실행 중인 명령 하나 — 셸 터미널과 나란히 서는 칸 (#60 최종 형태).
  *
- * 창(CommandRunnerOverlay)이던 시절의 문제는 창이라는 것 자체였다: 데브 서버를
- * 돌려놓고 창을 닫으면 — 특히 그리드에서 칸을 내리면 — 돌고 있다는 사실이 화면
- * 어디에도 없었다. 실행 메커니즘은 그대로다: host의 **명령 전용 PTY**(셸에 타이핑이
- * 아니다 — 그래서 죽는 순간이 exit 이벤트로 온다), 명령별 마지막 실행 로그 하나가
- * host 버퍼에(재실행 전까지). 여기는 그 장부(store.commandRuns)의 투영일 뿐이라
- * 접었다 펴도 지울 것도 저장할 것도 없다.
- *
- * 접힘 규칙: 기본은 **도는 동안 펴짐** — 끝나면(정상이든 크래시든) 한 줄로 접히고
- * 종료 코드가 그 줄에 남는다. 크래시 로그는 줄을 누르면 다시 펴 볼 수 있다.
- * 사람이 손댄 접힘/펴짐은 그 명령의 다음 실행까지 기본을 이긴다.
+ * ×는 닫기가 아니라 **정지**다: 이 칸은 실행이 있는 동안만 존재하므로 둘은 같은
+ * 뜻이다. Stop의 결말도 exit 이벤트로 돌아와 장부가 꺼지고, 그 순간 칸이 내려간다.
  */
-function CommandsSection({ projectId }: { projectId: string }) {
-  const commands = useStore((s) => s.projects[projectId]?.commands ?? NO_COMMANDS)
-  const runs = useStore((s) => s.commandRuns[projectId])
-  const save = useStore((s) => s.setProjectCommands)
-  const runCommand = useStore((s) => s.runCommand)
+function CommandTerminal({ projectId, run }: { projectId: string; run: CommandRunInfo }) {
   const stopCommand = useStore((s) => s.stopCommand)
-  const loadCommandRuns = useStore((s) => s.loadCommandRuns)
-  const [draft, setDraft] = useState('')
-  /** 사람이 정한 접힘/펴짐 — 없으면 "도는 동안 펴짐"이 기본이다 */
-  const [expand, setExpand] = useState<Record<string, boolean>>({})
-
-  // UI가 리로드돼도 host의 실행은 계속이다 — 열릴 때 장부를 다시 읽어야 뱃지가 참이다
-  useEffect(() => {
-    void loadCommandRuns(projectId)
-  }, [loadCommandRuns, projectId])
-
-  const add = () => {
-    const next = draft.trim()
-    if (!next) return
-    setDraft('')
-    void save(projectId, [...commands, next])
-  }
-
-  const run = (c: string) => {
-    // 실행은 사람의 접힘 결정을 지운다 — 새 실행은 기본(도는 동안 펴짐)으로 돌아간다
-    setExpand(({ [c]: _drop, ...rest }) => rest)
-    void runCommand(projectId, c)
-  }
-
   return (
-    <section className="flex max-h-[50%] shrink-0 flex-col border-b border-edge" data-testid="commands-section">
-      <div className="px-3 pt-1">
-        <span className="text-[10px] uppercase tracking-[0.12em] text-slate">Commands</span>
-      </div>
-      <div className="min-h-0 overflow-y-auto">
-        {commands.map((c, i) => {
-          const r = runs?.[c]
-          const open = expand[c] ?? !!r?.running
-          return (
-            <div key={`${i}-${c}`} data-testid={`cmd-row-${i}`}>
-              <div className="group/cmd flex items-center gap-1.5 px-2 py-1">
-                {/* 이름 줄이 곧 접힘/펴짐 과녁 — 로그는 host에 있으니 펴는 건 공짜다 */}
-                <button
-                  type="button"
-                  data-testid={`cmd-toggle-${i}`}
-                  onClick={() => setExpand((prev) => ({ ...prev, [c]: !open }))}
-                  className="readout min-w-0 flex-1 truncate text-left text-[11px] text-ash transition-colors hover:text-chalk"
-                  title={open ? `${c} — collapse log` : `${c} — expand log`}
-                >
-                  {c}
-                </button>
-                {r?.running && (
-                  <span
-                    className="size-1.5 shrink-0 animate-pulse rounded-full bg-chalk"
-                    data-testid={`cmd-running-${i}`}
-                    aria-label="running"
-                  />
-                )}
-                {r && !r.running && (
-                  <span className="readout shrink-0 text-[10px] text-slate" data-testid={`cmd-exit-${i}`}>
-                    exit {r.exitCode ?? '?'}
-                  </span>
-                )}
-                <button
-                  type="button"
-                  data-testid={`cmd-run-${i}`}
-                  onClick={() => run(c)}
-                  className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] text-chalk transition-colors hover:border-graphite"
-                >
-                  {r?.running ? 'Restart' : 'Run'}
-                </button>
-                {r?.running && (
-                  <button
-                    type="button"
-                    data-testid={`cmd-stop-${i}`}
-                    onClick={() => void stopCommand(projectId, c)}
-                    className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] text-ash transition-colors hover:border-graphite hover:text-chalk"
-                  >
-                    Stop
-                  </button>
-                )}
-                {/* 지우기는 실행과 다른 과녁 — 잘못 눌러 되돌릴 수 없는 쪽은 hover에만 보인다 */}
-                <button
-                  type="button"
-                  data-testid={`cmd-delete-${i}`}
-                  aria-label={`Remove ${c}`}
-                  onClick={() => void save(projectId, commands.filter((_, j) => j !== i))}
-                  className="shrink-0 rounded px-0.5 text-slate opacity-0 transition-opacity hover:text-chalk focus:opacity-100 group-hover/cmd:opacity-100"
-                >
-                  <CloseIcon size={10} />
-                </button>
-              </div>
-              {open && r && (
-                <div className="h-40 shrink-0 border-t border-edge/60" data-testid={`cmd-log-${i}`}>
-                  {/* runId가 정체성 — 재실행이면 새 스트림을 처음부터 다시 그린다 */}
-                  <CommandLog key={r.runId} projectId={projectId} command={c} runId={r.runId} />
-                </div>
-              )}
-            </div>
-          )
-        })}
-        {/* 등록 — 마지막 줄은 언제나 하나 더 추가하는 줄 (쓰고 싶은 순간이 곧 등록하는 순간) */}
-        <div className="flex items-center gap-1.5 px-2 py-1">
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') add()
-            }}
-            placeholder="Add a command (runs in the project directory)"
-            data-testid="cmd-add-input"
-            className="readout min-w-0 flex-1 rounded border border-edge bg-void px-1.5 py-0.5 text-[11px] text-chalk placeholder:text-slate focus:border-graphite focus:outline-none"
-          />
-          <button
-            type="button"
-            data-testid="cmd-add"
-            onClick={add}
-            className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] text-ash transition-colors hover:border-graphite hover:text-chalk"
+    <div
+      className="flex min-h-0 flex-1 flex-col border-b border-edge last:border-b-0"
+      data-testid={`cmd-term-${run.command}`}
+    >
+      <div className="flex items-center gap-1.5 px-2 py-0.5">
+        <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-chalk" aria-label="running" />
+        <span className="readout truncate text-[10px] text-slate" title={run.command}>
+          {run.command}
+        </span>
+        <span className="ml-auto">
+          <IconButton
+            label="Stop the command (the log stays in the run window)"
+            onClick={() => void stopCommand(projectId, run.command)}
+            testId={`cmd-term-stop-${run.command}`}
+            align="right"
           >
-            Add
-          </button>
-        </div>
+            <CloseIcon size={11} />
+          </IconButton>
+        </span>
       </div>
-    </section>
+      <div className="min-h-0 flex-1">
+        <CommandLog projectId={projectId} command={run.command} runId={run.runId} />
+      </div>
+    </div>
   )
 }
 

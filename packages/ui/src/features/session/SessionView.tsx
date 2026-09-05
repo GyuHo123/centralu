@@ -6,12 +6,14 @@ import { EMPTY_DRAFT, useStore, type ChatAttachment, type ChatItem, type Draft }
 import { useFocusedSession } from '../../store/selectors.js'
 import { ApprovalCard } from '../approval/ApprovalCard.jsx'
 import { QuestionCard } from '../approval/QuestionCard.jsx'
-import { ChevronIcon, CloseIcon, PlayIcon, PlusIcon, RestartIcon, SendIcon } from '../../components/icons.jsx'
+import { ChevronIcon, CloseIcon, PlusIcon, RestartIcon, SendIcon } from '../../components/icons.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
 import { Kbd, StateDot } from '../../components/primitives.jsx'
 import { Modal } from '../../components/Modal.jsx'
 import { DragRegion } from '../../components/DragRegion.jsx'
 import { Markdown } from './Markdown.jsx'
+import { RunMenu } from './RunMenu.jsx'
+import { CommandRunnerOverlay } from './CommandRunner.jsx'
 import { SessionSettings } from './SessionSettings.jsx'
 import { AutocompleteMenu, useAutocomplete, type Suggestion } from './Autocomplete.jsx'
 import { onFirstLine, onLastLine, sentMessages, stepHistory } from './history.js'
@@ -132,6 +134,15 @@ export function SessionPane({
   const restarting = useStore((s) => !!s.resuming[sessionId])
   const markRead = useStore((s) => s.markRead)
 
+  /*
+   * Whether the Run menu is open — held here rather than inside it (issue #44).
+   *
+   * In the grid this header is the handle that moves the panel, and `draggable` reaches
+   * everything inside it: press on a menu row, move a few pixels, and the browser drags the
+   * panel instead of letting the click land. The header already learned the neighbouring
+   * half of this lesson — a `draggable` ancestor is why the whole cell stopped being one.
+   */
+  const [runOpen, setRunOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const loadHistory = useStore((s) => s.loadHistory)
@@ -177,29 +188,14 @@ export function SessionPane({
       */}
       <span className="ml-auto flex shrink-0 items-center gap-2">
         {/*
-          The project's saved shell commands (issue #44 → #60 → the terminal panel).
-          The runner used to be an overlay in this pane; now the commands live in the
-          evidence panel's terminal tab, where a running dev server stays visible after
-          this pane is gone. This button is the shortcut there — from the grid it lands
-          on the focus view of **this pane's** project, terminal tab open.
+          The project's saved shell commands (issue #44). Before restart because it is the
+          everyday one — restart is a repair.
 
-          The orchestrator has no project, and with no project there is no directory to
-          run in. So it gets no button rather than an empty panel jump.
+          The orchestrator has no project, and with no project there is no directory to run
+          in and no terminal to run it in. So it gets no button rather than an empty menu:
+          an entry that could never have anything in it is a worse answer than no entry.
         */}
-        {session.projectId && (
-          <IconButton
-            label="Commands — run in the terminal panel"
-            onClick={() => {
-              const st = useStore.getState()
-              st.focusSession(session.id)
-              st.setPanelTab('terminal')
-            }}
-            testId="run-open"
-            align="right"
-          >
-            <PlayIcon />
-          </IconButton>
-        )}
+        {session.projectId && <RunMenu open={runOpen} onOpenChange={setRunOpen} />}
         {/* 도구가 먹통이 됐을 때 세션을 새로 만들면 맥락이 끊긴다 — 프로세스만 갈아 끼운다 */}
         {/*
           누르는 동안 **아이콘이 돌고 버튼이 잠긴다.**
@@ -238,7 +234,8 @@ export function SessionPane({
       {headerDrag ? (
         <div
           className={`${HEADER} cursor-grab active:cursor-grabbing`}
-          draggable
+          // Not while the Run menu is open — see the note on `runOpen`
+          draggable={!runOpen}
           onDragStart={headerDrag}
           data-testid="pane-header"
         >
@@ -268,6 +265,11 @@ export function SessionPane({
       {!session.live && <DormantNote sessionId={session.id} />}
 
       <Composer sessionId={session.id} />
+
+      {/* 자주 쓰는 명령어 창 (#60) — 칸 안에 뜬다. 그리드 칸이면 그 칸 크기의 창이다 */}
+      {runOpen && session.projectId && (
+        <CommandRunnerOverlay projectId={session.projectId} onClose={() => setRunOpen(false)} />
+      )}
     </section>
   )
 }
