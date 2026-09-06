@@ -12,13 +12,23 @@ import { useStore } from '../../store/store.js'
  * 세션에게 말하고 싶다는 뜻일 수 있으므로 보통 메시지로 나간다 — 가로채기가
  * 넓어질수록 "보냈는데 안 갔다"는 놀람의 표면적도 넓어진다.
  */
-export type GuiCommand = { name: string; description: string; run: () => void }
+export type GuiCommand = {
+  name: string
+  description: string
+  run: (ctx: { sessionId: string }) => void
+}
 
 export const GUI_COMMANDS: GuiCommand[] = [
   {
     name: 'usage',
     description: 'Plan limits & rate windows',
     run: () => useStore.getState().toggleUsage(true),
+  },
+  {
+    name: 'model',
+    description: 'Model, effort, permissions — this session',
+    // CLI의 /model에 해당하는 화면은 이미 있다 — 입력창 아래 설정 메뉴가 그것이다
+    run: ({ sessionId }) => useStore.getState().requestSettingsMenu(sessionId),
   },
   {
     name: 'settings',

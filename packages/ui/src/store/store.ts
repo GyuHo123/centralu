@@ -461,6 +461,12 @@ export type AppState = {
   /** 사용량 모달 (FR-9) */
   usageOpen: boolean
   settingsOpen: boolean
+  /**
+   * 세션 설정 메뉴(모델·강도·권한)를 열라는 요청 (2026-09-07, `/model` GUI 커맨드).
+   * 메뉴의 열림 상태는 SessionSettings의 지역 상태다 — 여기는 신호만 나른다.
+   * `at`이 있어야 같은 세션에 두 번 연달아 요청해도 매번 열린다.
+   */
+  settingsMenuRequest: { sessionId: string; at: number } | null
   notifyPolicy: NotifyPolicy
   /**
    * 이 설치가 레지스트리에 비해 어디쯤인가 (이슈 #43).
@@ -518,6 +524,8 @@ export type AppState = {
   togglePalette(open?: boolean): void
   toggleUsage(open?: boolean): void
   toggleSettings(open?: boolean): void
+  /** `/model` GUI 커맨드 — 그 세션의 설정 메뉴(모델·강도·권한)를 연다 */
+  requestSettingsMenu(sessionId: string): void
   /** 지금 확인한다 (설정의 버튼). 실패는 화면에 남되 던지지 않는다 */
   checkUpdate(force?: boolean): Promise<void>
   /** 주기 확인을 켜고 끈다 */
@@ -1038,6 +1046,7 @@ export const useStore = create<AppState>((set, get) => ({
   notices: [] as Notice[],
   viewerPath: null,
   paletteOpen: false,
+  settingsMenuRequest: null as { sessionId: string; at: number } | null,
   usageOpen: false,
   settingsOpen: false,
   notifyPolicy: DEFAULT_NOTIFY_POLICY,
@@ -1850,6 +1859,9 @@ export const useStore = create<AppState>((set, get) => ({
   },
   toggleSettings(open) {
     set((s) => ({ settingsOpen: open ?? !s.settingsOpen }))
+  },
+  requestSettingsMenu(sessionId) {
+    set({ settingsMenuRequest: { sessionId, at: Date.now() } })
   },
 
   /*

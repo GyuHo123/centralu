@@ -3530,6 +3530,12 @@ test('/usage 엔터는 메시지가 아니라 사용량 화면을 연다 — 인
   await page.getByTestId('prompt-input').press('Enter')
   await expect(page.getByTestId('usage-modal')).toBeHidden()
   await expect.poll(() => page.evaluate(userCount, id)).toBe(before + 1)
+
+  // /model은 CLI의 그 화면이 이미 여기 있다 — 이 세션의 설정 메뉴가 열린다
+  await page.getByTestId('prompt-input').fill('/model')
+  await page.getByTestId('prompt-input').press('Enter')
+  await expect(page.getByTestId('settings-menu')).toBeVisible()
+  expect(await page.evaluate(userCount, id)).toBe(before + 1)
 })
 
 test('자동완성으로 넣은 값에도 입력창 높이가 따라온다', async ({ page }) => {

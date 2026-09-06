@@ -216,6 +216,14 @@ export function SessionSettings({
     return () => window.clearTimeout(t)
   }, [closing])
 
+  // `/model` GUI 커맨드 (2026-09-07) — 입력창에서 이 세션의 메뉴를 열라는 신호
+  const menuRequest = useStore((s) => s.settingsMenuRequest)
+  useEffect(() => {
+    if (menuRequest?.sessionId !== sessionId) return
+    setClosing(false)
+    setOpen(true)
+  }, [menuRequest, sessionId])
+
   /*
    * **골라도 닫지 않는다** (사용자 요청 2026-09-06). 처음엔 "고르면 닫되 모델만
    * 예외"였는데, 강도를 고르면 내려가고 모델은 남는 비대칭이 오히려 예측을 깼다.

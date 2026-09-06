@@ -435,7 +435,7 @@ const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
     if (gui) {
       setRecall(null)
       setDraft(sessionId, EMPTY_DRAFT)
-      gui.run()
+      gui.run({ sessionId })
       return
     }
     const next = ac.apply(item)
@@ -526,7 +526,7 @@ const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
         if (gui) {
           setRecall(null)
           setDraft(sessionId, EMPTY_DRAFT)
-          gui.run()
+          gui.run({ sessionId })
           return
         }
         /*
