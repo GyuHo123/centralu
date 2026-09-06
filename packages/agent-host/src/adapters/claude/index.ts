@@ -313,19 +313,18 @@ class ClaudeSession implements SessionHandle {
 
   send(text: string): void {
     /*
-     * /goal은 헤드리스 SDK에 **없다** (실측 2026-09-07, smoke-goal.mts): 원류에
-     * active_goal도 local_command_output도 0건 — CLI의 /goal은 대화형 클라이언트의
-     * 기능이고, SDK엔 골을 거는 API가 없다. 그냥 보내면 모델이 글자를 읽고 골
-     * **역할극**을 한다 ("Goal achieved!" — 훅 없이 말만). 조용한 거짓말보다
-     * 정직한 한 줄이 낫다. SDK가 골 API를 열면 이 가로채기가 그 배선 자리다
-     * (active_goal 수신 쪽은 이미 배선돼 있다).
+     * /goal은 아직 대화형 CLI 전용이다 (실측 2026-09-07, 0.3.231과 최신 0.3.263
+     * 양쪽에서 재측정): 헤드리스 원류에 active_goal도 local_command_output도 0건,
+     * 세팅 API도 타입 어디에도 없다. 그냥 보내면 모델이 글자를 읽고 골 **역할극**을
+     * 한다 ("Goal achieved!" — 훅 없이 말만). 조용한 거짓말보다 정직한 한 줄이 낫다.
+     * SDK가 이 경로를 열면 이 가로채기가 그 배선 자리다 (active_goal 수신은 배선 완료).
      */
     if (/^\/goal(\s|$)/.test(text.trim())) {
       this.emit({
         type: 'message_delta',
         sessionId: this.sessionId,
         role: 'assistant',
-        text: 'Goals are not available for Claude sessions yet — the SDK has no goal API, and sending /goal as a message would only make the model role-play the hook. Codex sessions support /goal.',
+        text: 'Goals currently need the interactive Claude CLI — the headless SDK path has no way to set one yet, and sending /goal as a message would only make the model role-play the hook.',
       })
       this.emit({ type: 'turn_complete', sessionId: this.sessionId })
       return

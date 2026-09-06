@@ -84,7 +84,7 @@ async function claudeSmoke() {
   h.send('/goal a file named done.txt exists in this directory')
   const notice = await waitFor(
     events,
-    (e) => e.type === 'message_delta' && /not available for Claude/.test(e.text ?? ''),
+    (e) => e.type === 'message_delta' && /interactive Claude CLI/.test(e.text ?? ''),
     5_000,
   )
   console.log('[claude] 정직한 거절 한 줄:', notice ? 'O' : 'X (안 옴)')

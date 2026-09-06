@@ -104,7 +104,7 @@ describe('claude /goal — SDK에 없는 기능의 정직한 거절', () => {
 
     handle.send('/goal 테스트 전부 초록')
     await tick()
-    expect(events.some((e) => e.type === 'message_delta' && /not available for Claude/.test(e.text ?? ''))).toBe(true)
+    expect(events.some((e) => e.type === 'message_delta' && /interactive Claude CLI/.test(e.text ?? ''))).toBe(true)
     expect(events.some((e) => e.type === 'turn_complete')).toBe(true)
     // 모델로 가는 working 전이가 없어야 한다 — 보낸 척이 최악이다
     expect(events.some((e) => e.type === 'state_change' && e.state === 'working')).toBe(false)
