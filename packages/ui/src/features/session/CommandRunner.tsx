@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal as Xterm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -46,6 +46,16 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
   /** 별칭을 고치는 중인 명령 (명령 문자열이 키다) */
   const [renaming, setRenaming] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
+  /** 닫힘 애니메이션 중 — 내려온 길로 도로 올라간 뒤에야 onClose로 unmount한다 */
+  const [leaving, setLeaving] = useState(false)
+  const leave = useCallback(() => setLeaving(true), [])
+
+  // reduced-motion이면 animationend가 안 온다 — 타이머가 unmount를 보증한다 (설정 메뉴와 같은 규칙)
+  useEffect(() => {
+    if (!leaving) return
+    const t = window.setTimeout(onClose, 200)
+    return () => window.clearTimeout(t)
+  }, [leaving, onClose])
 
   // 열 때 host의 실행 장부를 읽는다 — 창을 닫아도 실행은 계속되므로 다시 열면 이어 보인다.
   // (그리드에는 증거 패널이 없어서 여기서도 읽어야 한다 — UI 리로드 직후의 그리드 경로)
@@ -59,11 +69,11 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
       e.stopPropagation()
       // 별칭 입력 중이면 Esc는 입력 취소다 — 창까지 닫으면 두 단계가 한 번에 무너진다
       if (renaming !== null) setRenaming(null)
-      else onClose()
+      else leave()
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [onClose, renaming])
+  }, [leave, renaming])
 
   // 실행·정지는 스토어 장부를 거친다 — 터미널 패널·탭 뱃지가 같은 사실을 본다 (실패 토스트도 거기서)
   const run = (command: string) => void runCommand(projectId, command)
@@ -98,7 +108,7 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
       className="absolute inset-0 z-40 flex items-start justify-end bg-void/40 px-2 pb-4 pt-8"
       data-testid="run-menu"
       onMouseDown={(e) => {
-        if (e.target === rootRef.current) onClose()
+        if (e.target === rootRef.current) leave()
       }}
     >
       {/*
@@ -106,11 +116,16 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
         목록 몇 줄에 과한 무게였다). 위에서 내려오는 cc-drop이 출처를 말해 준다.
         창은 내용만큼만 서고, 로그를 열면 아래로 자란다.
       */}
-      <div className="cc-drop flex max-h-full w-[min(560px,100%)] flex-col overflow-hidden rounded border border-edge bg-panel shadow-[0_16px_48px_-8px_rgb(0_0_0/0.9)]">
+      <div
+        onAnimationEnd={() => leaving && onClose()}
+        className={`flex max-h-full w-[min(560px,100%)] flex-col overflow-hidden rounded border border-edge bg-panel shadow-[0_16px_48px_-8px_rgb(0_0_0/0.9)] ${
+          leaving ? 'cc-drop-out pointer-events-none' : 'cc-drop'
+        }`}
+      >
         <div className="flex items-center gap-1.5 border-b border-edge px-3 py-1.5">
           <span className="text-[11px] uppercase tracking-[0.12em] text-slate">Commands</span>
           <span className="ml-auto">
-            <IconButton label="Close" onClick={onClose} testId="run-close" align="right">
+            <IconButton label="Close" onClick={leave} testId="run-close" align="right">
               <CloseIcon size={12} />
             </IconButton>
           </span>

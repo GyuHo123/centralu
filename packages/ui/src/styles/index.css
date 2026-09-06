@@ -409,6 +409,27 @@
   }
 }
 
+/* cc-drop의 퇴장 짝 — 내려온 길로 도로 올라가며 사라진다 (명령 실행 드롭다운의 닫힘) */
+@keyframes cc-drop-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+.cc-drop-out {
+  animation: cc-drop-out 140ms ease-in forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-drop-out {
+    animation: none;
+  }
+}
+
 /*
  * 누른 버튼이 **일하는 중**임을 그 자리에서 말한다.
  *
