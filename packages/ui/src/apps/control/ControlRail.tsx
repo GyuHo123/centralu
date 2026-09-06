@@ -145,19 +145,35 @@ export function ControlRail() {
         {tasks
           .filter((t) => t.status === 'active')
           .map((t) => (
-            <button
-              key={t.id}
-              className="mt-1.5 block w-full text-left"
-              onClick={() => focusSession(t.coordinatorId)}
-              data-testid={`rail-task-${t.id}`}
-            >
-              <span className="block truncate text-[11px] text-ash">
-                {t.title} <span className="text-[9px] text-slate">· {t.members.length}명</span>
-              </span>
-              <span className="block truncate text-[10px] text-slate">
-                반장: {sessions[t.coordinatorId]?.state ?? 'gone'}
-              </span>
-            </button>
+            <div key={t.id} className="mt-1.5" data-testid={`rail-task-${t.id}`}>
+              <button
+                className="block w-full text-left"
+                onClick={() => focusSession(t.coordinatorId)}
+                data-testid={`rail-task-open-${t.id}`}
+              >
+                <span className="block truncate text-[11px] text-ash">{t.title}</span>
+                <span className="block truncate text-[10px] text-slate">
+                  반장: {sessions[t.coordinatorId]?.state ?? 'gone'}
+                </span>
+              </button>
+              {/*
+                구성원 — 반장의 시야를 사람도 본다 (도그푸딩 지적 2026-09-06: 숫자만으로는
+                어느 세션들이 이 업무인지 안 보였다). 칩을 누르면 그 세션으로 간다.
+              */}
+              <div className="mt-0.5 flex flex-wrap gap-1">
+                {t.members.map((id) => (
+                  <button
+                    key={id}
+                    onClick={() => focusSession(id)}
+                    data-testid={`rail-task-member-${t.id}-${id}`}
+                    title={sessions[id] ? `${sessions[id]!.name} — ${sessions[id]!.state}` : 'session gone'}
+                    className="max-w-full truncate rounded border border-edge px-1 py-px text-[10px] text-slate transition-colors hover:border-graphite hover:text-chalk"
+                  >
+                    {sessions[id]?.name ?? '(gone)'}
+                  </button>
+                ))}
+              </div>
+            </div>
           ))}
         {tasks.some((t) => t.status === 'done') && (
           <details className="mt-1.5">

@@ -2377,6 +2377,16 @@ test('옛 대화는 버튼 클릭으로도 이어붙는다', async ({ page }) =>
    * 나머지가 끝까지 데려간다는 계약이다 (100에서 멈추는 "벽"이 그 버그였다).
    */
   await page.getByTestId('chat-stream').evaluate((el) => el.scrollTo({ top: 0 }))
+  /*
+   * 스크롤 트리거가 먼저 한 뭉치를 실어 온다 (100→200) — 그 출렁임이 끝나기 전에
+   * 버튼을 누르면 클릭이 리렌더 사이로 빠진다 (detached-retry 플레이크, 2026-09-06).
+   * 정착을 기다린 뒤 누르면 나머지(200→250)는 온전히 버튼의 몫이다 — 두 경로가
+   * 각자 제 뭉치를 책임졌다는 것까지 이 순서가 증명한다.
+   */
+  await expect.poll(() => page.evaluate(loaded, id)).toBe(200)
+  await expect
+    .poll(() => page.evaluate((sid) => (window as any).__store.getState().history[sid].loading, id))
+    .toBe(false)
   await page.getByTestId('load-older').getByRole('button').click()
   await expect.poll(() => page.evaluate(loaded, id)).toBe(250)
   // 다 불러오면 버튼도 물러난다
@@ -6908,6 +6918,14 @@ test('업무 만들기: 레일 다이얼로그 → 반장 세션 → 사이드�
   // 반장이 코어 객체로 선다: 사이드바(코어 줄)와 레일(앱 줄) 양쪽
   await expect(page.locator('[data-testid^="coordinator-row-"]')).toContainText('스킬 구현')
   await expect(page.getByTestId('rail-tasks')).toContainText('스킬 구현')
+
+  // 구성원이 이름으로 보인다 (2026-09-06) — 숫자만으로는 어느 세션들의 업무인지 안 읽혔다
+  await expect(page.getByTestId('rail-tasks')).toContainText('구성원이 될 세션')
+  // 칩을 누르면 그 세션으로 간다
+  await page.locator(`[data-testid^="rail-task-member-"][data-testid$="-${workerId}"]`).click()
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__store.getState().focusedSessionId))
+    .toBe(workerId)
   // 반장은 레일의 내 차례/진행 중에는 안 선다 — 메타 층은 Tasks 섹션의 몫
   await expect(page.locator('[data-testid^="rail-turn-coord"]')).toHaveCount(0)
 })
