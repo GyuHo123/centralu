@@ -22,6 +22,8 @@ import { shellPath } from './terminal.js'
 const require = createRequire(import.meta.url)
 
 type Pty = {
+  /** node-pty가 준 자식 pid — 그룹 킬의 과녁. pty 자식은 새 세션의 리더라 pgid == pid다 */
+  pid?: number
   onData(cb: (data: string) => void): void
   onExit(cb: (e: { exitCode: number }) => void): void
   write(data: string): void
@@ -32,6 +34,9 @@ type PtyModule = { spawn(file: string, args: string[], opts: Record<string, unkn
 
 /** 터미널과 같은 상한 — 빌드 로그 하나가 수십 MB가 되는 일이 흔하다 */
 const LOG_BYTES = 256 * 1024
+
+/** SIGTERM 뒤 이만큼 안 죽으면 SIGKILL — trap을 걸어 둔 데브 서버가 버티는 것까지 책임진다 */
+const KILL_GRACE_MS = 3000
 
 export type CommandRun = {
   command: string
@@ -66,10 +71,47 @@ export class CommandRunner {
     return `${cwd}\u0000${command}`
   }
 
+  /**
+   * 프로세스 **트리**를 죽인다 (도그푸딩 2026-09-07: Stop이 안 먹혔다).
+   *
+   * node-pty의 kill()은 pty 자식 pid **하나**에만 시그널을 보낸다. 그런데 명령은
+   * `zsh -lc <command>`로 뜨므로 실제 데브 서버는 그 아래 자식(들)이다 — 셸만 맞고
+   * 서버는 고아로 살아남아 포트를 계속 물고 있었다. pty 자식은 새 세션의 리더라
+   * pgid == pid — 그룹(-pid)으로 쏘면 exec됐든 자식으로 남았든 트리 전체가 맞는다.
+   * (win32와 pid 없는 테스트 페이크는 종전대로 pty.kill로 물러난다)
+   */
+  private killTree(handle: Pty, signal: 'SIGTERM' | 'SIGKILL'): void {
+    const pid = handle.pid
+    if (process.platform !== 'win32' && typeof pid === 'number' && Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(-pid, signal)
+        return
+      } catch {
+        // 그룹이 벌써 사라졌다 — 아래 단일 킬이 마지막 확인 사살이다
+      }
+    }
+    try {
+      handle.kill(signal)
+    } catch {
+      // 이미 죽었다
+    }
+  }
+
+  /** SIGTERM으로 정중히, 유예 안에 안 죽으면 SIGKILL. onExit이 오면 e.pty가 비어 확인이 선다 */
+  private stopEntry(e: Entry): void {
+    const handle = e.pty
+    if (!handle) return
+    this.killTree(handle, 'SIGTERM')
+    const t = setTimeout(() => {
+      if (e.pty === handle) this.killTree(handle, 'SIGKILL')
+    }, KILL_GRACE_MS)
+    t.unref?.()
+  }
+
   /** 실행. 같은 명령이 돌고 있으면 죽이고 새로 시작한다 (사용자 결정) */
   run(cwd: string, command: string, cols = 100, rows = 30): CommandRun {
     const existing = this.entries.get(this.key(cwd, command))
-    existing?.pty?.kill()
+    if (existing) this.stopEntry(existing)
 
     const entry: Entry = {
       cwd,
@@ -87,7 +129,8 @@ export class CommandRunner {
 
   /** 데브 서버를 끄는 버튼의 뒷면. 로그는 남는다 — 종료도 결과다 */
   stop(cwd: string, command: string): void {
-    this.entries.get(this.key(cwd, command))?.pty?.kill()
+    const e = this.entries.get(this.key(cwd, command))
+    if (e) this.stopEntry(e)
   }
 
   /** 그 디렉토리에서 실행된 적 있는 명령들의 상태 (목록의 뱃지용 — 로그는 뺀다) */
@@ -117,7 +160,8 @@ export class CommandRunner {
   }
 
   disposeAll(): void {
-    for (const e of this.entries.values()) e.pty?.kill()
+    // 앱 종료 — 유예를 기다려 줄 프로세스가 이제 없다. 고아 데브 서버가 최악이므로 바로 SIGKILL
+    for (const e of this.entries.values()) if (e.pty) this.killTree(e.pty, 'SIGKILL')
     this.entries.clear()
   }
 

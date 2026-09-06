@@ -16,10 +16,13 @@ function fakePty() {
     emitExit: (code: number) => void
   }[] = []
   const mod = {
+    /** 실제 pid를 주면 그룹 킬 경로가 산다 — 반드시 process.kill을 모킹한 테스트에서만 줄 것 */
+    pid: undefined as number | undefined,
     spawn(_file: string, args: string[], _opts: Record<string, unknown>) {
       let onData = (_d: string) => {}
       let onExit = (_e: { exitCode: number }) => {}
       const inst = {
+        pid: mod.pid,
         args,
         write: vi.fn(),
         resize: vi.fn(),
@@ -121,5 +124,81 @@ describe('CommandRunner', () => {
     svc.run('/tmp/b', 'pnpm dev')
     expect(fake.instances).toHaveLength(2)
     expect(svc.state('/tmp/a')).toHaveLength(1)
+  })
+})
+
+/**
+ * Stop이 안 먹히던 버그 (도그푸딩 2026-09-07): node-pty kill()은 pty 자식 pid 하나에만
+ * 시그널을 보내는데, 명령은 `zsh -lc`로 떠서 실제 서버는 그 아래 트리였다.
+ * 계약: pid가 있으면 프로세스 **그룹**(-pid)으로 SIGTERM, 유예 안에 안 죽으면 SIGKILL.
+ */
+describe('CommandRunner — 트리 킬', () => {
+  it('stop은 프로세스 그룹에 SIGTERM을 보내고, 유예가 지나도 살아 있으면 SIGKILL한다', () => {
+    vi.useFakeTimers()
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    try {
+      const fake = fakePty()
+      fake.mod.pid = 54321
+      const svc = new CommandRunner(() => {})
+      stub(svc, fake.mod)
+
+      svc.run('/tmp/p', 'pnpm dev')
+      svc.stop('/tmp/p', 'pnpm dev')
+      expect(killSpy).toHaveBeenCalledWith(-54321, 'SIGTERM')
+      // 단일 pid 킬로 물러나지 않았다 — 그룹이 과녁이다
+      expect(fake.instances[0]!.kill).not.toHaveBeenCalled()
+
+      vi.advanceTimersByTime(3000)
+      expect(killSpy).toHaveBeenCalledWith(-54321, 'SIGKILL')
+    } finally {
+      killSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('유예 안에 죽으면 SIGKILL은 없다 — 정중한 종료가 존중된다', () => {
+    vi.useFakeTimers()
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    try {
+      const fake = fakePty()
+      fake.mod.pid = 54321
+      const svc = new CommandRunner(() => {})
+      stub(svc, fake.mod)
+
+      svc.run('/tmp/p', 'pnpm dev')
+      svc.stop('/tmp/p', 'pnpm dev')
+      fake.instances[0]!.emitExit(143) // SIGTERM을 받고 죽었다
+      vi.advanceTimersByTime(3000)
+      expect(killSpy).not.toHaveBeenCalledWith(-54321, 'SIGKILL')
+    } finally {
+      killSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('앱 종료(disposeAll)는 그룹을 바로 SIGKILL한다 — 유예를 기다릴 프로세스가 없다', () => {
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    try {
+      const fake = fakePty()
+      fake.mod.pid = 54321
+      const svc = new CommandRunner(() => {})
+      stub(svc, fake.mod)
+
+      svc.run('/tmp/p', 'pnpm dev')
+      svc.disposeAll()
+      expect(killSpy).toHaveBeenCalledWith(-54321, 'SIGKILL')
+    } finally {
+      killSpy.mockRestore()
+    }
+  })
+
+  it('pid가 없으면(페이크·win32) 종전처럼 pty.kill로 물러난다', () => {
+    const fake = fakePty()
+    const svc = new CommandRunner(() => {})
+    stub(svc, fake.mod)
+
+    svc.run('/tmp/p', 'pnpm dev')
+    svc.stop('/tmp/p', 'pnpm dev')
+    expect(fake.instances[0]!.kill).toHaveBeenCalledWith('SIGTERM')
   })
 })
