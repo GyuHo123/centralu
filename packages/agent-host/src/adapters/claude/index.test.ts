@@ -88,3 +88,32 @@ describe('claude 스트림이 예고 없이 끝날 때', () => {
     )
   })
 })
+
+/**
+ * /goal은 헤드리스 SDK에 없다 (실측 2026-09-07, smoke-goal.mts — 원류에 active_goal
+ * 0건). 보내면 모델이 골 역할극을 한다 — 가로채서 정직한 한 줄을 답하는지 본다.
+ */
+describe('claude /goal — SDK에 없는 기능의 정직한 거절', () => {
+  it('/goal은 모델에게 가지 않고 안내 한 줄 + 턴 종료로 답한다', async () => {
+    const events: NormalizedEvent[] = []
+    const adapter = new ClaudeAdapter()
+    const handle = await adapter.createSession(
+      { sessionId: 's3', cwd: '/tmp', permissionPreset: 'normal' },
+      (e) => events.push(e),
+    )
+
+    handle.send('/goal 테스트 전부 초록')
+    await tick()
+    expect(events.some((e) => e.type === 'message_delta' && /not available for Claude/.test(e.text ?? ''))).toBe(true)
+    expect(events.some((e) => e.type === 'turn_complete')).toBe(true)
+    // 모델로 가는 working 전이가 없어야 한다 — 보낸 척이 최악이다
+    expect(events.some((e) => e.type === 'state_change' && e.state === 'working')).toBe(false)
+
+    // 판정은 좁다 — /goal을 언급하는 진짜 메시지는 그대로 나간다
+    handle.send('/goal이 뭐하는 명령이야?')
+    await tick()
+    expect(events.some((e) => e.type === 'state_change' && e.state === 'working')).toBe(true)
+    await handle.dispose()
+    control.endStream()
+  })
+})
