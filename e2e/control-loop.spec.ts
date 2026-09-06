@@ -1106,7 +1106,7 @@ test('3레인: 증거 패널은 대화와 함께 있고 ⌘B로 접힌다 (B-0)'
   await expect(page.getByTestId('evidence-panel')).toBeVisible()
 })
 
-test('깃 패널: 변경 목록·diff·스테이징·커밋 (B-2, B-6)', async ({ page }) => {
+test('깃: diff는 넓게, 목록·스테이징·커밋은 사이드바에서 (B-2, B-6 — 2026-09-07 좌측 열 제거)', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await page.evaluate(() => {
     const m = (window as any).__mock
@@ -1117,17 +1117,19 @@ test('깃 패널: 변경 목록·diff·스테이징·커밋 (B-2, B-6)', async (
     m.gitState.diffs['src/a.ts'] = '@@ -1,2 +1,2 @@\n-옛 줄\n+새 줄\n 그대로'
   })
   await newSession(page, 'alpha', '작업')
-  await page.getByTestId('evidence-git-full').click()
 
-  await page.getByTestId('git-file-src/a.ts').click()
+  // 사이드바에서 파일을 누르면 넓은 diff가 열린다 — 넓은 화면 안에 목록은 없다
+  await page.getByTestId('evidence-file-src/a.ts').click()
   await expect(page.getByTestId('diff-view')).toBeVisible()
+  await expect(page.getByTestId('git-panel').locator('[data-testid^="git-file-"]')).toHaveCount(0)
   // 무채색 diff: 색이 아니라 기호와 밝기로 구분한다
   await expect(page.locator('[data-diff="add"]')).toContainText('새 줄')
   await expect(page.locator('[data-diff="del"]')).toContainText('옛 줄')
 
-  await page.getByTestId('git-stage-all').click()
-  await page.getByTestId('commit-message').fill('테스트 커밋')
-  await page.getByTestId('commit-button').click()
+  // 스테이징·커밋은 사이드바가 정본이다 (오버레이가 떠 있어도 보인다 — #15)
+  await page.getByTestId('evidence-stage-all').click()
+  await page.getByTestId('evidence-commit-message').fill('테스트 커밋')
+  await page.getByTestId('evidence-commit').click()
   await expect(page.getByTestId('toast')).toContainText('Committed')
   expect(await page.evaluate(() => (window as any).__mock.gitState.lastCommitMessage)).toBe('테스트 커밋')
 })
@@ -1143,8 +1145,7 @@ test('깃 패널: 복사한 diff는 그 diff 그대로다 (#36)', async ({ page 
     m.gitState.diffs['src/a.ts'] = d
   }, diff)
   await newSession(page, 'alpha', '작업')
-  await page.getByTestId('evidence-git-full').click()
-  await page.getByTestId('git-file-src/a.ts').click()
+  await page.getByTestId('evidence-file-src/a.ts').click()
   await expect(page.getByTestId('diff-view')).toBeVisible()
 
   // Drag the whole diff. Nothing here is virtualized, so every row is under the pointer —
@@ -6114,41 +6115,6 @@ test('granting a file edit refreshes the project count before the turn ends (#41
   await expect(page.getByTestId('mark-changed-alpha')).toHaveText('1')
 })
 
-/**
- * Committing from inside the app left the sidebar's count on its old value (#49).
- *
- * #41 gave that count three ways to hear that a tree had moved, and every one of them is a
- * guess that something probably happened somewhere else. The git panel meanwhile went
- * straight to `platform.git` and told only itself — so the one change we make **on purpose,
- * knowing exactly which repo it lands in**, was the only one the sidebar never heard.
- *
- * The baseline here comes through #41's own path, so what this test adds is the second half:
- * a commit, and a number beside the project name that follows it.
- */
-test('깃 패널에서 커밋하면 사이드바의 변경 수도 함께 움직인다 (#49)', async ({ page }) => {
-  await setup(page, { projects: ['/tmp/alpha'] })
-  await page.evaluate(() => {
-    const m = (window as any).__mock
-    m.gitState.files = [
-      { path: 'src/a.ts', staged: true, status: 'M' },
-      { path: 'src/b.ts', staged: true, status: 'M' },
-      { path: 'src/c.ts', staged: false, status: 'M' },
-    ]
-  })
-  await newSession(page, 'alpha', '작업')
-
-  // 기준은 #41이 놓아둔 신호로 만든다 — 여기까지는 예전에도 맞았다
-  await emitEvent(page, 0, { type: 'turn_complete' })
-  await expect(page.getByTestId('mark-changed-alpha')).toHaveText('3')
-
-  await page.getByTestId('evidence-git-full').click()
-  await page.getByTestId('commit-message').fill('올린 둘만 커밋')
-  await page.getByTestId('commit-button').click()
-  await expect(page.getByTestId('toast')).toContainText('Committed')
-
-  // 올린 둘이 나갔다 — 사이드바가 그 사실을 아는지가 이 이슈의 전부다
-  await expect(page.getByTestId('mark-changed-alpha')).toHaveText('1')
-})
 
 /**
  * 좁은 패널의 커밋도 같은 길로 간다 (#49).
@@ -6200,10 +6166,10 @@ test('스테이징과 브랜치 전환도 사이드바에 알린다 — 푸시�
   await page.getByTestId('evidence-git-full').click()
 
   await page.evaluate(() => ((window as any).__mock.gitStatusCalls = 0))
-  await page.getByTestId('git-stage-all').click()
+  await page.getByTestId('evidence-stage-all').click()
   await expect.poll(() => page.evaluate(() => (window as any).__mock.gitStatusCalls)).toBe(1)
 
-  await page.getByTestId('push-button').click()
+  await page.getByTestId('evidence-push').click()
   await expect(page.getByTestId('toast')).toContainText('Pushed')
   // 푸시는 아무것도 안 물어본다 — 위의 한 번 그대로다
   expect(await page.evaluate(() => (window as any).__mock.gitStatusCalls)).toBe(1)

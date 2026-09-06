@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { GitBranch, GitCommit, GitFileStatus } from '@cc/protocol'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { GitBranch, GitFileStatus } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { useStore } from '../../store/store.js'
 import { selectedText } from '../viewer/copy.js'
@@ -46,7 +46,14 @@ export function GitPanel({
   )
 }
 
-/** B-2 변경 탭 + B-6 스테이징·커밋·푸시 */
+/**
+ * B-2 변경 diff — **목록·스테이징·커밋은 우측 사이드바의 몫이다** (2026-09-07 좌측 열 제거).
+ *
+ * 파일 목록이 여기 또 있었는데, 사이드바의 Changes가 같은 목록을 이미 들고 있고
+ * 오버레이 중에도 보인다(#15) — 같은 목록 두 벌은 어느 쪽을 눌러야 하는지부터
+ * 헷갈리게 했다 (사용자 지적). 이 화면은 넓어야 하는 것 하나, diff만 그린다.
+ * staged 여부는 목록 없이도 필요하므로 status에서 그 파일만 찾는다.
+ */
 function Changes({
   projectId,
   initialPath,
@@ -59,40 +66,8 @@ function Changes({
   const platform = usePlatform()
   const setToast = useStore((s) => s.setToast)
   const openFile = useStore((s) => s.openFile)
-  /*
-   * Writes go through the store, reads stay on the platform (issue #49).
-   *
-   * The list below is this panel's own — nobody else holds it — so it is read straight from
-   * `platform.git.status` and repainted on the click. What the store owns is the *summary*
-   * the sidebar shows (branch, changed count), which is a different query, so the local
-   * refresh cannot be replaced by the store's: it would have to fetch something the store
-   * does not keep, 800ms late.
-   */
-  const gitStage = useStore((s) => s.gitStage)
-  const gitCommit = useStore((s) => s.gitCommit)
-  const touched = useTouchedPaths(projectId)
-  const [files, setFiles] = useState<GitFileStatus[] | null>(null)
   const [selected, setSelected] = useState<GitFileStatus | null>(null)
   const [diff, setDiff] = useState<{ diff: string; truncated: boolean; binary: boolean } | null>(null)
-  const [message, setMessage] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  const refresh = useCallback(async () => {
-    try {
-      setFiles(await platform.git.status(projectId))
-    } catch {
-      setFiles([])
-    }
-  }, [platform, projectId])
-
-  useEffect(() => {
-    void refresh()
-  }, [refresh])
-
-  // 에이전트가 파일을 바꾸면 목록을 갱신한다 (touched 경로가 늘어난 것이 신호)
-  useEffect(() => {
-    void refresh()
-  }, [touched.length, refresh])
 
   /*
    * 요청 세대 번호. 이 diff는 **승인 판단의 근거**다 — 파일을 연달아 누르면 느린 응답이
@@ -115,196 +90,36 @@ function Changes({
     [platform, projectId, setToast],
   )
 
-  /*
-   * 우측 패널에서 파일을 눌러 들어온 경우 그 diff부터 펴 준다 —
-   * 넓은 화면에 와서 목록을 다시 찾게 하면 클릭 한 번이 헛돈다
-   *
-   * The guard used to be `selected`: open the first one, then never again. That was true to
-   * the old shape, where this view covered the list it came from, so there was no second
-   * click to answer. Since the list stayed (#15) the second click is the *normal* one —
-   * you work down the changed files — and it did nothing at all: same name in the header,
-   * same diff underneath, as if the app had stopped responding.
-   *
-   * What it must not key off is `files`. Staging replaces that array, and following it would
-   * drag the diff back to whichever path the overlay was opened with, throwing away a file
-   * picked from the list in here. So: follow the click, not the list.
-   */
+  // 사이드바 클릭을 따라간다 — pick마다 한 번. 재클릭이 곧 재시도다
   const opened = useRef(-1)
   useEffect(() => {
-    if (!initialPath || !files || opened.current === pick) return
-    const hit = files.find((f) => f.path === initialPath)
-    if (!hit) return // 아직 목록에 없다면 다음 갱신 때 다시 본다
+    if (!initialPath || opened.current === pick) return
     opened.current = pick
-    void openDiff(hit)
-  }, [pick, initialPath, files, openDiff])
-
-  const staged = files?.filter((f) => f.staged) ?? []
-  const unstaged = files?.filter((f) => !f.staged) ?? []
+    let alive = true
+    void platform.git
+      .status(projectId)
+      .then((files) => {
+        if (!alive) return
+        const hit = files.find((f) => f.path === initialPath)
+        if (hit) void openDiff(hit)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [pick, initialPath, platform, projectId, openDiff])
 
   return (
     <div className="flex min-h-0 flex-1">
-      <div className="flex w-72 shrink-0 flex-col overflow-y-auto border-r border-edge">
-        {files === null ? (
-          <p className="p-3 text-[12px] text-slate">Loading…</p>
-        ) : files.length === 0 ? (
-          <p className="p-3 text-[12px] text-slate" data-testid="git-clean">
-            No changes
-          </p>
-        ) : (
-          <>
-            <FileGroup
-              title="Staged"
-              files={staged}
-              touched={touched}
-              onOpen={openDiff}
-              selected={selected}
-              action={{
-                label: 'Unstage',
-                run: async (paths) => {
-                  await gitStage(projectId, paths, true)
-                  await refresh()
-                },
-              }}
-            />
-            <FileGroup
-              title="Changed"
-              files={unstaged}
-              touched={touched}
-              onOpen={openDiff}
-              selected={selected}
-              action={{
-                label: 'Stage',
-                run: async (paths) => {
-                  await gitStage(projectId, paths)
-                  await refresh()
-                },
-              }}
-            />
-          </>
-        )}
-
-        {staged.length > 0 && (
-          <form
-            className="mt-auto border-t border-edge p-2"
-            onSubmit={async (e) => {
-              e.preventDefault()
-              setBusy(true)
-              // finally가 없으면 RPC가 던지는 순간 busy가 참으로 남아 버튼이 영영 죽는다
-              try {
-                const res = await gitCommit(projectId, message.trim())
-                if (res.ok) {
-                  setMessage('')
-                  setToast(`Committed ${staged.length} files`)
-                  await refresh()
-                } else setToast(res.message ?? 'Commit failed')
-              } catch (err) {
-                setToast(`Commit failed: ${(err as Error).message}`)
-              } finally {
-                setBusy(false)
-              }
-            }}
-          >
-            <textarea
-              className="w-full resize-none rounded border border-edge bg-panel px-2 py-1.5 text-[12px] text-chalk placeholder:text-slate focus:border-graphite focus:outline-none"
-              rows={2}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder="Commit message"
-              data-testid="commit-message"
-            />
-            <div className="mt-1.5 flex gap-1.5">
-              <button
-                className="flex-1 rounded border border-edge bg-panel px-2 py-1 text-[12px] text-chalk hover:border-graphite disabled:opacity-40"
-                disabled={busy || !message.trim()}
-                data-testid="commit-button"
-              >
-                Commit ({staged.length})
-              </button>
-              <button
-                type="button"
-                className="rounded px-2 py-1 text-[12px] text-slate hover:text-chalk"
-                data-testid="push-button"
-                onClick={async () => {
-                  // RPC가 던지면(끊김·타임아웃) 잡는 곳이 없어 성공처럼 보였다 — 조용한 실패 금지
-                  try {
-                    const res = await platform.git.push(projectId)
-                    setToast(res.ok ? 'Pushed' : (res.message ?? 'Push failed'))
-                  } catch (err) {
-                    setToast(`Push failed: ${(err as Error).message}`)
-                  }
-                }}
-              >
-                Push
-              </button>
-            </div>
-          </form>
-        )}
-      </div>
-
       <DiffView
         path={selected?.path}
         data={diff}
+        emptyHint="Pick a file from the Changes list on the right"
         onOpenInIde={async (line) => {
           if (selected) await platform.system.openInIde(selected.path, line)
         }}
         onOpenViewer={selected ? () => openFile(selected.path) : undefined}
       />
-    </div>
-  )
-}
-
-function FileGroup({
-  title,
-  files,
-  touched,
-  onOpen,
-  selected,
-  action,
-}: {
-  title: string
-  files: GitFileStatus[]
-  touched: string[]
-  onOpen: (f: GitFileStatus) => void
-  selected: GitFileStatus | null
-  action: { label: string; run: (paths: string[]) => Promise<void> }
-}) {
-  if (files.length === 0) return null
-  return (
-    <div className="border-b border-edge/60">
-      <header className="flex items-center gap-2 px-2.5 py-1.5">
-        <h3 className="text-[10px] uppercase tracking-[0.12em] text-slate">{title}</h3>
-        <span className="readout text-[10px] text-slate">{files.length}</span>
-        <button
-          className="ml-auto text-[10px] text-slate hover:text-chalk"
-          onClick={() => void action.run(files.map((f) => f.path))}
-          data-testid={`git-${action.label.toLowerCase()}-all`}
-        >
-          {action.label} all
-        </button>
-      </header>
-      <ul>
-        {files.map((f) => (
-          <li key={`${f.path}-${f.staged}`}>
-            <button
-              onClick={() => onOpen(f)}
-              data-testid={`git-file-${f.path}`}
-              className={`flex w-full items-center gap-2 px-2.5 py-1 text-left text-[12px] transition-colors ${
-                selected?.path === f.path ? 'bg-graphite/40 text-chalk' : 'text-ash hover:text-chalk'
-              }`}
-            >
-              {/* 상태는 색이 아니라 글자로 (무채색 규칙) */}
-              <span className="readout w-3 shrink-0 text-[10px] text-slate">{f.status}</span>
-              <span className="truncate">{f.path}</span>
-              {/* 에이전트가 만진 파일 — 내가 고친 것과 구분한다 (B-7) */}
-              {touched.includes(f.path) && (
-                <span className="ml-auto shrink-0 text-[9px] text-slate" title="Edited by agent">
-                  ◆
-                </span>
-              )}
-            </button>
-          </li>
-        ))}
-      </ul>
     </div>
   )
 }
@@ -328,18 +143,21 @@ function FileGroup({
 function DiffView({
   path,
   data,
+  emptyHint,
   onOpenInIde,
   onOpenViewer,
 }: {
   path?: string
   data: { diff: string; truncated: boolean; binary: boolean } | null
+  /** 아무것도 안 고른 채 열렸을 때 — 목록이 사이드바에 있으니 그쪽을 가리켜야 한다 */
+  emptyHint?: string
   onOpenInIde: (line?: number) => Promise<void>
   onOpenViewer?: () => void
 }) {
   if (!path) {
     return (
       <div className="flex flex-1 items-center justify-center text-[12px] text-slate" data-testid="diff-empty">
-        Select a file to see its diff
+        {emptyHint ?? 'Select a file to see its diff'}
       </div>
     )
   }
@@ -421,24 +239,15 @@ function DiffView({
   )
 }
 
-/** B-3 기록 탭 — 그래프 선은 그리지 않는다 (부모 관계만) */
+/**
+ * B-3 커밋 상세 — **목록은 사이드바 History의 몫이다** (2026-09-07 좌측 열 제거).
+ * 사이드바에서 커밋을 누르면 그 diff가 여기 넓게 펴진다. 다음 커밋도 사이드바에서 —
+ * 같은 목록 두 벌은 혼동이다 (Changes와 같은 판정).
+ */
 function History({ projectId, initialSha, pick }: { projectId: string; initialSha?: string | null; pick: number }) {
   const platform = usePlatform()
-  const [commits, setCommits] = useState<GitCommit[] | null>(null)
   const [detail, setDetail] = useState<{ sha: string; files: string[]; diff: string } | null>(null)
 
-  useEffect(() => {
-    void platform.git.log(projectId, 50).then(setCommits).catch(() => setCommits([]))
-  }, [platform, projectId])
-
-  /*
-   * 우측 패널의 기록에서 눌러 들어온 커밋은 바로 펼친다 —
-   * 넓은 화면에 와서 같은 커밋을 다시 찾게 하면 클릭 한 번이 헛돈다
-   *
-   * `detail` was the same once-only guard the changes tab had, and it fails the same way:
-   * the history list beside this one is still there to be clicked, and the second commit
-   * you clicked stayed unopened.
-   */
   const opened = useRef(-1)
   useEffect(() => {
     if (!initialSha || opened.current === pick) return
@@ -451,30 +260,12 @@ function History({ projectId, initialSha, pick }: { projectId: string; initialSh
 
   return (
     <div className="flex min-h-0 flex-1">
-      <ul className="w-80 shrink-0 overflow-y-auto border-r border-edge" data-testid="git-history">
-        {(commits ?? []).map((c) => (
-          <li key={c.sha}>
-            <button
-              className={`flex w-full flex-col items-start gap-0.5 px-2.5 py-1.5 text-left transition-colors ${
-                detail?.sha === c.sha ? 'bg-graphite/40' : 'hover:bg-graphite/20'
-              }`}
-              data-testid={`commit-${c.shortSha}`}
-              onClick={async () => {
-                const d = await platform.git.commitDetail(projectId, c.sha)
-                setDetail({ sha: c.sha, files: d.files, diff: d.diff })
-              }}
-            >
-              <span className="truncate text-[12px] text-chalk">{c.subject}</span>
-              <span className="readout text-[10px] text-slate">
-                {c.shortSha} · {c.author} · {new Date(c.when).toLocaleDateString('en-US')}
-                {c.parents.length > 1 && ' · merge'}
-              </span>
-            </button>
-          </li>
-        ))}
-        {commits?.length === 0 && <li className="p-3 text-[12px] text-slate">No commits</li>}
-      </ul>
-      <DiffView path={detail ? `${detail.files.length} files` : undefined} data={detail ? { diff: detail.diff, truncated: false, binary: false } : null} onOpenInIde={async () => {}} />
+      <DiffView
+        path={detail ? `${detail.files.length} files` : undefined}
+        data={detail ? { diff: detail.diff, truncated: false, binary: false } : null}
+        emptyHint="Pick a commit from the History list on the right"
+        onOpenInIde={async () => {}}
+      />
     </div>
   )
 }
@@ -573,19 +364,4 @@ function BranchList({ title, branches, onPick }: { title: string; branches: GitB
   )
 }
 
-/**
- * 이 프로젝트의 세션들이 만진 파일 (B-7).
- * 셀렉터가 매번 새 배열을 만들면 zustand 스냅샷이 불안정해져 무한 리렌더가 난다
- * (docs/state-management.md §3 — 파생 계산은 use* 훅에서 memo화한다).
- */
-function useTouchedPaths(projectId: string): string[] {
-  const sessions = useStore((s) => s.sessions)
-  return useMemo(() => {
-    const set = new Set<string>()
-    for (const sess of Object.values(sessions)) {
-      if (sess.projectId === projectId) for (const p of sess.touchedPaths) set.add(p)
-    }
-    return [...set]
-  }, [sessions, projectId])
-}
 

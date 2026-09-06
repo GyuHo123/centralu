@@ -290,12 +290,12 @@ test('넓은 목록에서 고른 파일을 목록 갱신이 되돌리지 않는�
   await page.getByTestId('evidence-file-src/a.ts').click()
   await expect(page.getByTestId('diff-view')).toContainText('첫째 파일의 줄')
 
-  // 넓은 화면 자신의 목록에서 고른 것 — 여기서 스테이지하면 목록을 다시 읽는다
-  await page.getByTestId('git-file-src/b.ts').click()
+  // 다음 파일도 사이드바에서 고른다 — 넓은 화면 안에 목록은 없다 (2026-09-07 좌측 열 제거)
+  await page.getByTestId('evidence-file-src/b.ts').click()
   await expect(page.getByTestId('diff-view')).toContainText('둘째 파일의 줄')
-  await page.getByTestId('git-stage-all').click()
-  await expect(page.getByTestId('git-unstage-all')).toBeVisible()
-  // 목록이 새로 와도 처음 들고 온 경로로 끌려가면 안 된다
+  await page.getByTestId('evidence-stage-all').click()
+  await expect(page.getByTestId('evidence-unstage-all')).toBeVisible()
+  // 스테이징으로 목록이 갈려도 보던 diff가 처음 경로로 끌려가면 안 된다
   await expect(page.getByTestId('diff-view')).toContainText('둘째 파일의 줄')
 })
 
