@@ -6911,3 +6911,36 @@ test('업무 만들기: 레일 다이얼로그 → 반장 세션 → 사이드�
   // 반장은 레일의 내 차례/진행 중에는 안 선다 — 메타 층은 Tasks 섹션의 몫
   await expect(page.locator('[data-testid^="rail-turn-coord"]')).toHaveCount(0)
 })
+
+/*
+ * 반장 옆에 남의 프로젝트 증거가 서면 안 된다 (도그푸딩 지적 2026-09-06).
+ *
+ * 반장은 오케스트레이터 홈에서 프로젝트 없이 돈다 — 그런데 증거 패널이 "직전에 보던
+ * 프로젝트"로 폴백해서, 반장을 열면 마지막 프로젝트의 파일·깃 기록이 옆에 섰다.
+ * 반장이 그 폴더에서 시작한 것처럼 읽힌다. 폴백은 아무 세션도 안 볼 때의 것이다.
+ */
+test('반장 세션을 열면 증거 패널이 비어 선다 — 직전 프로젝트로 폴백하지 않는다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', '구성원이 될 세션')
+  const workerId = await page.evaluate(() => [...(window as any).__mock.sessions.keys()][0])
+
+  // 알파를 보고 있었다 — 증거 패널이 알파를 그리고 있다
+  await expect(page.getByTestId('evidence-panel')).toBeVisible()
+
+  await page.getByTestId('orchestrator-button').click()
+  await page.getByTestId('rail-new-task').click()
+  await page.getByTestId('task-title').fill('스킬 구현')
+  await page.getByTestId('task-goal').fill('스킬 X를 끝까지')
+  await page.getByTestId(`task-member-${workerId}`).check()
+  await page.getByTestId('task-create').click()
+
+  // 반장을 연다 — 프로젝트 없는 세션이니 증거 레인 자체가 없어야 한다 (접힌 띠도)
+  await page.locator('[data-testid^="coordinator-row-"]').first().click()
+  await expect(page.getByTestId('session-view')).toBeVisible()
+  await expect(page.getByTestId('evidence-panel')).toHaveCount(0)
+  await expect(page.getByTestId('evidence-rail-shell')).toHaveCount(0)
+
+  // 다시 워커(알파)로 오면 증거는 돌아온다 — 없앤 게 아니라 폴백만 걷은 것이다
+  await page.evaluate((id: string) => (window as any).__store.getState().focusSession(id), workerId)
+  await expect(page.getByTestId('evidence-panel')).toBeVisible()
+})

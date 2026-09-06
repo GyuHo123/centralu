@@ -43,8 +43,14 @@ import { PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, useTextZoom } from '../../store/st
 export function EvidencePanel() {
   const open = useStore((s) => s.panelOpen)
   const projectId = useStore((s) => {
-    const focused = s.focusedSessionId ? s.sessions[s.focusedSessionId]?.projectId : null
-    return focused ?? s.focusedProjectId
+    /*
+     * 프로젝트 없는 세션(반장)은 **직전 프로젝트로 폴백하지 않는다** (도그푸딩 지적
+     * 2026-09-06): 반장 옆에 마지막으로 보던 프로젝트의 파일·깃 기록이 서면, 반장이
+     * 그 폴더에서 시작한 것처럼 읽힌다 — 실제로는 오케스트레이터 홈에서 돈다.
+     * 폴백은 "아무 세션도 안 보는 중"을 위한 것이다.
+     */
+    const sess = s.focusedSessionId ? s.sessions[s.focusedSessionId] : null
+    return sess ? sess.projectId : s.focusedProjectId
   })
   const project = useStore((s) => (projectId ? s.projects[projectId] : undefined))
   const width = useStore((s) => s.panelWidth)

@@ -32,8 +32,9 @@ export function Overlay() {
   const overlay = useStore((s) => s.overlay)
   const close = useStore((s) => s.closeOverlay)
   const projectId = useStore((s) => {
-    const focused = s.focusedSessionId ? s.sessions[s.focusedSessionId]?.projectId : null
-    return focused ?? s.focusedProjectId
+    // 프로젝트 없는 세션(반장)은 직전 프로젝트로 폴백하지 않는다 — EvidencePanel과 같은 규칙
+    const sess = s.focusedSessionId ? s.sessions[s.focusedSessionId] : null
+    return sess ? sess.projectId : s.focusedProjectId
   })
 
   // esc로 걷는다. 입력창에서 눌러도 걷혀야 한다 — 덮인 채로 갇히면 안 된다
