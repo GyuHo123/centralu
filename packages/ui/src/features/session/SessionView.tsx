@@ -16,6 +16,7 @@ import { RunMenu } from './RunMenu.jsx'
 import { CommandRunnerOverlay } from './CommandRunner.jsx'
 import { SessionSettings } from './SessionSettings.jsx'
 import { AutocompleteMenu, useAutocomplete, type Suggestion } from './Autocomplete.jsx'
+import { guiCommandFor } from './guiCommands.js'
 import { onFirstLine, onLastLine, sentMessages, stepHistory } from './history.js'
 import { appendPath, readDragPath } from '../files/dragPath.js'
 import { anchorAt, decideFollow, isAtBottom, MOVED_UP_SLACK, shouldFollowAgain } from './scroll.js'
@@ -424,6 +425,19 @@ const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
   })
 
   const pick = (item: Suggestion) => {
+    /*
+     * GUI 커맨드 (2026-09-07): 목록에서 고르는 순간이 곧 실행이다 — '/usage'를
+     * 입력창에 채워 넣고 엔터를 한 번 더 요구하면, "엔터 치면 화면이 뜬다"는
+     * 약속이 두 번의 엔터가 된다. 글은 지우고 화면을 연다.
+     */
+    // 세션 커맨드 값은 뒤에 공백이 붙는다 — 같은 이름의 진짜 스킬을 골랐을 땐 가로채지 않는다
+    const gui = item.value.endsWith(' ') ? null : guiCommandFor(item.value)
+    if (gui) {
+      setRecall(null)
+      setDraft(sessionId, EMPTY_DRAFT)
+      gui.run()
+      return
+    }
     const next = ac.apply(item)
     setText(next.text)
     setCaret(next.caret)
@@ -503,6 +517,18 @@ const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
         e.preventDefault()
         const t = text.trim()
         if (!t && attachments.length === 0) return
+        /*
+          GUI 커맨드 (2026-09-07): `/usage` 같은 이름은 세션에 보낼 응답이 프로토콜에
+          없다 — 엔터가 메시지 대신 앱 화면을 연다. 첨부가 있으면 가로채지 않는다:
+          무언가를 붙였다는 것은 세션에게 말하는 중이라는 뜻이다.
+        */
+        const gui = attachments.length === 0 ? guiCommandFor(t) : null
+        if (gui) {
+          setRecall(null)
+          setDraft(sessionId, EMPTY_DRAFT)
+          gui.run()
+          return
+        }
         /*
             보내고 나면 입력창은 정말로 빈다 (#38).
             되불러오기와 초안을 **둘 다** 비워야 한다 — 하나만 비우면 방금 보낸 자리에

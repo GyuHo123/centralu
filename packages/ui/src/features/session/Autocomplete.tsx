@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CommandInfo } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { useStore } from '../../store/store.js'
+import { GUI_COMMANDS } from './guiCommands.js'
 
 /**
  * 입력창 자동완성 — `/`는 스킬, `@`는 파일.
@@ -172,17 +173,43 @@ export function useAutocomplete({
        * 스크롤(max-h-56)이라 길어서 잃는 것이 없고, 실측 최대 102개는 가상 스크롤이
        * 필요한 크기가 아니다.
        */
-      return (
-        commands.commands
+      /*
+       * GUI 커맨드(usage 등)도 같은 목록에 선다 — 고르면 메시지 대신 앱 화면이
+       * 열린다 (guiCommands.ts). 세션 목록이 아직 로딩 중이어도 이쪽은 바로 뜬다.
+       */
+      const scored: { name: string; s: number; item: Suggestion }[] = [
+        ...GUI_COMMANDS.map((g) => ({
+          g,
+          s: scoreCommand(g.name, trigger.query),
+        }))
+          .filter((x): x is { g: (typeof GUI_COMMANDS)[number]; s: number } => x.s !== null)
+          .map(({ g, s }) => ({
+            name: g.name,
+            s,
+            item: {
+              value: `/${g.name}`,
+              label: `/${g.name}`,
+              hint: `${g.description} — opens in app`,
+            },
+          })),
+        ...commands.commands
           .map((c) => ({ c, s: scoreCommand(c.name, trigger.query) }))
           .filter((x): x is { c: CommandInfo; s: number } => x.s !== null)
+          .map(({ c, s }) => ({
+            name: c.name,
+            s,
+            item: {
+              value: `/${c.name} `,
+              label: `/${c.name}`,
+              hint: c.argumentHint || c.description,
+            },
+          })),
+      ]
+      return (
+        scored
           // 점수가 같으면 짧은 이름이 위 — 대개 그쪽이 원래 찾던 것이다
-          .sort((a, b) => (b.s === a.s ? a.c.name.length - b.c.name.length : b.s - a.s))
-          .map(({ c }) => ({
-            value: `/${c.name} `,
-            label: `/${c.name}`,
-            hint: c.argumentHint || c.description,
-          }))
+          .sort((a, b) => (b.s === a.s ? a.name.length - b.name.length : b.s - a.s))
+          .map((x) => x.item)
       )
     }
     if (atSource === 'sessions') {
@@ -276,6 +303,17 @@ export function AutocompleteMenu({
               </button>
             </li>
           ))}
+          {/* GUI 커맨드는 먼저 서고 스킬은 아직일 수 있다 — '아직'은 목록 아래에서도 말한다 */}
+          {loading && (
+            <li>
+              <p
+                className="border-t border-edge px-2.5 py-1.5 text-[11px] text-slate"
+                data-testid="autocomplete-loading"
+              >
+                Loading skills…
+              </p>
+            </li>
+          )}
         </ul>
       )}
     </div>

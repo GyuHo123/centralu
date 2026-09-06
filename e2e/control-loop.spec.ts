@@ -3497,6 +3497,41 @@ test('메시지를 보낸 뒤 입력창 높이가 한 줄로 돌아온다', asyn
  * `fill()`은 input 이벤트를 쏘므로 옛 코드에서도 통과한다 — 그래서 **자동완성으로 고르는
  * 진짜 경로**를 쓴다. 그 길은 React 상태만 바꾸고 DOM 이벤트를 만들지 않는다.
  */
+/*
+ * GUI 슬래시 커맨드 (2026-09-07): `/usage`는 SDK 프로토콜에 응답이 없는 클라이언트
+ * 명령이다 — 엔터가 메시지 대신 앱 화면을 연다. 판별은 우리 레지스트리의 몫이고
+ * (SDK엔 "클라이언트 명령" 개념이 없다), 가로채기는 어댑터 도달 전이라 도구 무관이다.
+ */
+test('/usage 엔터는 메시지가 아니라 사용량 화면을 연다 — 인자가 붙으면 메시지다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', '작업')
+  const id = await page.evaluate(() => (window as any).__store.getState().focusedSessionId)
+
+  // 자동완성에 세션 커맨드와 나란히 선다 — 힌트가 출처를 말한다
+  await page.getByTestId('prompt-input').fill('/usa')
+  await expect(page.getByTestId('autocomplete')).toContainText('/usage')
+  await expect(page.getByTestId('autocomplete')).toContainText('opens in app')
+
+  const userCount = (sid: string) =>
+    ((window as any).__store.getState().chat[sid] ?? []).filter((i: any) => i.kind === 'user').length
+  const before = await page.evaluate(userCount, id)
+
+  await page.getByTestId('prompt-input').fill('/usage')
+  await page.getByTestId('prompt-input').press('Enter')
+  await expect(page.getByTestId('usage-modal')).toBeVisible()
+  // 메시지는 나가지 않았고, 입력창은 비었다
+  expect(await page.evaluate(userCount, id)).toBe(before)
+  await expect(page.getByTestId('prompt-input')).toHaveValue('')
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('usage-modal')).toBeHidden()
+
+  // 이름 뒤에 무언가 있으면 세션에게 말하는 것이다 — 보통 메시지로 나간다
+  await page.getByTestId('prompt-input').fill('/usage 지난주 요약해줘')
+  await page.getByTestId('prompt-input').press('Enter')
+  await expect(page.getByTestId('usage-modal')).toBeHidden()
+  await expect.poll(() => page.evaluate(userCount, id)).toBe(before + 1)
+})
+
 test('자동완성으로 넣은 값에도 입력창 높이가 따라온다', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await page.evaluate(() => {
