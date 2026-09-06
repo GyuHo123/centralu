@@ -174,7 +174,9 @@ class CodexSession implements SessionHandle {
       void this.client
         .request<{ goal: Record<string, unknown> | null }>('thread/goal/get', { threadId: this.threadId })
         .then((r) => {
-          if (r.goal) this.emit({ type: 'goal', sessionId: this.sessionId, goal: goalFromCodex(r.goal) })
+          // complete는 goalFromCodex가 null로 접는다 — 기본 상태가 이미 null이라 그때는 낼 것이 없다
+          const g = r.goal ? goalFromCodex(r.goal) : null
+          if (g) this.emit({ type: 'goal', sessionId: this.sessionId, goal: g })
         })
         .catch(() => {})
     } else {

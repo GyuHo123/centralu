@@ -102,8 +102,14 @@ export function approvalDetailFrom(method: string, params: Record<string, unknow
 /**
  * codex ThreadGoal → 프로토콜 SessionGoal (2026-09-07).
  * updated 알림과 재개 직후의 thread/goal/get이 같은 변환을 쓴다 — 두 벌이면 표류한다.
+ *
+ * **완료(complete)는 걷힘이다** (도그푸딩: complete 배지가 영원히 남았다). codex는
+ * 달성 때 cleared가 아니라 updated(status:complete)를 보내는데, 달성된 골은 상태가
+ * 아니라 결말이고 결말은 배지의 몫이 아니다 — claude(달성 → null 통지)와 같은 문법.
+ * paused·blocked·usageLimited·budgetLimited는 남는다: 아직 행동할 수 있는 상태다.
  */
-export function goalFromCodex(g: Record<string, unknown>): SessionGoal {
+export function goalFromCodex(g: Record<string, unknown>): SessionGoal | null {
+  if (str(g.status) === 'complete') return null
   return {
     objective: str(g.objective),
     status: str(g.status) || 'active',
