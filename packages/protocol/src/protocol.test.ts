@@ -85,6 +85,13 @@ const GOLDEN_EVENTS_V1: unknown[] = [
   { type: 'worktree_merged', sessionId: 's1' },
   { type: 'app_state_changed', appId: 'control' },
   { type: 'worktree_pr', sessionId: 's1', pr: { number: 7, state: 'merged', url: 'https://github.com/x/y/pull/7' } },
+  // 골 통지 (2026-09-07) — 두 도구의 합집합 모양과 걷힘(null) 양쪽 다 골든이다
+  {
+    type: 'goal',
+    sessionId: 's1',
+    goal: { objective: '테스트 전부 초록', status: 'active', iterations: 2, reason: '1개 실패', tokenBudget: null, tokensUsed: 300 },
+  },
+  { type: 'goal', sessionId: 's1', goal: null },
   { type: 'error', sessionId: 's1', error: { code: 'adapter_crashed', message: '프로세스 종료', retryable: true } },
   /*
    * 세션에 속하지 않는 이벤트 (이슈 #43). sessionId가 **없어도** 파싱돼야 한다 —

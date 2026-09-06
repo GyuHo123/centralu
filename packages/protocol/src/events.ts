@@ -5,6 +5,7 @@ import {
   ProtocolError,
   Question,
   SessionActivity,
+  SessionGoal,
   SessionState,
   TokenUsage,
   ToolSummary,
@@ -261,6 +262,12 @@ export const NormalizedEvent = z.discriminatedUnion('type', [
     type: z.literal('worktree_pr'),
     pr: z.object({ number: z.number(), state: z.enum(['open', 'merged', 'closed']), url: z.string() }),
   }),
+  /**
+   * 골 상태 통지 (2026-09-07). null이면 걷혔다(달성 포함) — 판정은 도구가 하고
+   * 우리는 나른다. 살아-있는-동안 사실이다: 재시작 뒤 codex는 thread/goal/get으로
+   * 다시 묻고, claude는 다음 Stop 훅 판정 때 다시 배운다.
+   */
+  z.object({ ...base, type: z.literal('goal'), goal: SessionGoal.nullable() }),
   /**
    * The update picture changed (issue #43).
    *

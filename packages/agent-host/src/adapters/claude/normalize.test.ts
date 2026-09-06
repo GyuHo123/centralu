@@ -73,6 +73,29 @@ describe('델타 없이 온 assistant 본문', () => {
     )
     expect(events).toContainEqual({ type: 'message_delta', sessionId: SID, role: 'assistant', text: '명령 출력 내용' })
   })
+
+  it('active_goal → goal 이벤트 (2026-09-07 — /goal의 Stop 훅 판정)', () => {
+    const events = normalizeMessage(
+      {
+        type: 'active_goal',
+        value: { condition: '테스트 전부 통과', iterations: 3, set_at: 1, tokens_at_start: 10, last_reason: '2개 실패' },
+        session_id: 'x',
+      },
+      SID,
+    )
+    expect(events).toEqual([
+      {
+        type: 'goal',
+        sessionId: SID,
+        goal: { objective: '테스트 전부 통과', status: 'active', iterations: 3, reason: '2개 실패' },
+      },
+    ])
+  })
+
+  it('active_goal value=null → 걷힘 통지 (달성 포함)', () => {
+    const events = normalizeMessage({ type: 'active_goal', value: null }, SID)
+    expect(events).toEqual([{ type: 'goal', sessionId: SID, goal: null }])
+  })
 })
 
 describe('도구 호출 (스파이크 실제 형태)', () => {

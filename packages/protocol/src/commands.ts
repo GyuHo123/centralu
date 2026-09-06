@@ -16,6 +16,7 @@ import {
   Question,
   QuestionAnswer,
   SessionActivity,
+  SessionGoal,
   SessionState,
   TokenUsage,
   ToolName,
@@ -166,6 +167,11 @@ export const SessionInfo = z.object({
     .nullable()
     .default(null),
   /**
+   * 세션에 걸린 골 (2026-09-07). 도구가 판정하는 파생 사실이라 저장하지 않는다 —
+   * 재시작 뒤 codex는 thread/goal/get으로 다시 묻고, claude는 다음 판정 때 다시 배운다.
+   */
+  goal: SessionGoal.nullable().default(null),
+  /**
    * 조율 세션의 시야 허용 목록 (#80·#81 — 이름 없는 코어 손잡이 ①).
    *
    * kind='coordinator' 세션의 오케스트레이터 도구가 볼 수 있는 세션들이다.
@@ -228,7 +234,7 @@ export type SessionInfo = z.infer<typeof SessionInfo>
  */
 export function sessionLiveDefaults(): Pick<
   SessionInfo,
-  'pendingApproval' | 'pendingQuestions' | 'activity' | 'limit' | 'usage' | 'context' | 'worktreeMerged' | 'worktreePr'
+  'pendingApproval' | 'pendingQuestions' | 'activity' | 'limit' | 'usage' | 'context' | 'worktreeMerged' | 'worktreePr' | 'goal'
 > {
   return {
     pendingApproval: null,
@@ -241,6 +247,8 @@ export function sessionLiveDefaults(): Pick<
     worktreeMerged: false,
     // PR 상태(#76 stage 3)도 같은 원칙 — gh로 다시 측정한다
     worktreePr: null,
+    // 골(2026-09-07)도 같은 원칙 — 도구가 다시 말해 준다
+    goal: null,
   }
 }
 

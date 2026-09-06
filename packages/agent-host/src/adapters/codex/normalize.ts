@@ -1,4 +1,4 @@
-import type { ApprovalDetail, NormalizedEvent } from '@cc/protocol'
+import type { ApprovalDetail, NormalizedEvent, SessionGoal } from '@cc/protocol'
 
 /**
  * Codex 프로토콜 → NormalizedEvent 변환 (M0에서 확인한 메서드 이름 기준).
@@ -99,6 +99,19 @@ export function approvalDetailFrom(method: string, params: Record<string, unknow
  * 알림 하나를 0~N개의 NormalizedEvent로 변환한다.
  * 모르는 알림은 **조용히 버린다** — 프로토콜이 늘어나도 깨지지 않아야 한다 (protocol.md §4).
  */
+/**
+ * codex ThreadGoal → 프로토콜 SessionGoal (2026-09-07).
+ * updated 알림과 재개 직후의 thread/goal/get이 같은 변환을 쓴다 — 두 벌이면 표류한다.
+ */
+export function goalFromCodex(g: Record<string, unknown>): SessionGoal {
+  return {
+    objective: str(g.objective),
+    status: str(g.status) || 'active',
+    ...(typeof g.tokenBudget === 'number' ? { tokenBudget: g.tokenBudget } : {}),
+    ...(typeof g.tokensUsed === 'number' ? { tokensUsed: g.tokensUsed } : {}),
+  }
+}
+
 export function normalizeNotification(sessionId: string, n: Notification): NormalizedEvent[] {
   const p = obj(n.params)
 
@@ -309,6 +322,18 @@ export function normalizeNotification(sessionId: string, n: Notification): Norma
 
     case 'thread/compacted':
       return [{ type: 'compaction', sessionId, failed: false }]
+
+    /*
+     * 골 통지 (2026-09-07 — ThreadGoalUpdated/ClearedNotification). codex는 골이
+     * 일급이다: objective·status(active|paused|blocked|usageLimited|budgetLimited|
+     * complete)·토큰 예산/사용이 프로토콜로 온다. 어휘는 그대로 나른다 — 판정은
+     * 도구의 것이고 우리는 배지의 근거만 나른다.
+     */
+    case 'thread/goal/updated':
+      return [{ type: 'goal', sessionId, goal: goalFromCodex(obj(p.goal)) }]
+
+    case 'thread/goal/cleared':
+      return [{ type: 'goal', sessionId, goal: null }]
 
     case 'error':
       return [

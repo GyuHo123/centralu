@@ -250,6 +250,21 @@ describe('상태·계기판', () => {
     expect(n('thread/compacted', {})).toEqual([{ type: 'compaction', sessionId: S, failed: false }])
   })
 
+  it('thread/goal/updated → goal 이벤트 (2026-09-07 — codex 어휘 그대로)', () => {
+    const out = n('thread/goal/updated', {
+      threadId: 't1',
+      turnId: null,
+      goal: { threadId: 't1', objective: '빌드 초록', status: 'blocked', tokenBudget: 50000, tokensUsed: 1200, createdAt: 1, updatedAt: 2 },
+    })
+    expect(out).toEqual([
+      { type: 'goal', sessionId: S, goal: { objective: '빌드 초록', status: 'blocked', tokenBudget: 50000, tokensUsed: 1200 } },
+    ])
+  })
+
+  it('thread/goal/cleared → goal:null (걷힘 통지)', () => {
+    expect(n('thread/goal/cleared', { threadId: 't1' })).toEqual([{ type: 'goal', sessionId: S, goal: null }])
+  })
+
   it('모르는 알림은 조용히 버린다 (프로토콜이 늘어나도 안 깨진다)', () => {
     expect(n('thread/realtime/audioDelta', { blob: 'x' })).toEqual([])
     expect(n('완전히/새로운/메서드', {})).toEqual([])

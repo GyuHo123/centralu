@@ -18,7 +18,7 @@ import { listCodexThreads, readCodexHistory } from './history.js'
 import { imageEventFromDisk } from './images.js'
 import { readCodexUsage } from './usage-client.js'
 import { listCodexModels } from './models.js'
-import { approvalDetailFrom, normalizeNotification, toCodexDecision } from './normalize.js'
+import { approvalDetailFrom, goalFromCodex, normalizeNotification, toCodexDecision } from './normalize.js'
 
 const exec = promisify(execFile)
 
@@ -167,6 +167,16 @@ class CodexSession implements SessionHandle {
         throw err
       }
       this.threadId = threadIdOf(res) ?? this.opts.resumeExternalId
+      /*
+       * 골은 라이브 필드다 (2026-09-07) — 재시작 후에도 배지가 참이려면 재개 때 다시
+       * 묻는다. 옛 codex엔 이 메서드가 없다: 실패는 "골 없음"과 같게 조용히 눕는다.
+       */
+      void this.client
+        .request<{ goal: Record<string, unknown> | null }>('thread/goal/get', { threadId: this.threadId })
+        .then((r) => {
+          if (r.goal) this.emit({ type: 'goal', sessionId: this.sessionId, goal: goalFromCodex(r.goal) })
+        })
+        .catch(() => {})
     } else {
       const res = await this.client.request<Record<string, unknown>>('thread/start', {
         cwd: this.opts.cwd,
@@ -376,6 +386,36 @@ class CodexSession implements SessionHandle {
           this.flushPending()
           throw e
         })
+      }
+      /*
+       * /goal도 함수다 (2026-09-07 — /compact·/review와 같은 #58 부류). turn/start로
+       * 보내면 모델이 "/goal"이라는 글자를 읽는다. 전용 RPC 세 개가 있다:
+       * thread/goal/set·get·clear. 상태 변화는 thread/goal/updated|cleared 알림으로
+       * 돌아와 배지가 그걸 그린다 — 여기서는 채팅에 한 줄 확인만 남긴다 (로컬 명령의
+       * 답이 안 보이면 실행됐는지 알 길이 없다 — claude local_command_output의 교훈).
+       * 턴이 아니라서 blockingTurn은 걸지 않는다.
+       */
+      if (text.trim() === '/goal' || text.trim().startsWith('/goal ')) {
+        const arg = text.trim().slice('/goal'.length).trim()
+        const say = (line: string) =>
+          this.emit({ type: 'message_delta', sessionId: this.sessionId, role: 'assistant', text: line })
+        if (!arg) {
+          return this.client
+            .request<{ goal: { objective?: string; status?: string } | null }>('thread/goal/get', {
+              threadId: this.threadId,
+            })
+            .then((r) =>
+              say(r.goal ? `Goal (${r.goal.status ?? 'active'}): ${r.goal.objective ?? ''}` : 'No goal set.'),
+            )
+        }
+        if (arg === 'clear') {
+          return this.client
+            .request('thread/goal/clear', { threadId: this.threadId })
+            .then(() => say('Goal cleared.'))
+        }
+        return this.client
+          .request('thread/goal/set', { threadId: this.threadId, objective: arg })
+          .then(() => say(`Goal set: ${arg}`))
       }
       return this.client.request('turn/start', {
         threadId: this.threadId,

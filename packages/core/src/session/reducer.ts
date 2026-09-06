@@ -5,6 +5,7 @@ import type {
   PermissionPreset,
   Question,
   SessionActivity,
+  SessionGoal,
   SessionState,
   TokenUsage,
 } from '@cc/protocol'
@@ -96,6 +97,11 @@ export type SessionSummary = {
    */
   pr: { number: number; state: 'open' | 'merged' | 'closed'; url: string } | null
   /**
+   * 세션에 걸린 골 (2026-09-07 — claude /goal · codex thread/goal/*). 도구가 판정하는
+   * 라이브 사실이라 null이면 "없거나 아직 모른다"다. 배지의 근거일 뿐 판정은 도구의 것.
+   */
+  goal: SessionGoal | null
+  /**
    * 이번 턴에 모델이 생각에 쓴 토큰 추정치 누계 (#58 — claude는 thinking 본문이
    * 암호화라 이 숫자가 보여줄 수 있는 전부다). activity와 같은 수명: working을
    * 벗어나면 죽는다.
@@ -113,7 +119,7 @@ export function initialSession(init: Pick<SessionSummary, 'id' | 'projectId' | '
     autoNamed: true, state: 'idle', activity: null, waitingSince: null, lastSeq: 0, lastReadSeq: 0,
     live: true, preview: '', pendingApproval: null, pendingQuestions: [], usage: null, context: null,
     limit: null, lastError: null, touchedPaths: [], model: null, effort: null, verbosity: null, serviceTier: null,
-    permissionPreset: 'normal', worktree: null, parentSessionId: null, merged: false, pr: null, thinkingTokens: null, plan: null, kind: 'worker' as const,
+    permissionPreset: 'normal', worktree: null, parentSessionId: null, merged: false, pr: null, goal: null, thinkingTokens: null, plan: null, kind: 'worker' as const,
     tool: 'claude' as const, ...init,
   }
 }
@@ -231,6 +237,8 @@ export function applyEvent(s: SessionSummary, event: NormalizedEvent, now: numbe
       return { ...next, merged: true }
     case 'worktree_pr':
       return { ...next, pr: event.pr }
+    case 'goal':
+      return { ...next, goal: event.goal }
     case 'session_title':
       if (event.auto !== false) return s.autoNamed ? { ...next, name: event.title } : next
       return { ...next, name: event.title, autoNamed: false }

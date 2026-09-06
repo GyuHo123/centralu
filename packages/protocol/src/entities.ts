@@ -14,6 +14,25 @@ export type SessionState = z.infer<typeof SessionState>
  */
 /** 바쁨의 종류. compacting은 양쪽 다, reviewing은 codex의 /review(전용 RPC)가 낸다 */
 export const SessionActivity = z.enum(['compacting', 'reviewing'])
+
+/**
+ * 세션에 걸린 골 (2026-09-07 — claude `/goal`의 active_goal · codex thread/goal/*).
+ *
+ * 두 도구의 합집합이다: objective/status는 공통, iterations·reason은 claude(Stop 훅이
+ * 판정할 때마다 바퀴 수와 미달 사유), tokenBudget·tokensUsed는 codex. status는 도구의
+ * 어휘가 그대로 흐른다 — claude는 걸려 있는 동안 'active'뿐(달성은 null 통지로 온다),
+ * codex는 active|paused|blocked|usageLimited|budgetLimited|complete. enum으로 조이지
+ * 않는 이유: 도구가 단어를 늘릴 때마다 프로토콜이 깨지면 배지 하나 값이 아니다.
+ */
+export const SessionGoal = z.object({
+  objective: z.string(),
+  status: z.string(),
+  iterations: z.number().optional(),
+  reason: z.string().optional(),
+  tokenBudget: z.number().nullable().optional(),
+  tokensUsed: z.number().optional(),
+})
+export type SessionGoal = z.infer<typeof SessionGoal>
 export type SessionActivity = z.infer<typeof SessionActivity>
 
 export const ToolName = z.enum(['claude', 'codex'])

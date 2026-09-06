@@ -184,6 +184,23 @@ export function SessionPane({
       )}
 
       {/*
+        걸려 있는 골 (2026-09-07 — claude /goal · codex thread/goal/*). 골이 도는
+        세션의 관심사는 "언제 끝나나"라, 조건 전문이 아니라 사실 요약(바퀴 수·상태)을
+        달고 전문·미달 사유는 호버에 둔다. 걷히면(달성 포함) 사라진다.
+      */}
+      {session.goal && (
+        <span
+          className="readout shrink-0 rounded border border-edge px-1.5 text-[10px] text-ash"
+          data-testid="goal-badge"
+          title={`${session.goal.objective}${session.goal.reason ? `\n\n${session.goal.reason}` : ''}`}
+        >
+          GOAL
+          {session.goal.iterations != null ? ` · ${session.goal.iterations}` : ''}
+          {session.goal.status !== 'active' ? ` · ${session.goal.status}` : ''}
+        </span>
+      )}
+
+      {/*
         중지는 여기 두지 않는다 — 대화 맨 아래 '응답 기다리는 중' 옆에 이미 있다.
         같은 일을 하는 버튼이 화면 양 끝에 하나씩 있으면 어느 쪽이 무엇인지 매번 확인하게 된다.
       */}

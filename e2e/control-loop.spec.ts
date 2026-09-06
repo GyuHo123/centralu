@@ -3498,6 +3498,42 @@ test('메시지를 보낸 뒤 입력창 높이가 한 줄로 돌아온다', asyn
  * 진짜 경로**를 쓴다. 그 길은 React 상태만 바꾸고 DOM 이벤트를 만들지 않는다.
  */
 /*
+ * 골 배지 (2026-09-07 — claude /goal의 active_goal · codex thread/goal/*).
+ * 도구가 판정한 골 상태가 헤더에 선다: 바퀴 수·상태 요약, 호버에 조건·미달 사유.
+ * 걷히면(달성 포함) 사라진다 — 판정은 도구의 것이고 배지는 통지일 뿐이다.
+ */
+test('골이 걸리면 헤더에 배지가 서고, 걷히면 사라진다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', '작업')
+  const id = await page.evaluate(() => (window as any).__store.getState().focusedSessionId)
+
+  await page.evaluate((sid: string) => {
+    ;(window as any).__store.getState().dispatchEvent({
+      type: 'goal',
+      sessionId: sid,
+      goal: { objective: '테스트 전부 초록', status: 'active', iterations: 3, reason: '2개 실패' },
+    })
+  }, id)
+  await expect(page.getByTestId('goal-badge')).toContainText('GOAL · 3')
+  await expect(page.getByTestId('goal-badge')).toHaveAttribute('title', /테스트 전부 초록/)
+
+  // codex 어휘(blocked 등)는 그대로 흐른다
+  await page.evaluate((sid: string) => {
+    ;(window as any).__store.getState().dispatchEvent({
+      type: 'goal',
+      sessionId: sid,
+      goal: { objective: '빌드 초록', status: 'blocked' },
+    })
+  }, id)
+  await expect(page.getByTestId('goal-badge')).toContainText('GOAL · blocked')
+
+  await page.evaluate((sid: string) => {
+    ;(window as any).__store.getState().dispatchEvent({ type: 'goal', sessionId: sid, goal: null })
+  }, id)
+  await expect(page.getByTestId('goal-badge')).toBeHidden()
+})
+
+/*
  * GUI 슬래시 커맨드 (2026-09-07): `/usage`는 SDK 프로토콜에 응답이 없는 클라이언트
  * 명령이다 — 엔터가 메시지 대신 앱 화면을 연다. 판별은 우리 레지스트리의 몫이고
  * (SDK엔 "클라이언트 명령" 개념이 없다), 가로채기는 어댑터 도달 전이라 도구 무관이다.

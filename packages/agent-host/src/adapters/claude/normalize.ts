@@ -84,6 +84,28 @@ export function normalizeMessage(
   }
 
   /*
+   * 골 판정 통지 (2026-09-07 — `/goal`의 Stop 훅, SDKActiveGoalMessage). #58 부류:
+   * 이 타입이 없던 동안 골 상태는 조용히 버려졌다. value가 null이면 걷힌 것(달성 포함)이고,
+   * 걸려 있는 동안 claude의 상태 어휘는 'active' 하나다 — 바퀴 수와 미달 사유가 내용이다.
+   */
+  if (type === 'active_goal') {
+    const v = (m.value ?? null) as Json | null
+    out.push({
+      type: 'goal',
+      sessionId,
+      goal: v
+        ? {
+            objective: str(v.condition),
+            status: 'active',
+            ...(typeof v.iterations === 'number' ? { iterations: v.iterations } : {}),
+            ...(str(v.last_reason) ? { reason: str(v.last_reason) } : {}),
+          }
+        : null,
+    })
+    return out
+  }
+
+  /*
    * 로컬 명령의 출력 (SDKLocalCommandOutputMessage — /usage류의 **일반화된 채널**).
    *
    * /usage의 답이 델타 없는 assistant 메시지로 와서 안 보였던 사건(도그푸딩)의 자매다:

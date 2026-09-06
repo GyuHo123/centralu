@@ -1787,6 +1787,10 @@ export class SessionManager {
       case 'context_update':
         m.context = { used: e.used, window: e.window, exactness: e.exactness }
         break
+      case 'goal':
+        // 골(2026-09-07)도 라이브 필드다 — 재시작 뒤엔 도구가 다시 말해 준다 (codex는 재개 때 get)
+        m.goal = e.goal
+        break
     }
   }
 

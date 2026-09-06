@@ -211,3 +211,46 @@ describe('codex compact/review 중 메시지 — 버리는 자리에 보내지 �
     expect(events.some((e) => e.type === 'error' && /not delivered/.test(e.error?.message ?? ''))).toBe(true)
   })
 })
+
+/**
+ * /goal도 같은 부류다 (2026-09-07 — #58: 함수를 메시지로 보내면 모델이 글자를 읽는다).
+ * set/get/clear 세 RPC로 가로채는지, 판정이 지나치게 넓지 않은지, 채팅 확인 한 줄이
+ * 남는지(로컬 명령의 답이 안 보이면 실행됐는지 알 길이 없다)를 본다.
+ */
+describe('codex /goal — 함수로 실행된다', () => {
+  it('/goal <목표> → thread/goal/set + 확인 한 줄, turn/start는 없다', async () => {
+    const events: { type: string; text?: string }[] = []
+    const h = await session((e) => events.push(e as { type: string; text?: string }))
+    h.send('/goal 테스트 전부 초록')
+    await tick()
+    const set = state.requests.find((r) => r.method === 'thread/goal/set')
+    expect(set?.params).toMatchObject({ threadId: 't1', objective: '테스트 전부 초록' })
+    expect(methods()).not.toContain('turn/start')
+    expect(events.some((e) => e.type === 'message_delta' && /Goal set/.test(e.text ?? ''))).toBe(true)
+  })
+
+  it('/goal 단독 → thread/goal/get, 걸린 골을 한 줄로 말한다', async () => {
+    const events: { type: string; text?: string }[] = []
+    const h = await session((e) => events.push(e as { type: string; text?: string }))
+    h.send('/goal')
+    await tick()
+    expect(methods()).toContain('thread/goal/get')
+    expect(methods()).not.toContain('turn/start')
+  })
+
+  it('/goal clear → thread/goal/clear', async () => {
+    const h = await session()
+    h.send('/goal clear')
+    await tick()
+    expect(methods()).toContain('thread/goal/clear')
+    expect(methods()).not.toContain('turn/start')
+  })
+
+  it('판정은 좁다 — "/goal에 대해 알려줘" 같은 진짜 메시지는 삼키지 않는다', async () => {
+    const h = await session()
+    h.send('골 설정 얘기: /goal 문법이 뭐지?')
+    await tick()
+    expect(methods()).toContain('turn/start')
+    expect(methods()).not.toContain('thread/goal/set')
+  })
+})
