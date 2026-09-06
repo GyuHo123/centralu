@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { ChevronIcon } from '../../components/icons.jsx'
 import type { ModelOption, PermissionPreset, ToolName } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
@@ -171,6 +171,12 @@ export function SessionSettings({
   const { models, reason } = useModels(tool, live)
   const verbosities = useVerbosities(tool)
   const [open, setOpen] = useState(false)
+  /** 닫힘 애니메이션이 도는 중 — 다 내려앉은 뒤에 unmount한다 (cc-hang-out) */
+  const [closing, setClosing] = useState(false)
+  const close = useCallback(() => {
+    setOpen(false)
+    setClosing(true)
+  }, [])
   const rootRef = useRef<HTMLSpanElement>(null)
 
   const current = models.find((m) => m.id === model)
@@ -187,13 +193,13 @@ export function SessionSettings({
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+      if (!rootRef.current?.contains(e.target as Node)) close()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       // 인박스·모달까지 같이 닫히면 안 된다 — 열려 있는 것 중 가장 안쪽만 닫는다
       e.stopPropagation()
-      setOpen(false)
+      close()
     }
     window.addEventListener('mousedown', onDown, true)
     window.addEventListener('keydown', onKey, true)
@@ -201,20 +207,22 @@ export function SessionSettings({
       window.removeEventListener('mousedown', onDown, true)
       window.removeEventListener('keydown', onKey, true)
     }
-  }, [open])
+  }, [open, close])
+
+  // reduced-motion이면 animationend가 안 온다 — 타이머가 마무리를 보증한다
+  useEffect(() => {
+    if (!closing) return
+    const t = window.setTimeout(() => setClosing(false), 200)
+    return () => window.clearTimeout(t)
+  }, [closing])
 
   /*
-   * 고르면 닫는다 — 하나 고르러 열었는데 계속 열려 있으면 입력창을 다시 눌러야 한다.
-   *
-   * **모델만 예외다** (keep, 도그푸딩 요청). 강도·속도 묶음은 고른 모델이 정하므로,
-   * 모델을 고른 사람의 일은 보통 아직 안 끝났다 — 닫아버리면 강도를 고르러 메뉴를
-   * 다시 열어야 하고, 실제로 e2e조차 모델을 고를 때마다 메뉴를 다시 여는 춤을 추고
-   * 있었다. 강도·권한처럼 그 자체로 끝인 선택은 지금처럼 닫는다.
+   * **골라도 닫지 않는다** (사용자 요청 2026-09-06). 처음엔 "고르면 닫되 모델만
+   * 예외"였는데, 강도를 고르면 내려가고 모델은 남는 비대칭이 오히려 예측을 깼다.
+   * 이 메뉴는 노브 여럿을 연달아 만지는 자리다 — 닫는 길은 바깥 클릭·Esc·토글
+   * 셋이고, 입력창을 누르는 첫 클릭이 곧 바깥 클릭이라 벽이 되지도 않는다.
    */
-  const choose = (patch: Parameters<typeof update>[1], opts?: { keep?: boolean }) => {
-    void update(sessionId, patch)
-    if (!opts?.keep) setOpen(false)
-  }
+  const choose = (patch: Parameters<typeof update>[1]) => void update(sessionId, patch)
 
   const modelLabel = current?.label ?? model ?? 'Default'
   // 지금 값은 열지 않아도 읽혀야 한다 — 메뉴로 감춘 대가를 여기서 갚는다.
@@ -234,7 +242,7 @@ export function SessionSettings({
         type="button"
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => (open ? close() : setOpen(true))}
         data-testid="settings-open"
         title={
           reason
@@ -247,15 +255,21 @@ export function SessionSettings({
         <ChevronIcon open={open} size={10} />
       </button>
 
-      {open && (
+      {(open || closing) && (
         /*
           위로 편다. 이 줄은 창(또는 그리드 칸)의 맨 아래라 아래로 펴면 곧바로 잘린다 —
           자동완성 메뉴가 같은 이유로 같은 방향을 쓴다.
+          올라올 때 cc-hang, 내려갈 때 cc-hang-out — 닫히는 동안은 과녁이 아니다.
         */
         <div
           role="menu"
           data-testid="settings-menu"
-          className="absolute bottom-full left-0 z-30 mb-1 max-h-72 w-56 overflow-y-auto overflow-x-hidden rounded border border-edge bg-panel shadow-[0_-12px_32px_-8px_rgb(0_0_0/0.9)]"
+          onAnimationEnd={() => {
+            if (!open) setClosing(false)
+          }}
+          className={`absolute bottom-full left-0 z-30 mb-1 max-h-72 w-56 overflow-y-auto overflow-x-hidden rounded border border-edge bg-panel shadow-[0_-12px_32px_-8px_rgb(0_0_0/0.9)] ${
+            open ? 'cc-hang' : 'cc-hang-out pointer-events-none'
+          }`}
         >
           <MenuSection label="Model">
             {/*
@@ -267,7 +281,7 @@ export function SessionSettings({
                 testId="settings-model-default"
                 label="Default"
                 selected={!model}
-                onPick={() => choose({ model: null, effort: null }, { keep: true })}
+                onPick={() => choose({ model: null, effort: null })}
               />
             )}
             {options.map((m) => (
@@ -279,7 +293,7 @@ export function SessionSettings({
                 selected={m.id === model}
                 // 모델이 바뀌면 강도·속도는 초기화한다 — 모델마다 지원이 달라서
                 // 옛 값을 들고 가면 지원하지 않는 조합이 조용히 남는다
-                onPick={() => choose({ model: m.id, effort: null, serviceTier: null }, { keep: true })}
+                onPick={() => choose({ model: m.id, effort: null, serviceTier: null })}
               />
             ))}
           </MenuSection>

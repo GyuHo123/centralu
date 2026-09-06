@@ -384,6 +384,32 @@
 }
 
 /*
+ * cc-hang의 퇴장 짝 — 올라온 자리로 도로 내려앉으며 사라진다. 설정 메뉴(위로 펴는
+ * 메뉴)의 닫힘에 쓴다 (사용자 요청 2026-09-06: 열릴 때만 움직이고 닫힐 때 뚝 끊기면
+ * 어디로 갔는지 안 읽힌다). 퇴장 애니메이션은 unmount를 늦춰야 보이므로, 쓰는 쪽은
+ * animationend(또는 reduced-motion 대비 타이머)로 마무리를 자기가 챙긴다.
+ */
+@keyframes cc-hang-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.cc-hang-out {
+  animation: cc-hang-out 140ms ease-in forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-hang-out {
+    animation: none;
+  }
+}
+
+/*
  * 누른 버튼이 **일하는 중**임을 그 자리에서 말한다.
  *
  * 재시작은 프로세스를 죽이고 다시 띄우는 일이라 몇 초가 걸리는데, 그동안 화면에는

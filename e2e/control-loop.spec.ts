@@ -3328,7 +3328,9 @@ test('모델 목록은 도구가 알려주는 것을 쓰고, 강도는 지원하
   await menu.getByTestId('settings-model-fable').click()
   await expect(menu).toContainText('Effort')
   await menu.getByTestId('settings-effort-xhigh').click()
-  // 강도는 그 자체로 끝인 선택이다 — 고르면 닫힌다
+  // 무엇을 골라도 닫히지 않는다 (2026-09-06) — 닫는 길은 바깥 클릭·Esc·토글 셋뿐이다
+  await expect(menu).toBeVisible()
+  await page.keyboard.press('Escape')
   await expect(menu).toBeHidden()
 
   const settings = await page.evaluate(() => {
