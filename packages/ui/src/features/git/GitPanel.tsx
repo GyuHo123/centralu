@@ -29,35 +29,16 @@ export function GitPanel({
   initialSub?: SubTab
   pick: number
 }) {
-  const [sub, setSub] = useState<SubTab>(initialSub ?? 'changes')
-
-  // 누른 것이 다른 탭에 있으면 그 탭으로 옮겨 앉는다 — 안 그러면 클릭이 조용히 사라진다
-  useEffect(() => {
-    setSub(initialSub ?? 'changes')
-  }, [pick, initialSub])
+  /*
+   * 탭 스트립은 없다 (사용자 요청 2026-09-07). Changes·History·Branches 진입점은
+   * 우측 증거 사이드바가 이미 전부 갖고 있고(#15로 오버레이 중에도 보인다),
+   * 여기 또 있으면 같은 문 세 개가 두 벌이다. 이 화면은 **눌러서 들어온 그것**만
+   * 보여준다 — 어느 화면인지는 상태가 아니라 클릭(initialSub)에서 파생된다.
+   */
+  const sub: SubTab = initialSub ?? 'changes'
 
   return (
     <section className="flex min-h-0 flex-1 flex-col" data-testid="git-panel">
-      <nav className="flex items-center gap-0.5 border-b border-edge px-2 py-1">
-        {(
-          [
-            ['changes', 'Changes'],
-            ['history', 'History'],
-            ['branches', 'Branches'],
-          ] as const
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            onClick={() => setSub(id)}
-            data-testid={`git-sub-${id}`}
-            className={`rounded px-2 py-0.5 text-[12px] transition-colors ${
-              sub === id ? 'bg-graphite/50 text-chalk' : 'text-ash hover:text-chalk'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
       {sub === 'changes' && <Changes projectId={projectId} initialPath={initialPath} pick={pick} />}
       {sub === 'history' && <History projectId={projectId} initialSha={initialSha} pick={pick} />}
       {sub === 'branches' && <Branches projectId={projectId} />}

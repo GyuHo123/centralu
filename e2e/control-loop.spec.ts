@@ -6208,7 +6208,8 @@ test('스테이징과 브랜치 전환도 사이드바에 알린다 — 푸시�
   // 푸시는 아무것도 안 물어본다 — 위의 한 번 그대로다
   expect(await page.evaluate(() => (window as any).__mock.gitStatusCalls)).toBe(1)
 
-  await page.getByTestId('git-sub-branches').click()
+  // 브랜치 진입은 사이드바의 브랜치 버튼 (오버레이 안 탭은 없다, 2026-09-07)
+  await page.getByTestId('evidence-branch').click()
   await page.getByTestId('branch-feature').click()
   await expect(page.getByTestId('toast')).toContainText('Switched to feature')
   await expect.poll(() => page.evaluate(() => (window as any).__mock.gitStatusCalls)).toBe(2)

@@ -311,14 +311,14 @@ test('같은 파일을 다시 눌러도 열린다 — 다른 탭에 가 있어�
   await page.getByTestId('evidence-file-src/a.ts').click()
   await expect(page.getByTestId('diff-view')).toContainText('첫째 파일의 줄')
 
-  // 넓은 화면 안에서 기록을 잠깐 들여다본 뒤
-  await page.getByTestId('git-sub-history').click()
-  await expect(page.getByTestId('git-history')).toBeVisible()
+  // 사이드바에서 브랜치 화면으로 갈아탄 뒤 (오버레이 안 탭은 없다 — 진입점은 사이드바뿐, 2026-09-07)
+  await page.getByTestId('evidence-branch').click()
+  await expect(page.getByTestId('git-branches')).toBeVisible()
 
   // 같은 파일을 다시 누른다 — 경로가 같다고 해서 "아무 일도 없었다"가 되면 안 된다
   await page.getByTestId('evidence-file-src/a.ts').click()
   await expect(page.getByTestId('diff-view')).toContainText('첫째 파일의 줄')
-  await expect(page.getByTestId('git-history')).toBeHidden()
+  await expect(page.getByTestId('git-branches')).toBeHidden()
 })
 
 test('커밋도 두 번째부터 열린다 — 목록이 남아 있으니 계속 눌린다', async ({ page }) => {
