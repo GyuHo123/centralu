@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module'
 import { ensureToolPath } from '../env-path.js'
 import { shellPath } from './terminal.js'
+import { KILL_GRACE_MS, killTree, stopTree } from './kill-tree.js'
 
 /**
  * 자주 쓰는 명령어 실행기 (#60).
@@ -34,9 +35,6 @@ type PtyModule = { spawn(file: string, args: string[], opts: Record<string, unkn
 
 /** 터미널과 같은 상한 — 빌드 로그 하나가 수십 MB가 되는 일이 흔하다 */
 const LOG_BYTES = 256 * 1024
-
-/** SIGTERM 뒤 이만큼 안 죽으면 SIGKILL — trap을 걸어 둔 데브 서버가 버티는 것까지 책임진다 */
-const KILL_GRACE_MS = 3000
 
 export type CommandRun = {
   command: string
@@ -72,40 +70,15 @@ export class CommandRunner {
   }
 
   /**
-   * 프로세스 **트리**를 죽인다 (도그푸딩 2026-09-07: Stop이 안 먹혔다).
+   * SIGTERM으로 정중히, 유예 안에 안 죽으면 SIGKILL.
    *
-   * node-pty의 kill()은 pty 자식 pid **하나**에만 시그널을 보낸다. 그런데 명령은
-   * `zsh -lc <command>`로 뜨므로 실제 데브 서버는 그 아래 자식(들)이다 — 셸만 맞고
-   * 서버는 고아로 살아남아 포트를 계속 물고 있었다. pty 자식은 새 세션의 리더라
-   * pgid == pid — 그룹(-pid)으로 쏘면 exec됐든 자식으로 남았든 트리 전체가 맞는다.
-   * (win32와 pid 없는 테스트 페이크는 종전대로 pty.kill로 물러난다)
+   * 트리를 어떻게 찾는지는 kill-tree.ts에 있다 — 터미널 탭도 같은 문제를 갖고 있어
+   * 한 군데서 푼다. onExit이 오면 e.pty가 비므로 `alive`로 두 번째 발을 막는다.
    */
-  private killTree(handle: Pty, signal: 'SIGTERM' | 'SIGKILL'): void {
-    const pid = handle.pid
-    if (process.platform !== 'win32' && typeof pid === 'number' && Number.isInteger(pid) && pid > 0) {
-      try {
-        process.kill(-pid, signal)
-        return
-      } catch {
-        // 그룹이 벌써 사라졌다 — 아래 단일 킬이 마지막 확인 사살이다
-      }
-    }
-    try {
-      handle.kill(signal)
-    } catch {
-      // 이미 죽었다
-    }
-  }
-
-  /** SIGTERM으로 정중히, 유예 안에 안 죽으면 SIGKILL. onExit이 오면 e.pty가 비어 확인이 선다 */
   private stopEntry(e: Entry): void {
     const handle = e.pty
     if (!handle) return
-    this.killTree(handle, 'SIGTERM')
-    const t = setTimeout(() => {
-      if (e.pty === handle) this.killTree(handle, 'SIGKILL')
-    }, KILL_GRACE_MS)
-    t.unref?.()
+    stopTree(handle, KILL_GRACE_MS, () => e.pty === handle)
   }
 
   /** 실행. 같은 명령이 돌고 있으면 죽이고 새로 시작한다 (사용자 결정) */
@@ -161,7 +134,7 @@ export class CommandRunner {
 
   disposeAll(): void {
     // 앱 종료 — 유예를 기다려 줄 프로세스가 이제 없다. 고아 데브 서버가 최악이므로 바로 SIGKILL
-    for (const e of this.entries.values()) if (e.pty) this.killTree(e.pty, 'SIGKILL')
+    for (const e of this.entries.values()) if (e.pty) killTree(e.pty, 'SIGKILL')
     this.entries.clear()
   }
 

@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { existsSync } from 'node:fs'
 import { ensureToolPath } from '../env-path.js'
+import { KILL_GRACE_MS, killTree, stopTree } from './kill-tree.js'
 
 /**
  * 프로젝트 터미널 (M2.7).
@@ -118,7 +119,9 @@ export class TerminalService {
   restart(terminalId: string, cols: number, rows: number): TerminalHandle | null {
     const e = this.byId.get(terminalId)
     if (!e) return null
-    e.pty?.kill()
+    // 셸만 죽이면 그 아래 도는 것들이 남는다 — 트리째 (kill-tree.ts).
+    // 이 핸들은 여기서 버려지는 것이라 유예가 지나면 조건 없이 SIGKILL이다.
+    if (e.pty) stopTree(e.pty, KILL_GRACE_MS, () => true)
     e.pty = null
     this.append(e, '\r\n[2m— shell restarted —[0m\r\n')
     this.start(e, cols, rows)
@@ -128,14 +131,21 @@ export class TerminalService {
   /** 프로젝트가 사라질 때 정리 */
   closeCwd(cwd: string): void {
     for (const e of this.byCwd.get(cwd) ?? []) {
-      e.pty?.kill()
+      if (e.pty) killTree(e.pty, 'SIGKILL')
       this.byId.delete(e.id)
     }
     this.byCwd.delete(cwd)
   }
 
+  /**
+   * 앱 종료. **트리째 SIGKILL** — 유예를 기다려 줄 프로세스가 이제 없다.
+   *
+   * 예전엔 `pty.kill()`이었다: 셸 pid 하나에 SIGHUP. 대화형 셸에서 띄운 데브 서버는
+   * 자기 프로세스 그룹을 갖고, HUP을 스스로 다루는 서버라면 그대로 살아남았다 —
+   * 앱을 껐는데 포트가 물려 있는 그 증상 (실측 2026-09-07).
+   */
   disposeAll(): void {
-    for (const e of this.byId.values()) e.pty?.kill()
+    for (const e of this.byId.values()) if (e.pty) killTree(e.pty, 'SIGKILL')
     this.byCwd.clear()
     this.byId.clear()
   }

@@ -226,10 +226,18 @@ process.on('uncaughtException', (err) => {
 
 const shutdown = async () => {
   updates.stop()
-  await mgr.disposeAll()
-  // PTY도 자식 프로세스다 — setsid()로 자기 그룹이라 그룹 kill이 못 미치므로 직접 정리한다
+  /*
+   * **PTY를 먼저 끊는다.** 예전엔 mgr.disposeAll()을 await한 뒤였는데, Tauri 수퍼바이저가
+   * 주는 예산은 3초고 그 안에 안 끝나면 host가 SIGKILL당한다 — 그러면 이 두 줄이 아예
+   * 실행되지 않고 데브 서버가 고아로 남는다. 세션 정리는 늦어도 프로세스가 남지 않지만
+   * PTY는 남는다. 먼저 할 일은 남는 쪽이다.
+   *
+   * (PTY 자식은 setsid()로 자기 세션이라 수퍼바이저의 그룹 kill도 못 미친다 — 여기서
+   *  안 죽이면 아무도 안 죽인다.)
+   */
   terminals.disposeAll()
   commandRuns.disposeAll()
+  await mgr.disposeAll()
   await server.close()
   store.close()
   // 왜 끝났는지가 다음 조사의 첫 줄이 된다 — 조용히 사라지지 않는다
