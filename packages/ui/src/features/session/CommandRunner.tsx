@@ -131,8 +131,15 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
           </span>
         </div>
 
-        {/* 명령 목록 — 각 줄이 상자다. 별칭이 앞서고 명령이 받친다 (표류 방지 규칙) */}
-        <div className="flex max-h-64 shrink-0 flex-col gap-1 overflow-y-auto p-2">
+        {/*
+          명령 목록 — 별칭이 앞서고 명령이 받친다 (표류 방지 규칙).
+
+          줄에는 테두리가 없다. 예전엔 줄마다 `border-edge bg-void` 상자였는데, 바로 아래
+          등록 칸의 입력이 똑같은 껍데기라 **목록이 빈 입력 칸처럼 보였다** (사용자 지적
+          2026-09-07). 이 창에서 테두리 있는 상자는 **글자를 넣는 곳뿐**이고, 목록은
+          바탕색으로만 말한다 — 올린 줄은 옅게, 고른 줄은 진하게.
+        */}
+        <div className="flex max-h-64 shrink-0 flex-col gap-0.5 overflow-y-auto p-1.5">
           {commands.length === 0 && (
             <p className="px-1 py-0.5 text-[11px] text-slate">
               No saved commands yet — add one below. It runs in the project folder.
@@ -143,8 +150,8 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
             return (
               <div
                 key={`${i}-${c.command}`}
-                className={`group/row flex items-center rounded border bg-void transition-colors ${
-                  current === c.command ? 'border-ash/60' : 'border-edge hover:border-graphite'
+                className={`group/row flex items-center rounded transition-colors ${
+                  current === c.command ? 'bg-graphite/45' : 'hover:bg-graphite/20'
                 }`}
               >
                 <button
@@ -210,14 +217,17 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
                     if (current === c.command) setSelected(null)
                     void save(projectId, commands.filter((_, j) => j !== i))
                   }}
-                  className="shrink-0 rounded-r px-2 py-1.5 text-slate transition-colors hover:bg-graphite/25 hover:text-chalk"
+                  className="shrink-0 rounded-r px-2 py-1.5 text-slate transition-colors hover:bg-graphite/70 hover:text-chalk"
                 >
                   <CloseIcon size={10} />
                 </button>
               </div>
             )
           })}
-          {/* 등록 — 마지막 줄은 언제나 하나 더 추가하는 줄 (쓰고 싶은 순간이 곧 등록하는 순간) */}
+        </div>
+
+        {/* 등록 — 목록의 마지막 줄이 아니라 바닥의 한 칸이다. 선 하나로 "여기부터는 입력"을 가른다 */}
+        <div className="shrink-0 border-t border-edge p-2">
           <div className="flex items-center gap-1">
             <input
               value={draft}
