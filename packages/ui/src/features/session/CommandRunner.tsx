@@ -132,16 +132,20 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
         </div>
 
         {/*
-          명령 목록 — 별칭이 앞서고 명령이 받친다 (표류 방지 규칙).
+          명령 목록.
 
-          줄에는 테두리가 없다. 예전엔 줄마다 `border-edge bg-void` 상자였는데, 바로 아래
-          등록 칸의 입력이 똑같은 껍데기라 **목록이 빈 입력 칸처럼 보였다** (사용자 지적
-          2026-09-07). 이 창에서 테두리 있는 상자는 **글자를 넣는 곳뿐**이고, 목록은
-          바탕색으로만 말한다 — 올린 줄은 옅게, 고른 줄은 진하게.
+          줄마다 테두리를 두르지 않는다. 예전엔 줄이 `border-edge bg-void` 상자였는데,
+          바로 아래 등록 칸의 입력이 똑같은 껍데기라 **목록이 빈 입력 칸처럼 보였다**
+          (사용자 지적 2026-09-07). 그렇다고 아무 바탕도 안 주면 이번엔 창 바탕과 붙어
+          목록이 어디서 시작하는지 안 보인다 (같은 날 두 번째 지적).
+
+          그래서 **줄이 아니라 목록 전체가 한 칸**이다: 창보다 한 단 어두운 바닥(bg-void)
+          위에 머리카락 선으로 줄을 가른다. 테두리 있는 상자는 여전히 글자를 넣는 곳뿐이고,
+          목록은 눌러앉은 판이라 입력과 헷갈릴 여지가 없다.
         */}
-        <div className="flex max-h-64 shrink-0 flex-col gap-0.5 overflow-y-auto p-1.5">
+        <div className="max-h-64 shrink-0 overflow-y-auto border-b border-edge bg-void">
           {commands.length === 0 && (
-            <p className="px-1 py-0.5 text-[11px] text-slate">
+            <p className="px-3 py-2 text-[11px] text-slate">
               No saved commands yet — add one below. It runs in the project folder.
             </p>
           )}
@@ -150,15 +154,15 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
             return (
               <div
                 key={`${i}-${c.command}`}
-                className={`group/row flex items-center rounded transition-colors ${
-                  current === c.command ? 'bg-graphite/45' : 'hover:bg-graphite/20'
+                className={`group/row flex items-center border-b border-edge/60 transition-colors last:border-b-0 ${
+                  current === c.command ? 'bg-graphite/50' : 'hover:bg-graphite/25'
                 }`}
               >
                 <button
                   type="button"
                   data-testid={`run-command-${i}`}
                   onClick={() => setSelected(c.command)}
-                  className="min-w-0 flex-1 px-2 py-1 text-left"
+                  className="min-w-0 flex-1 px-3 py-1.5 text-left"
                 >
                   {renaming === c.command ? (
                     <input
@@ -226,8 +230,8 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
           })}
         </div>
 
-        {/* 등록 — 목록의 마지막 줄이 아니라 바닥의 한 칸이다. 선 하나로 "여기부터는 입력"을 가른다 */}
-        <div className="shrink-0 border-t border-edge p-2">
+        {/* 등록 — 목록의 마지막 줄이 아니라 바닥의 한 칸이다. 판이 끝나는 자리가 곧 경계다 */}
+        <div className="shrink-0 p-2">
           <div className="flex items-center gap-1">
             <input
               value={draft}
