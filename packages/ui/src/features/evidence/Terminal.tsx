@@ -7,6 +7,7 @@ import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { CloseIcon, PlusIcon } from '../../components/icons.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
 import { useStore } from '../../store/store.js'
+import { TabActions } from './tabActions.jsx'
 
 /**
  * 프로젝트 터미널 (여러 개).
@@ -83,15 +84,16 @@ export function TerminalPane({ projectId }: { projectId: string }) {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col" data-testid="evidence-terminal">
-      <div className="flex items-center gap-1.5 border-b border-edge px-3 py-1">
-        <span className="text-[11px] uppercase text-slate">Terminal</span>
-        {/* 글자를 빼고 기호만 남긴다 — 옆의 '터미널'이 이미 무엇에 대한 +인지 말해준다 */}
-        <span className="ml-auto">
-          <IconButton label="New terminal" onClick={() => void add()} testId="terminal-add" align="right">
-            <PlusIcon size={16} />
-          </IconButton>
-        </span>
-      </div>
+      {/*
+        머리띠를 따로 두지 않는다 (사용자 요청 2026-09-07). 이름표 'Terminal'은 바로 위
+        탭이 이미 하고 있는 말이었고, 띠 두 줄은 좁은 패널에서 내용이 시작하는 자리를
+        그만큼 밀어냈다. 버튼은 탭 띠의 오른쪽 끝으로 간다 — 포털이라 상태는 여기 그대로다.
+      */}
+      <TabActions>
+        <IconButton label="New terminal" onClick={() => void add()} testId="terminal-add" align="right">
+          <PlusIcon size={16} />
+        </IconButton>
+      </TabActions>
 
       {error && (
         <p className="px-3 py-2 text-[11px] leading-relaxed text-ash" data-testid="terminal-error">

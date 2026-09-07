@@ -6,6 +6,7 @@ import { useStore } from '../../store/store.js'
 import { ChevronIcon } from '../../components/icons.jsx'
 import { iconForFile } from './fileIcon.js'
 import { hasDragFiles, hasDragPath, readDragPath, setDragPath } from './dragPath.js'
+import { TabActions } from '../evidence/tabActions.jsx'
 
 /**
  * 파일 트리 (FR-5, C-2).
@@ -104,11 +105,14 @@ export function FileTree({ projectId }: { projectId: string }) {
   return (
     <TreeCtx.Provider value={ctx}>
       <section className="flex min-h-0 flex-1 flex-col" data-testid="file-tree">
-        <header className="flex items-center gap-2 border-b border-edge px-3 py-1.5">
-          <span className="text-[11px] text-slate">Project files</span>
+        {/*
+          제어는 탭 띠의 오른쪽 끝에 산다 (사용자 요청 2026-09-07) — 여기서 머리띠를 또
+          그리면 'Files' 탭 바로 아래에 'Project files'라고 한 번 더 쓰는 셈이었다.
+        */}
+        <TabActions>
           {/* 'Ignored' alone read as a state, not an action — it is the showing that is optional */}
           <label
-            className="ml-auto flex shrink-0 items-center gap-1.5 text-[11px] text-slate"
+            className="flex shrink-0 items-center gap-1.5 text-[11px] text-slate"
             title="Show what .gitignore hides — node_modules, build output, local files"
           >
             <input
@@ -120,7 +124,7 @@ export function FileTree({ projectId }: { projectId: string }) {
             />
             Show ignored
           </label>
-        </header>
+        </TabActions>
         <TreeRoot showIgnored={showIgnored} projectId={projectId} />
       </section>
       {menu && <RowMenu state={menu} close={() => setMenu(null)} />}

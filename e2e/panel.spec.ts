@@ -945,6 +945,50 @@ async function dropOnBodyBottom(page: Page) {
   })
 }
 
+/**
+ * 탭 띠 한 줄이 두 가지를 진다 (사용자 요청 2026-09-07): 왼쪽은 어디로 갈지, 오른쪽은
+ * **지금 탭의 제어 버튼**. 예전엔 탭마다 머리띠를 하나 더 그려서 띠가 두 줄이었다.
+ */
+test('the active tab\'s controls live in the tab strip, not in a second header', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', '작업')
+
+  const actions = page.getByTestId('evidence-actions')
+  await page.getByTestId('evidence-tab-terminal').click()
+  await expect(actions.getByTestId('terminal-add')).toBeVisible()
+
+  // 탭을 바꾸면 버튼도 그 탭의 것으로 바뀐다 — 남의 버튼은 남지 않는다
+  await page.getByTestId('evidence-tab-files').click()
+  await expect(actions.getByTestId('toggle-ignored')).toBeVisible()
+  await expect(actions.getByTestId('terminal-add')).toHaveCount(0)
+})
+
+/**
+ * 좁아지면 양보하는 쪽은 탭이다 — 제어 버튼은 보고 있는 것에 대한 행동이라 안 접힌다.
+ * 접힌 탭은 사라진 게 아니라 `…` 뒤에서 이름으로 고를 수 있다.
+ */
+test('when the strip runs out of room the extra tabs fold into a … menu', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', '작업')
+  await page.getByTestId('evidence-tab-files').click()
+  await expect(page.getByTestId('evidence-tab-terminal')).toBeVisible()
+
+  // 'Show ignored'가 오른쪽을 차지하는 폭이면 마지막 탭이 밀려난다
+  await page.evaluate(() => (window as never as { __store: any }).__store.getState().setPanelWidth(280))
+
+  const more = page.getByTestId('evidence-tabs-more')
+  await expect(more).toBeVisible()
+  await expect(page.getByTestId('evidence-tab-terminal')).toHaveCount(0)
+  // 고르고 있던 탭은 접히지 않는다 — 지금 어디에 있는지가 화면에서 사라지면 안 된다
+  await expect(page.getByTestId('evidence-tab-files')).toBeVisible()
+
+  await more.click()
+  await page.getByTestId('evidence-overflow-tab-terminal').click()
+  // 고른 탭은 자리를 얻는다 (자리를 내주는 건 그 대신 접히는 다른 탭이다)
+  await expect(page.getByTestId('evidence-tab-terminal')).toBeVisible()
+  await expect(page.getByTestId('evidence-actions').getByTestId('terminal-add')).toBeVisible()
+})
+
 test('tab order is dragged, and survives a relaunch — one arrangement for the whole app (#20)', async ({
   page,
 }) => {

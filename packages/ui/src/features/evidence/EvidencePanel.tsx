@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { GitCommit, GitFileStatus } from '@cc/protocol'
 import { laneCount, layoutCommits } from '@cc/core'
 import { CommitGraph, ROW_H } from '../../components/CommitGraph.jsx'
@@ -18,6 +18,8 @@ import {
 import { FileTree } from '../files/FileTree.jsx'
 import { TerminalPane } from './Terminal.jsx'
 import { COMMIT_LIMIT, commitAgo, hasMultipleAuthors } from './commits.js'
+import { fitTabs } from './fitTabs.js'
+import { TabActionSlot, TabActions } from './tabActions.jsx'
 import { DragRegion } from '../../components/DragRegion.jsx'
 import { ResizeHandle } from '../../components/ResizeHandle.jsx'
 import { PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, useTextZoom } from '../../store/store.js'
@@ -172,6 +174,10 @@ function PanelHeader({ projectName, branch }: { projectName: string; branch: str
   )
 }
 
+/** 탭 사이 간격(gap-0.5)과 `…` 버튼의 폭 — 접기 계산이 쓰는 두 숫자 */
+const TAB_GAP = 2
+const MORE_W = 26
+
 const TAB_LABELS: Record<PanelTab, string> = {
   git: 'Git',
   history: 'History',
@@ -241,6 +247,44 @@ function TabGroup({
   const [splitHint, setSplitHint] = useState(false)
   /** 아래 묶음의 탭 띠 — 두 묶음의 경계가 이 띠의 윗변이라, 조절 손잡이가 여기 산다 */
   const stripRef = useRef<HTMLElement>(null)
+  /** 이 묶음의 제어 버튼이 그려질 자리 (tabActions.tsx) — 몸통이 포털로 여기에 그린다 */
+  const [actionSlot, setActionSlot] = useState<HTMLElement | null>(null)
+
+  /*
+   * 탭이 몇 개나 들어가나. 재는 자리는 **탭이 쓸 수 있는 칸**(fitRef)이지 띠 전체가 아니다 —
+   * 오른쪽 제어 버튼은 안 접히므로 애초에 남의 몫이고, `…` 버튼이 생겼다 사라졌다 해도
+   * 이 칸의 폭은 변하지 않아 계산이 자기 결과에 흔들리지 않는다.
+   *
+   * 폭은 전부 레이아웃 px(offsetWidth·clientWidth)로만 잰다. rect는 확대(--text-zoom)가
+   * 곱해진 화면 px이라 둘을 섞으면 확대 상태에서 틀어진다 (이 파일의 경계 손잡이와 같은 규칙).
+   */
+  const fitRef = useRef<HTMLDivElement>(null)
+  const [avail, setAvail] = useState(0)
+  const [widths, setWidths] = useState<Partial<Record<PanelTab, number>>>({})
+  const measure = useCallback((id: PanelTab, w: number) => {
+    if (w <= 0) return
+    // 같은 값이면 같은 객체를 돌려준다 — 안 그러면 측정→렌더→측정으로 돈다
+    setWidths((prev) => (Math.abs((prev[id] ?? -1) - w) < 0.5 ? prev : { ...prev, [id]: w }))
+  }, [])
+
+  useLayoutEffect(() => {
+    const el = fitRef.current
+    if (!el) return
+    const read = () => setAvail(el.clientWidth)
+    read()
+    const ro = new ResizeObserver(read)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const { shown, hidden } = useMemo(
+    () =>
+      fitTabs(group.tabs, (t) => widths[t] ?? 0, avail, group.active, {
+        gap: TAB_GAP,
+        more: MORE_W,
+      }),
+    [group.tabs, group.active, avail, widths],
+  )
 
   return (
     <>
@@ -293,20 +337,37 @@ function TabGroup({
             }}
           />
         )}
-        {group.tabs.map((id) => (
-          <TabButton
-            key={id}
-            id={id}
-            active={group.active === id}
-            // Repo questions have no answer without a repo (#21) — and a disabled button
-            // also fires no drag events, so these tabs are arranged from repo projects
-            disabled={(id === 'git' || id === 'history') && !isRepo}
-            groups={groups}
-            onLayout={onLayout}
-            onPick={setPanelTab}
-            projectId={projectId}
-          />
-        ))}
+        {/*
+          왼쪽은 어디로 갈지(탭), 오른쪽은 지금 있는 곳에서 할 일(제어 버튼). 좁아지면
+          양보하는 쪽은 언제나 탭이다 — 제어 버튼은 보고 있는 것에 대한 행동이라 손 닿는
+          곳에 있어야 하고, 밀려난 탭은 `…` 뒤에서 이름으로 고를 수 있다.
+        */}
+        <div ref={fitRef} className="flex min-w-0 flex-1 items-center gap-0.5">
+          <div className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+            {shown.map((id) => (
+              <TabButton
+                key={id}
+                id={id}
+                active={group.active === id}
+                // Repo questions have no answer without a repo (#21) — and a disabled button
+                // also fires no drag events, so these tabs are arranged from repo projects
+                disabled={(id === 'git' || id === 'history') && !isRepo}
+                groups={groups}
+                onLayout={onLayout}
+                onPick={setPanelTab}
+                projectId={projectId}
+                onMeasure={measure}
+              />
+            ))}
+          </div>
+          {hidden.length > 0 && <MoreTabs gi={gi} hidden={hidden} onPick={setPanelTab} />}
+        </div>
+        <div
+          ref={setActionSlot}
+          className="flex shrink-0 items-center gap-1 pl-1"
+          /* 이름에 'evidence-tab-'을 쓰지 않는다 — 탭 목록을 그 접두사로 훑는 자리가 있다 */
+          data-testid={gi === 0 ? 'evidence-actions' : `evidence-actions-${gi}`}
+        />
       </nav>
       <div
         /*
@@ -348,7 +409,9 @@ function TabGroup({
           }
         }}
       >
-        <TabBody tab={group.active} projectId={projectId} project={project} />
+        <TabActionSlot value={actionSlot}>
+          <TabBody tab={group.active} projectId={projectId} project={project} />
+        </TabActionSlot>
         {splitHint && (
           <div
             /*
@@ -375,6 +438,70 @@ function TabGroup({
 const dropsLeft = (rect: { left: number; width: number }, clientX: number): boolean =>
   clientX < rect.left + rect.width / 2
 
+/**
+ * 접힌 탭들 (`…`).
+ *
+ * 자리가 없어 접힌 것뿐이지 사라진 게 아니다 — 여기서 이름으로 고를 수 있다. 목록은
+ * 띠 안이 아니라 띠 아래로 내려온다: 띠는 폭이 없어서 접은 것이라, 그 안에 목록을
+ * 펼치면 같은 문제를 다시 만든다.
+ */
+function MoreTabs({ gi, hidden, onPick }: { gi: number; hidden: PanelTab[]; onPick: (t: PanelTab) => void }) {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      setOpen(false)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [open])
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        data-testid={gi === 0 ? 'evidence-tabs-more' : `evidence-tabs-more-${gi}`}
+        aria-label={`${hidden.length} more tabs`}
+        title={hidden.map((t) => TAB_LABELS[t]).join(' · ')}
+        className={`rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-graphite/50 hover:text-chalk ${
+          open ? 'bg-graphite/50 text-chalk' : 'text-ash'
+        }`}
+      >
+        …
+      </button>
+      {open && (
+        <>
+          {/* 바깥을 누르면 닫힌다 — 메뉴 자체는 아래 z가 더 높다 */}
+          <div className="fixed inset-0 z-40" onMouseDown={() => setOpen(false)} />
+          <div
+            className="cc-drop absolute left-0 top-full z-50 mt-1 min-w-28 overflow-hidden rounded border border-edge bg-panel py-0.5 shadow-[0_12px_32px_-8px_rgb(0_0_0/0.9)]"
+            data-testid={gi === 0 ? 'evidence-tabs-overflow' : `evidence-tabs-overflow-${gi}`}
+          >
+            {hidden.map((id) => (
+              <button
+                key={id}
+                type="button"
+                data-testid={`evidence-overflow-tab-${id}`}
+                onClick={() => {
+                  onPick(id)
+                  setOpen(false)
+                }}
+                className="block w-full px-3 py-1 text-left text-[11px] text-ash transition-colors hover:bg-graphite/50 hover:text-chalk"
+              >
+                {TAB_LABELS[id]}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function TabButton({
   id,
   active,
@@ -383,6 +510,7 @@ function TabButton({
   onLayout,
   onPick,
   projectId,
+  onMeasure,
 }: {
   id: PanelTab
   active: boolean
@@ -391,6 +519,8 @@ function TabButton({
   onLayout: (groups: PanelGroup[]) => void
   onPick: (tab: PanelTab) => void
   projectId: string
+  /** 자기 폭을 띠에게 알린다 — 띠는 이 숫자들로 몇 개가 들어가는지 센다 */
+  onMeasure?: (id: PanelTab, width: number) => void
 }) {
   // Each button keeps its own drop edge so the line is drawn on that button only —
   // the same call as the sidebar rows, for the same reason.
@@ -405,6 +535,14 @@ function TabButton({
 
   return (
     <button
+      ref={(el) => {
+        // 글자 크기(--text-zoom)가 바뀌면 폭도 바뀐다 — 한 번 재고 마는 대신 계속 본다
+        if (!el || !onMeasure) return
+        onMeasure(id, el.offsetWidth)
+        const ro = new ResizeObserver(() => onMeasure(id, el.offsetWidth))
+        ro.observe(el)
+        return () => ro.disconnect()
+      }}
       onClick={() => onPick(id)}
       data-testid={`evidence-tab-${id}`}
       disabled={disabled}
@@ -634,24 +772,22 @@ function GitChanges({ projectId, denied }: { projectId: string; denied?: boolean
 
   return (
     <section className="flex min-h-0 flex-1 flex-col border-b border-edge" data-testid="evidence-git">
-      <div className="flex items-center gap-1.5 px-3 py-1.5">
-        <span className="text-[11px] uppercase text-slate">Changes</span>
-        {files && files.length > 0 && (
-          <>
-            <span className="readout text-[10px] text-ash" data-testid="evidence-change-count">
-              {files.length}
-            </span>
-            <button
-              className="ml-auto rounded px-1.5 py-0.5 text-[10px] text-slate transition-colors hover:bg-graphite/50 hover:text-chalk"
-              onClick={() => openGit()}
-              data-testid="evidence-git-full"
-              title="Open in wide view"
-            >
-              Expand
-            </button>
-          </>
-        )}
-      </div>
+      {/* 이름표 'Changes'는 탭이 이미 한 말이라 뺐다 — 숫자와 버튼만 띠의 오른쪽으로 간다 */}
+      {files && files.length > 0 && (
+        <TabActions>
+          <span className="readout text-[10px] text-ash" data-testid="evidence-change-count">
+            {files.length}
+          </span>
+          <button
+            className="rounded px-1.5 py-0.5 text-[10px] text-slate transition-colors hover:bg-graphite/50 hover:text-chalk"
+            onClick={() => openGit()}
+            data-testid="evidence-git-full"
+            title="Open in wide view"
+          >
+            Expand
+          </button>
+        </TabActions>
+      )}
 
       {denied ? (
         <p className="px-3 pb-2 text-[11px] leading-relaxed text-ash" data-testid="evidence-git-denied">
