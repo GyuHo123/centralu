@@ -21,6 +21,52 @@
     "thread/goal/get",
     "thread/goal/clear"
   ],
+  "_requestParamsComment": [
+    "우리가 각 요청에 **실제로 싣는 인자**. 이름만 대조하면 인자가 늘어난 것을 못 잡는다",
+    "(2026-09-07: turn/interrupt에 turnId가 필수로 늘었는데 몇 달간 스톱이 안 먹었다)."
+  ],
+  "requestParams": {
+    "turn/start": {
+      "type": "TurnStartParams",
+      "send": [
+        "threadId",
+        "input",
+        "effort"
+      ]
+    },
+    "turn/interrupt": {
+      "type": "TurnInterruptParams",
+      "send": [
+        "threadId",
+        "turnId"
+      ]
+    },
+    "thread/compact/start": {
+      "type": "ThreadCompactStartParams",
+      "send": [
+        "threadId"
+      ]
+    },
+    "thread/goal/set": {
+      "type": "ThreadGoalSetParams",
+      "send": [
+        "threadId",
+        "objective"
+      ]
+    },
+    "thread/goal/get": {
+      "type": "ThreadGoalGetParams",
+      "send": [
+        "threadId"
+      ]
+    },
+    "thread/goal/clear": {
+      "type": "ThreadGoalClearParams",
+      "send": [
+        "threadId"
+      ]
+    }
+  },
   "clientNotifications": [
     "initialized"
   ],

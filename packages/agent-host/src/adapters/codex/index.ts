@@ -58,6 +58,16 @@ class CodexSession implements SessionHandle {
 
   private client: CodexClient
   private threadId: string | null = null
+  /**
+   * 지금 도는 턴의 id — **멈추려면 이게 있어야 한다** (도그푸딩 2026-09-07: 스톱이 안 먹혔다).
+   *
+   * `turn/interrupt`는 threadId만으로는 안 된다. 실측하면 서버가
+   * `Invalid request: missing field \`turnId\``(-32600)로 거절하고, 우리는 그 거절을
+   * 에러 이벤트로만 흘려 보냈다 — 화면은 멈춘 듯 보이는데 턴은 끝까지 돌았다.
+   * 그래서 turn/started 알림과 turn/start 응답 **양쪽에서** 잡는다: 스톱을 아주 빨리
+   * 누르면 알림보다 응답이 먼저 올 수 있다.
+   */
+  private turnId: string | null = null
   /** 우리 requestId → Codex 서버 요청 id */
   private approvals = new Map<string, number | string>()
   private reqCounter = 0
@@ -160,7 +170,9 @@ class CodexSession implements SessionHandle {
            * 다른 앱이거나, 정리되지 못한 채 fd만 물려받고 살아남은 고아다.
            */
           throw Object.assign(
-            new Error('This conversation is already open elsewhere (codex in a terminal, another app, or a process left behind by an unclean shutdown)'),
+            new Error(
+              'This conversation is already open elsewhere (codex in a terminal, another app, or a process left behind by an unclean shutdown)',
+            ),
             { code: 'conversation_locked' },
           )
         }
@@ -248,6 +260,11 @@ class CodexSession implements SessionHandle {
   }
 
   private onNotification(n: { method: string; params?: unknown }): void {
+    // 어느 턴이 도는지 (Turn.id — generated/v2/Turn.ts). 끝나면 지운다: 끝난 턴을
+    // 멈추려 들면 서버가 거절하고, 그 거절이 "안 멈췄다"는 거짓 신호가 된다
+    if (n.method === 'turn/started') this.turnId = turnIdOf(n.params)
+    if (n.method === 'turn/completed' || n.method === 'turn/failed') this.turnId = null
+
     // compact/review가 끝나는 자리 — 그동안 쌓인 메시지가 있으면 이제 내보낸다
     if (n.method === 'turn/completed' && this.blockingTurn) {
       this.blockingTurn = false
@@ -297,7 +314,10 @@ class CodexSession implements SessionHandle {
       this.client.respond(r.id, {})
       return
     }
-    const params = (typeof r.params === 'object' && r.params !== null ? r.params : {}) as Record<string, unknown>
+    const params = (typeof r.params === 'object' && r.params !== null ? r.params : {}) as Record<
+      string,
+      unknown
+    >
 
     /*
      * **우리 도구는 우리가 보증한다** (Claude 쪽 canUseTool과 같은 규칙).
@@ -340,101 +360,116 @@ class CodexSession implements SessionHandle {
   }
 
   send(text: string): void {
-    void this.ready.then(() => {
-      if (!this.threadId) throw new Error('Thread is not ready')
-      /*
-       * compact/review가 도는 동안은 보내지 않고 쌓는다 — pendingInputs 주석의 실측이
-       * 근거다 (보내면 codex가 성공을 답하며 **버린다**). 슬래시 함수가 여기 끼면
-       * 글자 그대로 전달되는 한계는 남는데, compact 중의 /compact은 어차피 무의미하다.
-       */
-      if (this.blockingTurn) {
-        this.pendingInputs.push(text)
-        return
-      }
-      /*
-       * **compact은 메시지가 아니라 함수다** (도그푸딩 지적 — "메시지 보내면 작동하는게
-       * 아니라"가 정확한 관찰이었다). codex CLI에서 /compact은 대화에 들어가지 않고
-       * 압축을 실행하는데, app-server 경로에는 그 슬래시 처리기가 없다 — turn/start로
-       * 보내면 모델이 "/compact"라는 **글자를 읽는다.** 전용 RPC가 따로 있다:
-       * thread/compact/start (generated/ClientRequest.ts). 실측: 즉시 {}를 답하고
-       * turn/started → contextCompaction 아이템 → thread/compacted로 진행돼,
-       * 기존 normalize 배관(압축 중 표시·완료 마커)이 그대로 받는다.
-       */
-      if (text.trim() === '/compact') {
-        this.blockingTurn = true
-        return this.client.request('thread/compact/start', { threadId: this.threadId }).catch((e: unknown) => {
-          // 시작하지 못한 턴을 기다리면 큐가 영원히 잠긴다 — 풀고 쌓인 것부터 내보낸다
-          this.blockingTurn = false
-          this.flushPending()
-          throw e
-        })
-      }
-      /*
-       * /review도 같은 종류다 (review/start RPC). 실측: 인자 없으면 codex CLI의 기본과
-       * 같은 "지금 바뀐 것들" 리뷰, 인자가 있으면 그 지시대로(custom). 결과는 보통
-       * 턴처럼 온다 — 리뷰 본문은 agentMessage로 스트리밍되고(기존 배관), 시작·끝은
-       * enteredReviewMode/exitedReviewMode 아이템으로 온다 (normalize가 activity로 바꾼다).
-       * 상류가 review 턴도 조종 불가로 분류하므로("cannot steer a review turn")
-       * compact과 같이 큐로 지킨다.
-       */
-      if (text.trim() === '/review' || text.trim().startsWith('/review ')) {
-        const instructions = text.trim().slice('/review'.length).trim()
-        this.blockingTurn = true
-        return this.client.request('review/start', {
-          threadId: this.threadId,
-          target: instructions ? { type: 'custom', instructions } : { type: 'uncommittedChanges' },
-        }).catch((e: unknown) => {
-          this.blockingTurn = false
-          this.flushPending()
-          throw e
-        })
-      }
-      /*
-       * /goal도 함수다 (2026-09-07 — /compact·/review와 같은 #58 부류). turn/start로
-       * 보내면 모델이 "/goal"이라는 글자를 읽는다. 전용 RPC 세 개가 있다:
-       * thread/goal/set·get·clear. 상태 변화는 thread/goal/updated|cleared 알림으로
-       * 돌아와 배지가 그걸 그린다 — 여기서는 채팅에 한 줄 확인만 남긴다 (로컬 명령의
-       * 답이 안 보이면 실행됐는지 알 길이 없다 — claude local_command_output의 교훈).
-       * 턴이 아니라서 blockingTurn은 걸지 않는다.
-       */
-      if (text.trim() === '/goal' || text.trim().startsWith('/goal ')) {
-        const arg = text.trim().slice('/goal'.length).trim()
-        const say = (line: string) =>
-          this.emit({ type: 'message_delta', sessionId: this.sessionId, role: 'assistant', text: line })
-        if (!arg) {
-          return this.client
-            .request<{ goal: { objective?: string; status?: string } | null }>('thread/goal/get', {
-              threadId: this.threadId,
-            })
-            .then((r) =>
-              say(r.goal ? `Goal (${r.goal.status ?? 'active'}): ${r.goal.objective ?? ''}` : 'No goal set.'),
-            )
-        }
-        if (arg === 'clear') {
-          return this.client
-            .request('thread/goal/clear', { threadId: this.threadId })
-            .then(() => say('Goal cleared.'))
-        }
-        return this.client
-          .request('thread/goal/set', { threadId: this.threadId, objective: arg })
-          .then(() => say(`Goal set: ${arg}`))
-      }
-      return this.client.request('turn/start', {
-        threadId: this.threadId,
-        input: [{ type: 'text', text }],
+    void this.ready
+      .then(() => {
+        if (!this.threadId) throw new Error('Thread is not ready')
         /*
-         * 추론 강도는 턴 단위로 넘긴다 — codex가 "이 턴과 이후 턴"에 적용한다고
-         * 문서화한 자리다. 세션을 다시 띄우지 않고 바꿀 수 있어서 이쪽이 더 싸다.
+         * compact/review가 도는 동안은 보내지 않고 쌓는다 — pendingInputs 주석의 실측이
+         * 근거다 (보내면 codex가 성공을 답하며 **버린다**). 슬래시 함수가 여기 끼면
+         * 글자 그대로 전달되는 한계는 남는데, compact 중의 /compact은 어차피 무의미하다.
          */
-        ...(this.opts.effort ? { effort: this.opts.effort } : {}),
+        if (this.blockingTurn) {
+          this.pendingInputs.push(text)
+          return
+        }
+        /*
+         * **compact은 메시지가 아니라 함수다** (도그푸딩 지적 — "메시지 보내면 작동하는게
+         * 아니라"가 정확한 관찰이었다). codex CLI에서 /compact은 대화에 들어가지 않고
+         * 압축을 실행하는데, app-server 경로에는 그 슬래시 처리기가 없다 — turn/start로
+         * 보내면 모델이 "/compact"라는 **글자를 읽는다.** 전용 RPC가 따로 있다:
+         * thread/compact/start (generated/ClientRequest.ts). 실측: 즉시 {}를 답하고
+         * turn/started → contextCompaction 아이템 → thread/compacted로 진행돼,
+         * 기존 normalize 배관(압축 중 표시·완료 마커)이 그대로 받는다.
+         */
+        if (text.trim() === '/compact') {
+          this.blockingTurn = true
+          return this.client
+            .request('thread/compact/start', { threadId: this.threadId })
+            .catch((e: unknown) => {
+              // 시작하지 못한 턴을 기다리면 큐가 영원히 잠긴다 — 풀고 쌓인 것부터 내보낸다
+              this.blockingTurn = false
+              this.flushPending()
+              throw e
+            })
+        }
+        /*
+         * /review도 같은 종류다 (review/start RPC). 실측: 인자 없으면 codex CLI의 기본과
+         * 같은 "지금 바뀐 것들" 리뷰, 인자가 있으면 그 지시대로(custom). 결과는 보통
+         * 턴처럼 온다 — 리뷰 본문은 agentMessage로 스트리밍되고(기존 배관), 시작·끝은
+         * enteredReviewMode/exitedReviewMode 아이템으로 온다 (normalize가 activity로 바꾼다).
+         * 상류가 review 턴도 조종 불가로 분류하므로("cannot steer a review turn")
+         * compact과 같이 큐로 지킨다.
+         */
+        if (text.trim() === '/review' || text.trim().startsWith('/review ')) {
+          const instructions = text.trim().slice('/review'.length).trim()
+          this.blockingTurn = true
+          return this.client
+            .request('review/start', {
+              threadId: this.threadId,
+              target: instructions ? { type: 'custom', instructions } : { type: 'uncommittedChanges' },
+            })
+            .catch((e: unknown) => {
+              this.blockingTurn = false
+              this.flushPending()
+              throw e
+            })
+        }
+        /*
+         * /goal도 함수다 (2026-09-07 — /compact·/review와 같은 #58 부류). turn/start로
+         * 보내면 모델이 "/goal"이라는 글자를 읽는다. 전용 RPC 세 개가 있다:
+         * thread/goal/set·get·clear. 상태 변화는 thread/goal/updated|cleared 알림으로
+         * 돌아와 배지가 그걸 그린다 — 여기서는 채팅에 한 줄 확인만 남긴다 (로컬 명령의
+         * 답이 안 보이면 실행됐는지 알 길이 없다 — claude local_command_output의 교훈).
+         * 턴이 아니라서 blockingTurn은 걸지 않는다.
+         */
+        if (text.trim() === '/goal' || text.trim().startsWith('/goal ')) {
+          const arg = text.trim().slice('/goal'.length).trim()
+          const say = (line: string) =>
+            this.emit({ type: 'message_delta', sessionId: this.sessionId, role: 'assistant', text: line })
+          if (!arg) {
+            return this.client
+              .request<{ goal: { objective?: string; status?: string } | null }>('thread/goal/get', {
+                threadId: this.threadId,
+              })
+              .then((r) =>
+                say(
+                  r.goal ? `Goal (${r.goal.status ?? 'active'}): ${r.goal.objective ?? ''}` : 'No goal set.',
+                ),
+              )
+          }
+          if (arg === 'clear') {
+            return this.client
+              .request('thread/goal/clear', { threadId: this.threadId })
+              .then(() => say('Goal cleared.'))
+          }
+          return this.client
+            .request('thread/goal/set', { threadId: this.threadId, objective: arg })
+            .then(() => say(`Goal set: ${arg}`))
+        }
+        return (
+          this.client
+            .request('turn/start', {
+              threadId: this.threadId,
+              input: [{ type: 'text', text }],
+              /*
+               * 추론 강도는 턴 단위로 넘긴다 — codex가 "이 턴과 이후 턴"에 적용한다고
+               * 문서화한 자리다. 세션을 다시 띄우지 않고 바꿀 수 있어서 이쪽이 더 싸다.
+               */
+              ...(this.opts.effort ? { effort: this.opts.effort } : {}),
+            })
+            // 응답에도 턴이 실려 온다 — 알림보다 먼저 도착하는 경우까지 덮는다 (스톱의 과녁)
+            .then((res) => {
+              this.turnId ??= turnIdOf(res)
+            })
+        )
       })
-    }).catch((e: Error) => {
-      this.emit({
-        type: 'error',
-        sessionId: this.sessionId,
-        error: { code: 'internal', message: e.message, retryable: true },
+      .catch((e: Error) => {
+        this.emit({
+          type: 'error',
+          sessionId: this.sessionId,
+          error: { code: 'internal', message: e.message, retryable: true },
+        })
       })
-    })
   }
 
   /** 막혔던 메시지를 한 턴으로 내보낸다 — 각 메시지는 제 input 항목으로 (경계를 뭉개지 않는다) */
@@ -442,20 +477,30 @@ class CodexSession implements SessionHandle {
     if (this.pendingInputs.length === 0 || !this.threadId) return
     const input = this.pendingInputs.map((text) => ({ type: 'text', text }))
     this.pendingInputs = []
-    void this.client.request('turn/start', {
-      threadId: this.threadId,
-      input,
-      ...(this.opts.effort ? { effort: this.opts.effort } : {}),
-    }).catch((e: Error) => {
-      this.emit({
-        type: 'error',
-        sessionId: this.sessionId,
-        error: { code: 'internal', message: e.message, retryable: true },
+    void this.client
+      .request('turn/start', {
+        threadId: this.threadId,
+        input,
+        ...(this.opts.effort ? { effort: this.opts.effort } : {}),
       })
-    })
+      .then((res) => {
+        this.turnId ??= turnIdOf(res)
+      })
+      .catch((e: Error) => {
+        this.emit({
+          type: 'error',
+          sessionId: this.sessionId,
+          error: { code: 'internal', message: e.message, retryable: true },
+        })
+      })
   }
 
-  respondApproval(requestId: string, decision: ApprovalDecision, _scope?: ApprovalScope, matcher?: string): boolean {
+  respondApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    _scope?: ApprovalScope,
+    matcher?: string,
+  ): boolean {
     const serverId = this.approvals.get(requestId)
     // 스레드를 다시 띄우면 이 맵은 비어 있다 — 그 전에 뜬 카드의 id는 여기에 없다
     if (serverId === undefined) return false
@@ -502,15 +547,18 @@ class CodexSession implements SessionHandle {
   }
 
   interrupt(): void {
-    if (!this.threadId) return
+    // 도는 턴이 없으면 멈출 것도 없다 (턴이 막 끝난 뒤의 스톱이 이 자리다)
+    if (!this.threadId || !this.turnId) return
     // 실패를 삼키면 "멈췄겠지" 하고 기다리게 된다 — 안 멈췄으면 안 멈췄다고 말한다
-    void this.client.request('turn/interrupt', { threadId: this.threadId }).catch((err: Error) => {
-      this.emit({
-        type: 'error',
-        sessionId: this.sessionId,
-        error: { code: 'internal', message: `Could not stop: ${err.message}`, retryable: true },
+    void this.client
+      .request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId })
+      .catch((err: Error) => {
+        this.emit({
+          type: 'error',
+          sessionId: this.sessionId,
+          error: { code: 'internal', message: `Could not stop: ${err.message}`, retryable: true },
+        })
       })
-    })
   }
 
   /**
@@ -574,6 +622,12 @@ class CodexSession implements SessionHandle {
     }
     await this.client.dispose()
   }
+}
+
+/** `{turn: {id}}` — turn/started 알림과 turn/start 응답이 같은 모양으로 준다 */
+function turnIdOf(payload: unknown): string | null {
+  const turn = (payload as { turn?: { id?: unknown } } | undefined)?.turn
+  return typeof turn?.id === 'string' ? turn.id : null
 }
 
 function threadIdOf(res: Record<string, unknown> | undefined): string | null {

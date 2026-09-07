@@ -40,7 +40,8 @@
     "perf:idle": "node packages/agent-host/scripts/idle-perf.mjs",
     "release:npm": "tsx scripts/release-npm.mts",
     "icon": "tsx scripts/render-icon.mts",
-    "smoke:goal": "tsx packages/agent-host/scripts/smoke-goal.mts"
+    "smoke:goal": "tsx packages/agent-host/scripts/smoke-goal.mts",
+    "smoke:interrupt": "tsx packages/agent-host/scripts/smoke-interrupt.mts"
   },
   "devDependencies": {
     "@eslint/js": "^9.20.0",

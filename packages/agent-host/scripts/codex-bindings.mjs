@@ -69,6 +69,70 @@ for (const [key, label] of groups) {
   }
 }
 
+/*
+ * 메서드 **이름**만 대조하는 것으로는 부족하다는 걸 실측이 보여줬다 (2026-09-07):
+ * `turn/interrupt`는 그대로 있었지만 turnId가 필수 인자로 늘어 있었고, 우리는 threadId만
+ * 보내며 몇 달을 "멈췄겠지" 하고 있었다 — 스톱이 한 번도 안 먹었다.
+ *
+ * 그래서 **우리가 보내는 인자 목록**도 계약에 적고, 생성된 파라미터 타입과 양방향으로 맞춘다:
+ *   - 타입의 필수 필드인데 우리가 안 보내면  → 서버가 거절한다 (그 버그)
+ *   - 우리가 보내는데 타입에 없으면          → 이름이 바뀐 것이다 (조용히 무시된다)
+ */
+function paramFields(src) {
+  const open = src.indexOf('= {')
+  if (open < 0) return null
+  const body = src.slice(open + 3, src.lastIndexOf('}')).replace(/\/\*[\s\S]*?\*\//g, '')
+  const fields = []
+  let depth = 0
+  let start = 0
+  const push = (seg) => {
+    const m = /^\s*(\w+)(\??)\s*:/.exec(seg)
+    if (m) fields.push({ name: m[1], required: m[2] !== '?' })
+  }
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]
+    if ('{[(<'.includes(c)) depth++
+    else if ('}])>'.includes(c)) depth--
+    else if (c === ',' && depth === 0) {
+      push(body.slice(start, i))
+      start = i + 1
+    }
+  }
+  push(body.slice(start))
+  return fields
+}
+
+const sources = new Map()
+const collect = (d) => {
+  for (const entry of readdirSync(d, { withFileTypes: true })) {
+    const p = join(d, entry.name)
+    if (entry.isDirectory()) collect(p)
+    else if (entry.name.endsWith('.ts')) sources.set(entry.name.slice(0, -3), readFileSync(p, 'utf8'))
+  }
+}
+collect(tmp)
+
+for (const [method, spec] of Object.entries(contract.requestParams ?? {})) {
+  const src = sources.get(spec.type)
+  if (!src) {
+    missing.push(`요청 인자 타입: ${spec.type} (${method})`)
+    continue
+  }
+  const fields = paramFields(src)
+  if (!fields) {
+    missing.push(`요청 인자 타입을 읽지 못함: ${spec.type} (${method})`)
+    continue
+  }
+  const sent = new Set(spec.send)
+  for (const f of fields) {
+    if (f.required && !sent.has(f.name)) missing.push(`${method}: 필수 인자 '${f.name}'을 안 보냅니다`)
+  }
+  const known = new Set(fields.map((f) => f.name))
+  for (const name of sent) {
+    if (!known.has(name)) missing.push(`${method}: '${name}'은 ${spec.type}에 없습니다 (이름이 바뀌었나?)`)
+  }
+}
+
 if (missing.length > 0) {
   console.error(
     `[codex] 프로토콜이 바뀌었습니다 (${version}). 우리가 의존하는 항목 ${missing.length}개가 사라졌습니다:\n  ` +
@@ -87,7 +151,10 @@ if (KEEP) {
   cpSync(tmp, dest, { recursive: true })
   console.log(`[codex] 계약 확인 (${version}) · 참고용 타입을 generated/ 에 두었습니다 (커밋 대상 아님)`)
 } else {
-  console.log(`[codex] 계약 확인 (${version}) — 의존 항목 ${groups.reduce((n, [k]) => n + contract[k].length, 0)}개 모두 존재`)
+  console.log(
+    `[codex] 계약 확인 (${version}) — 의존 항목 ${groups.reduce((n, [k]) => n + contract[k].length, 0)}개 + ` +
+      `요청 인자 ${Object.keys(contract.requestParams ?? {}).length}건 모두 일치`,
+  )
 }
 
 rmSync(tmp, { recursive: true, force: true })
