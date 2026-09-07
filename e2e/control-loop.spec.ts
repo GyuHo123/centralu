@@ -6011,6 +6011,39 @@ test('in a multi-line draft the arrows move the caret first (#38)', async ({ pag
 })
 
 /**
+ * 접혀서 여러 줄이 된 한 줄에서도 화살표는 먼저 커서의 것이다 (사용자 지적 2026-09-07).
+ *
+ * 개행은 없지만 눈에는 세 줄이다. 예전엔 개행만 셌기 때문에 어느 줄에서 눌러도 "첫 줄"로
+ * 쳐서 기록이 올라왔다 — 쓰던 글이 사라진 것처럼 보인다.
+ */
+test('a long wrapped line moves the caret before it recalls history (#38)', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', '보낸 말')
+
+  const input = page.getByTestId('prompt-input')
+  // 개행 없이 입력창 폭을 몇 번 넘기는 한 줄
+  const long = Array.from({ length: 60 }, (_, i) => `word${i}`).join(' ')
+  await input.fill(long)
+
+  // 접혀서 실제로 여러 줄이 됐는지 먼저 확인한다 — 안 접히면 이 시험은 아무것도 안 본다
+  const rows = await input.evaluate((el: HTMLTextAreaElement) => {
+    const lh = parseFloat(getComputedStyle(el).lineHeight) || 16
+    return Math.round(el.scrollHeight / lh)
+  })
+  expect(rows).toBeGreaterThan(1)
+
+  // 커서는 끝(= 접힌 마지막 줄)에 있다 — 위 화살표는 커서를 올린다, 기록이 아니라
+  await input.press('ArrowUp')
+  await expect(input).toHaveValue(long)
+  const moved = await input.evaluate((el: HTMLTextAreaElement) => el.selectionStart)
+  expect(moved).toBeLessThan(long.length)
+
+  // 맨 위 줄까지 올라가면 그때부터는 기록이다 (몇 번 접혔든 위로 계속 누르면 닿는다)
+  for (let i = 0; i < rows + 1; i++) await input.press('ArrowUp')
+  await expect(input).toHaveValue('보낸 말')
+})
+
+/**
  * 조합 중인 화살표는 후보 목록의 키다 (#12).
  *
  * 한글·일본어·중국어를 치는 사람에게는 방향키가 글자를 고르는 키이기도 하다.

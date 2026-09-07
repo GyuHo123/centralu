@@ -18,6 +18,7 @@ import { SessionSettings } from './SessionSettings.jsx'
 import { AutocompleteMenu, useAutocomplete, type Suggestion } from './Autocomplete.jsx'
 import { guiCommandFor } from './guiCommands.js'
 import { onFirstLine, onLastLine, sentMessages, stepHistory } from './history.js'
+import { onFirstVisualLine, onLastVisualLine } from './caret.js'
 import { appendPath, readDragPath } from '../files/dragPath.js'
 import { anchorAt, decideFollow, isAtBottom, MOVED_UP_SLACK, shouldFollowAgain } from './scroll.js'
 
@@ -473,7 +474,7 @@ const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
    * 판단은 history.ts가, 커서 규칙은 여기서. 셋 다 만족해야 기록이 나선다:
    *  - 자동완성이 닫혀 있다 (열려 있으면 화살표는 목록의 것이다 — 부르는 쪽이 이미 걸렀다)
    *  - 고른 글자가 없다 (선택이 있는 화살표는 선택을 푸는 키다)
-   *  - 커서가 위 화살표면 첫 줄, 아래 화살표면 마지막 줄에 있다
+   *  - 커서가 위 화살표면 첫 줄, 아래 화살표면 마지막 줄에 있다 — **접힌 줄까지 세어서**
    *
    * 기록은 그때그때 대화에서 훑는다. 미리 만들어 두면 스트리밍 델타마다 수천 줄을
    * 다시 훑게 되는데, 정작 쓰이는 건 화살표를 누른 순간뿐이다.
@@ -481,7 +482,15 @@ const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
   const recallHistory = (el: HTMLTextAreaElement, dir: -1 | 1): boolean => {
     if (el.selectionStart !== el.selectionEnd) return false
     const caret = el.selectionStart
-    const onEdge = dir === -1 ? onFirstLine(text, caret) : onLastLine(text, caret)
+    /*
+     * 개행으로 먼저 걸러 낸다(값 비교, 공짜). 거기서 걸리지 않은 것만 거울로 잰다 —
+     * 긴 한 줄이 접혀 있으면 개행은 없어도 눈에는 여러 줄이고, 그 가운데에서 누른
+     * 화살표는 기록이 아니라 커서의 것이다 (사용자 지적 2026-09-07).
+     */
+    const onEdge =
+      dir === -1
+        ? onFirstLine(text, caret) && onFirstVisualLine(el)
+        : onLastLine(text, caret) && onLastVisualLine(el)
     if (!onEdge) return false
 
     const step = stepHistory({
