@@ -8,6 +8,44 @@ mod sidecar;
 use sidecar::{HostInfo, Supervisor};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
+/**
+ * ⌘Q도 물어보게 만든다 (도그푸딩 2026-09-07: "⌘W는 이제 안 꺼지는데 ⌘Q는 바로 꺼진다").
+ *
+ * 아래 run 콜백의 ExitRequested 관문은 **⌘Q를 못 본다.** 근거는 상류 소스다:
+ *   - tao의 macOS 앱 델리게이트는 `applicationShouldTerminate:`를 구현하지 않는다.
+ *     `applicationWillTerminate:`만 있고, 그건 종료가 이미 결정된 뒤에 오는 통지다
+ *     (tao 0.35.3 platform_impl/macos/app_delegate.rs).
+ *   - tauri-runtime-wry가 `ExitRequested{code:None}`을 내는 자리는 **마지막 창이
+ *     Destroyed된 뒤**뿐이고, `Some(code)`는 `AppHandle::exit`뿐이다 (2.11.4 lib.rs).
+ *
+ * 그래서 ⌘Q(=NSApplication terminate)에는 거부권을 걸 자리가 아예 없다. 대신 **거기까지
+ * 가지 않게** 한다: 기본 메뉴의 Quit(즉시 terminate하는 predefined 항목)을 우리 항목으로
+ * 바꾸고, 눌리면 창 닫기와 **같은 문장**(quit-requested)을 웹뷰에 보낸다.
+ *
+ * 남는 구멍은 정직하게 적어 둔다: 독 아이콘 → Quit, 로그아웃/재시동은 여전히 즉시
+ * 종료다. 그 셋은 손이 미끄러져 누르는 자리가 아니고, 막을 방법도(위 이유로) 없다.
+ */
+#[cfg(target_os = "macos")]
+fn install_quit_menu(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+
+    let menu = Menu::default(app)?;
+    // macOS에서 첫 서브메뉴가 앱 메뉴이고, 그 **마지막 항목이 Quit**이다
+    // (tauri 2.11.5 menu/menu.rs의 Menu::default 구성 그대로).
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        let items = app_menu.items()?;
+        // predefined가 아닌 것을 지우면 남의 항목을 지우는 것이다 — 모양이 다르면 손대지 않는다
+        if let Some(MenuItemKind::Predefined(_)) = items.last() {
+            app_menu.remove_at(items.len() - 1)?;
+            let quit =
+                MenuItem::with_id(app, "cc-quit", "Quit Centralu", true, Some("CmdOrCtrl+Q"))?;
+            app_menu.append(&quit)?;
+        }
+    }
+    app.set_menu(menu)?;
+    Ok(())
+}
+
 #[tauri::command]
 fn host_info(sup: State<'_, Supervisor>) -> Option<HostInfo> {
     sup.info()
@@ -391,6 +429,12 @@ pub fn run() {
          * ⌘W·빨간 단추 = 창 닫기. 창 하나짜리 앱이라 닫기는 곧 종료다 — 즉시 닫는
          * 대신 웹뷰에 묻는다 (도그푸딩: 작업 중 ⌘W 오타 한 번이 세션 전부를 내렸다).
          */
+        /* 우리 Quit 항목 — 창 닫기와 같은 문장을 보낸다 (모달은 웹뷰가 띄운다) */
+        .on_menu_event(|app, event| {
+            if event.id() == "cc-quit" {
+                let _ = app.emit("quit-requested", ());
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -403,6 +447,11 @@ pub fn run() {
                 sup.start(app.handle().clone());
                 #[cfg(target_os = "macos")]
                 traffic_lights::install(app.handle());
+                #[cfg(target_os = "macos")]
+                if let Err(e) = install_quit_menu(app.handle()) {
+                    // 메뉴를 못 바꿔도 앱은 뜬다 — 다만 ⌘Q가 예전처럼 즉시 꺼진다
+                    eprintln!("[menu] could not install the quit item: {e}");
+                }
                 Ok(())
             }
         })
@@ -410,9 +459,14 @@ pub fn run() {
         .expect("Tauri 앱을 생성하지 못했습니다")
         .run(move |app, event| {
             /*
-             * ⌘Q(시스템 terminate)의 관문 (도그푸딩 2026-09-04). 사람이 모달에서
-             * 확인하기 전에는 종료를 막고 웹뷰에 묻는다 — quit_app만이 플래그를
-             * 세우므로, 그 뒤에 다시 도착하는 ExitRequested는 그대로 지나간다.
+             * 종료 관문 (도그푸딩 2026-09-04). 사람이 모달에서 확인하기 전에는 종료를
+             * 막고 웹뷰에 묻는다 — quit_app만이 플래그를 세우므로, 그 뒤에 다시 도착하는
+             * ExitRequested는 그대로 지나간다.
+             *
+             * **⌘Q는 여기로 오지 않는다** (실측 아님, 상류 소스 확인 2026-09-07):
+             * macOS의 terminate에는 거부권 자리가 없어서 이 이벤트 자체가 안 난다.
+             * 그쪽은 install_quit_menu가 메뉴에서 미리 잡는다 — 이 관문이 맡는 것은
+             * 마지막 창이 닫힌 경우와 우리가 부른 exit이다.
              *
              * `code`는 문서화된 구분선이다: None = 사용자 상호작용(⌘Q·독 Quit·로그아웃),
              * Some = 프로그램적 종료(AppHandle::exit/restart — 업데이터의 재시작이
