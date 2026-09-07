@@ -51,7 +51,7 @@ export function ApprovalCard({
       data-testid="approval-card"
     >
       <div className="flex items-center gap-2 px-3 pt-2.5">
-        <span className="beacon text-[10px] font-medium tracking-[0.1em]">
+        <span className="beacon text-[10px] font-medium">
           Awaiting approval
         </span>
         <span className="text-[11px] text-slate">Agent is blocked, waiting</span>

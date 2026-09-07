@@ -137,7 +137,7 @@ function MenuRow({
 function MenuSection({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
   return (
     <div className="border-t border-edge py-1 first:border-t-0">
-      <p className="readout px-2.5 py-0.5 text-[10px] uppercase tracking-wide text-slate">{label}</p>
+      <p className="readout px-2.5 py-0.5 text-[10px] uppercase text-slate">{label}</p>
       {/* 왜 이 묶음이 다른지는 묶음 머리에 적는다 — 줄마다 반복하면 목록이 안 읽힌다 */}
       {note && <p className="px-2.5 pb-1 text-[10px] leading-relaxed text-slate">{note}</p>}
       {children}

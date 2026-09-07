@@ -55,7 +55,7 @@ export function Overlay() {
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-void" data-testid="overlay">
       <header className="flex items-center gap-2 border-b border-edge bg-pit px-3 py-1.5">
-        <span className="text-[11px] uppercase tracking-[0.12em] text-slate">
+        <span className="text-[11px] uppercase text-slate">
           {overlay.kind === 'git' ? 'Git' : 'Files'}
         </span>
         <button

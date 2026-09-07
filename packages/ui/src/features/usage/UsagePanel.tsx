@@ -150,7 +150,7 @@ function DailyTokens({ daily }: { daily: { date: string; tokens: number }[] }) {
   return (
     <section className="mt-5 border-t border-edge pt-3" data-testid="usage-daily">
       <div className="flex items-baseline gap-2">
-        <span className="text-[11px] uppercase tracking-[0.12em] text-slate">Daily tokens</span>
+        <span className="text-[11px] uppercase text-slate">Daily tokens</span>
         {today && (
           <span className="readout ml-auto text-[11px] text-chalk">Today {formatTokens(today.tokens)}</span>
         )}
@@ -247,7 +247,7 @@ export function UsageModal() {
           ) : (
             tools.map((t) => (
               <section key={t} className="border-t border-edge first:border-t-0" data-testid={`usage-section-${t}`}>
-                <h3 className="px-4 pt-3 text-[11px] uppercase tracking-[0.12em] text-slate">{TOOL_META[t].label}</h3>
+                <h3 className="px-4 pt-3 text-[11px] uppercase text-slate">{TOOL_META[t].label}</h3>
                 <UsagePanel tool={t} />
               </section>
             ))

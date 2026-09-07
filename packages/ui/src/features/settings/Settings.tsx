@@ -382,7 +382,7 @@ function OrchestratorSkills() {
   if (skills.length === 0) return null
   return (
     <div className="mt-5 border-t border-edge pt-3" data-testid="orchestrator-skills">
-      <p className="readout text-[10px] uppercase tracking-[0.12em] text-slate">Approved skills</p>
+      <p className="readout text-[10px] uppercase text-slate">Approved skills</p>
       <ul className="mt-2 space-y-2">
         {skills.map((s) => (
           <li key={s.name} className="rounded border border-edge p-2.5" data-testid={`orchestrator-skill-${s.name}`}>

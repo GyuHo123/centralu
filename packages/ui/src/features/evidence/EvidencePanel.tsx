@@ -567,7 +567,7 @@ function CollapsedRail({ projectId, isRepo }: { projectId: string; isRepo: boole
       )}
       {/* 세로쓰기 — 접힌 띠가 무엇의 띠인지 말해준다 */}
       <span
-        className="mt-1 text-[10px] tracking-[0.2em] text-slate"
+        className="mt-1 text-[10px] text-slate"
         style={{ writingMode: 'vertical-rl' }}
         aria-hidden
       >
@@ -635,7 +635,7 @@ function GitChanges({ projectId, denied }: { projectId: string; denied?: boolean
   return (
     <section className="flex min-h-0 flex-1 flex-col border-b border-edge" data-testid="evidence-git">
       <div className="flex items-center gap-1.5 px-3 py-1.5">
-        <span className="text-[11px] uppercase tracking-[0.12em] text-slate">Changes</span>
+        <span className="text-[11px] uppercase text-slate">Changes</span>
         {files && files.length > 0 && (
           <>
             <span className="readout text-[10px] text-ash" data-testid="evidence-change-count">
@@ -761,7 +761,7 @@ function ChangeGroup({
   return (
     <section data-testid={`evidence-group-${title.toLowerCase()}`}>
       <header className="sticky top-0 flex items-center gap-1.5 bg-pit px-3 py-1">
-        <h4 className="text-[10px] uppercase tracking-[0.12em] text-slate">{title}</h4>
+        <h4 className="text-[10px] uppercase text-slate">{title}</h4>
         <span className="readout text-[10px] text-slate">{files.length}</span>
         <button
           className="ml-auto text-[10px] text-slate transition-colors hover:text-chalk disabled:opacity-40"

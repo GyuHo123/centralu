@@ -199,7 +199,7 @@ export function CommandPalette() {
                   onClick={() => choose(item)}
                   data-testid={`palette-item-${item.kind}`}
                 >
-                  <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-slate">
+                  <span className="w-10 shrink-0 text-[10px] uppercase text-slate">
                     {item.kind === 'session' ? 'Session' : item.kind === 'project' ? 'Folder' : item.kind === 'message' ? 'Chat' : 'Action'}
                   </span>
                   <span className="truncate text-[13px] text-chalk">{item.label}</span>

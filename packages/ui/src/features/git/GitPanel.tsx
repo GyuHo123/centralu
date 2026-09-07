@@ -366,7 +366,7 @@ function BranchList({ title, branches, onPick }: { title: string; branches: GitB
   if (branches.length === 0) return null
   return (
     <div className="border-b border-edge/60">
-      <h3 className="px-2.5 py-1.5 text-[10px] uppercase tracking-[0.12em] text-slate">{title}</h3>
+      <h3 className="px-2.5 py-1.5 text-[10px] uppercase text-slate">{title}</h3>
       <ul>
         {branches.map((b) => (
           <li key={b.name}>

@@ -87,7 +87,7 @@ export function QuestionCard({
       data-testid="question-card"
     >
       <div className="flex items-center gap-2 px-3 pt-2.5">
-        <span className="beacon text-[10px] font-medium tracking-[0.1em]">Agent is asking</span>
+        <span className="beacon text-[10px] font-medium">Agent is asking</span>
         <span className="text-[11px] text-slate">
           {tabbed ? `${questions.length} questions` : 'Pick an option'}
         </span>

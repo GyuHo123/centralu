@@ -801,7 +801,7 @@ function ConfirmHandoff({
         <p className="mt-1.5 truncate text-[12px] text-ash">{name}</p>
 
         {/* 노트의 출처 — 살아 있으면 에이전트가 쓰고, 죽었으면 앱이 기록으로 만든다 (#78) */}
-        <p className="mt-3 text-[10px] uppercase tracking-[0.12em] text-slate">Handoff note</p>
+        <p className="mt-3 text-[10px] uppercase text-slate">Handoff note</p>
         <div className="mt-1 flex gap-1.5" role="radiogroup" aria-label="Handoff note source">
           {(
             [
@@ -833,7 +833,7 @@ function ConfirmHandoff({
         </p>
 
         {/* 받는 에이전트 — 다른 도구를 고르면 모델·강도 같은 도구별 설정은 물려주지 않는다 */}
-        <p className="mt-3 text-[10px] uppercase tracking-[0.12em] text-slate">Hand off to</p>
+        <p className="mt-3 text-[10px] uppercase text-slate">Hand off to</p>
         <div className="mt-1 flex gap-1.5" role="radiogroup" aria-label="Hand off to">
           {(Object.keys(TOOL_META) as ToolName[]).map((t) => (
             <button

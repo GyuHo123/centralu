@@ -123,7 +123,7 @@ export function CommandRunnerOverlay({ projectId, onClose }: { projectId: string
         }`}
       >
         <div className="flex items-center gap-1.5 border-b border-edge px-3 py-1.5">
-          <span className="text-[11px] uppercase tracking-[0.12em] text-slate">Commands</span>
+          <span className="text-[11px] uppercase text-slate">Commands</span>
           <span className="ml-auto">
             <IconButton label="Close" onClick={leave} testId="run-close" align="right">
               <CloseIcon size={12} />

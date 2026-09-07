@@ -92,7 +92,7 @@ export function ControlRail() {
       {/* 기계가 사람을 지목해 부른 것들 — 세션 상태로는 안 드러나는 호출 (control_notify) */}
       {notifies.length > 0 && (
         <section className="border-b border-edge px-3 py-2">
-          <h2 className="text-[10px] uppercase tracking-[0.12em] text-slate">Notices</h2>
+          <h2 className="text-[10px] uppercase text-slate">Notices</h2>
           {notifies.map((n) => (
             <div key={n.id} className="mt-1.5 flex items-start gap-1.5" data-testid={`rail-notify-${n.id}`}>
               <p className={`min-w-0 flex-1 text-[11px] leading-snug ${n.priority === 'high' ? 'text-chalk' : 'text-ash'}`}>
@@ -121,7 +121,7 @@ export function ControlRail() {
 
       {/* 내 차례 — 행동. 인박스 판정(@cc/core buildInbox)의 순서 그대로 */}
       <section className="border-b border-edge px-3 py-2">
-        <h2 className="text-[10px] uppercase tracking-[0.12em] text-slate">
+        <h2 className="text-[10px] uppercase text-slate">
           My turn {mine.length > 0 && <span className="text-chalk">{mine.length}</span>}
         </h2>
         {mine.length === 0 && <p className="mt-1.5 text-[11px] text-slate">Nothing needs you right now.</p>}
@@ -133,7 +133,7 @@ export function ControlRail() {
       {/* 업무 — 반장이 조율하는 다중 세션 묶음 (#80 목적 2). 사람은 버스에서 내려 심판석으로 */}
       <section className="border-b border-edge px-3 py-2" data-testid="rail-tasks">
         <div className="flex items-baseline justify-between">
-          <h2 className="text-[10px] uppercase tracking-[0.12em] text-slate">Tasks {tasks.length > 0 && tasks.filter((t) => t.status === 'active').length}</h2>
+          <h2 className="text-[10px] uppercase text-slate">Tasks {tasks.length > 0 && tasks.filter((t) => t.status === 'active').length}</h2>
           <button
             className="text-[10px] text-slate hover:text-chalk"
             onClick={() => setCreating(true)}
@@ -197,7 +197,7 @@ export function ControlRail() {
 
       {/* 진행 중 — 배경. 그리드의 감시를 세로 한 줄씩으로 압축 */}
       <section className="px-3 py-2">
-        <h2 className="text-[10px] uppercase tracking-[0.12em] text-slate">Running {running.length > 0 && running.length}</h2>
+        <h2 className="text-[10px] uppercase text-slate">Running {running.length > 0 && running.length}</h2>
         {running.length === 0 && <p className="mt-1.5 text-[11px] text-slate">No sessions working.</p>}
         {running.map((s) => (
           <RunningRow key={s.id} s={s} />
@@ -424,7 +424,7 @@ function NewTaskDialog({ sessions, onClose }: { sessions: Record<string, Session
           onChange={(e) => setGoal(e.target.value)}
           data-testid="task-goal"
         />
-        <p className="mt-2 text-[10px] uppercase tracking-[0.12em] text-slate">Members</p>
+        <p className="mt-2 text-[10px] uppercase text-slate">Members</p>
         <div className="mt-1 max-h-40 overflow-y-auto">
           {workers.length === 0 && <p className="text-[11px] text-slate">No worker sessions yet.</p>}
           {workers.map((s) => (

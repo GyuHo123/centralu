@@ -99,7 +99,7 @@ function NoticeCard({
         title="Open this session"
       >
         <div className="truncate text-[12px] text-chalk">{notice.name}</div>
-        <div className="mt-0.5 text-[10px] uppercase tracking-[0.1em] text-slate">{look.label}</div>
+        <div className="mt-0.5 text-[10px] uppercase text-slate">{look.label}</div>
       </button>
       <button
         type="button"

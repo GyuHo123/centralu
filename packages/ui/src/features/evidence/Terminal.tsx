@@ -84,7 +84,7 @@ export function TerminalPane({ projectId }: { projectId: string }) {
   return (
     <section className="flex min-h-0 flex-1 flex-col" data-testid="evidence-terminal">
       <div className="flex items-center gap-1.5 border-b border-edge px-3 py-1">
-        <span className="text-[11px] uppercase tracking-[0.12em] text-slate">Terminal</span>
+        <span className="text-[11px] uppercase text-slate">Terminal</span>
         {/* 글자를 빼고 기호만 남긴다 — 옆의 '터미널'이 이미 무엇에 대한 +인지 말해준다 */}
         <span className="ml-auto">
           <IconButton label="New terminal" onClick={() => void add()} testId="terminal-add" align="right">
