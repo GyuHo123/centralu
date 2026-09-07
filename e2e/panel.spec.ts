@@ -321,6 +321,41 @@ test('같은 파일을 다시 눌러도 열린다 — 다른 탭에 가 있어�
   await expect(page.getByTestId('git-branches')).toBeHidden()
 })
 
+/*
+ * 커밋 diff는 여러 파일이 한 텍스트다 — 파일 경계마다 sticky 밴드가 선다
+ * (사용자 선택 2026-09-07: 칩 나열은 파일이 많으면 UI가 무너진다). 표시만 밴드고
+ * data-line은 그대로라 복사는 여전히 원문 `diff --git` 줄을 낸다 (#36).
+ */
+test('커밋 diff의 파일 경계마다 파일명 밴드가 선다', async ({ page }) => {
+  await setup(page)
+  await seedCommits(page, [{ sha: 'aaa1111', subject: '두 파일 커밋', author: '나', daysAgo: 0 }])
+  await page.evaluate(() => {
+    const m = (window as never as { __mock: any }).__mock
+    m.gitState.diffs['aaa1111'] = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1 +1 @@',
+      '+첫 파일 줄',
+      'diff --git a/src/b.ts b/src/b.ts',
+      '--- a/src/b.ts',
+      '+++ b/src/b.ts',
+      '@@ -1 +1 @@',
+      '+둘째 파일 줄',
+    ].join('\n')
+  })
+  await newSession(page, 'alpha', 'claude', '작업')
+
+  await page.getByTestId('evidence-tab-history').click()
+  await page.getByTestId('history-commit-aaa1111').click()
+  await expect(page.getByTestId('diff-view')).toContainText('첫 파일 줄')
+
+  const bands = page.getByTestId('diff-file-band')
+  await expect(bands).toHaveCount(2)
+  await expect(bands.nth(0)).toHaveText('src/a.ts')
+  await expect(bands.nth(1)).toHaveText('src/b.ts')
+})
+
 test('커밋도 두 번째부터 열린다 — 목록이 남아 있으니 계속 눌린다', async ({ page }) => {
   await setup(page)
   await seedCommits(page, [

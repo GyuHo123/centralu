@@ -173,7 +173,8 @@ function DiffView({
    * context lines.
    */
   const rows = (data?.diff ?? '').split('\n').map((line) => {
-    const kind = line.startsWith('+') && !line.startsWith('+++') ? 'add'
+    const kind = line.startsWith('diff --git ') ? 'file'
+      : line.startsWith('+') && !line.startsWith('+++') ? 'add'
       : line.startsWith('-') && !line.startsWith('---') ? 'del'
       : line.startsWith('@@') ? 'hunk'
       : 'ctx'
@@ -212,6 +213,29 @@ function DiffView({
         }}
       >
         {rows.map(({ kind, body }, i) => {
+          /*
+           * 파일 경계 밴드 (사용자 선택 2026-09-07 — 커밋 diff는 여러 파일이 한 텍스트라
+           * 어디서 다음 파일이 시작되는지 안 보였다). sticky라 스크롤 중에도 "지금 보는
+           * 파일"이 위에 남는다. 화면에는 경로만 그리지만 data-line은 그대로라, 복사는
+           * 여전히 원문 `diff --git` 줄을 낸다 (#36의 재구성 방식 덕 — 표시≠복사).
+           */
+          if (kind === 'file') {
+            const m = /^diff --git a\/(.*) b\/(.*)$/.exec(body)
+            const label = m ? (m[1] === m[2] ? m[2] : `${m[1]} → ${m[2]}`) : body
+            return (
+              <div
+                key={i}
+                data-diff="file"
+                data-line={i}
+                data-testid="diff-file-band"
+                className="sticky top-0 z-10 border-b border-edge bg-panel px-3 py-1"
+              >
+                <span data-code className="readout text-[11px] text-chalk">
+                  {label}
+                </span>
+              </div>
+            )
+          }
           return (
             <div
               key={i}
