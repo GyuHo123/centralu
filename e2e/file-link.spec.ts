@@ -157,6 +157,58 @@ test('a path that is not there says so, in the viewer and on top of it', async (
 })
 
 /**
+ * 에이전트가 적는 경로는 자기가 보던 자리 기준일 때가 많다 (사용자 지적 2026-09-07).
+ * 루트에 없다고 죽은 링크로 두지 않고, 프로젝트 안에서 그 꼬리를 가진 파일을 찾아 연다.
+ */
+test('a path written from a subdirectory still opens (#39)', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'work')
+  await page.evaluate(() => {
+    const m = (window as any).__mock
+    // 루트 기준으로는 없는 파일 — 진짜는 한 단 아래에 있다
+    m.fs.readFile = async (_p: string, path: string) => {
+      if (path !== 'Cli/Media/ImageSearch.cs') throw new Error('ENOENT: no such file or directory')
+      return { text: 'found me', truncated: false, binary: false, bytes: 8 }
+    }
+    m.fs.search = async () => [{ path: 'Cli/Media/ImageSearch.cs', name: 'ImageSearch.cs' }]
+  })
+  await agentSays(page, 'Look at `Media/ImageSearch.cs:2`.')
+
+  await page.getByTestId('file-link').click()
+  // 화면이 말하는 경로는 **진짜 있는 자리**다 — IDE로 여는 것도 이 경로다
+  await expect(page.getByTestId('viewer-path')).toHaveText('Cli/Media/ImageSearch.cs')
+  await expect(page.getByTestId('viewer-error')).toBeHidden()
+})
+
+/**
+ * 꼬리가 같은 파일이 여럿이면 하나를 골라 주지 않는다 — 그건 사실인 척하는 추측이다.
+ */
+test('when several files share the tail the viewer asks which one', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'work')
+  await page.evaluate(() => {
+    const m = (window as any).__mock
+    m.fs.readFile = async (_p: string, path: string) => {
+      if (path !== 'app/Media/ImageSearch.cs') throw new Error('ENOENT: no such file or directory')
+      return { text: 'the app one', truncated: false, binary: false, bytes: 11 }
+    }
+    m.fs.search = async () => [
+      { path: 'app/Media/ImageSearch.cs', name: 'ImageSearch.cs' },
+      { path: 'cli/Media/ImageSearch.cs', name: 'ImageSearch.cs' },
+    ]
+  })
+  await agentSays(page, 'Look at `Media/ImageSearch.cs`.')
+
+  await page.getByTestId('file-link').click()
+  await expect(page.getByTestId('viewer-error')).toBeVisible()
+  const candidates = page.getByTestId('viewer-candidates')
+  await expect(candidates.locator('button')).toHaveCount(2)
+
+  await page.getByTestId('viewer-candidate-app/Media/ImageSearch.cs').click()
+  await expect(page.getByTestId('viewer-path')).toHaveText('app/Media/ImageSearch.cs')
+})
+
+/**
  * Agents also write links, not just backticks — `[manager.ts](src/a.ts)` — and those used
  * to render as anchors whose relative href led nowhere. A link whose target is a project
  * file is the same thing as a backticked path, so it gets the same button.

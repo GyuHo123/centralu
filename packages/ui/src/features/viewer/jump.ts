@@ -30,6 +30,17 @@ export function requestViewerJump(path: string, line: number): void {
   notify()
 }
 
+/**
+ * The pending request, read outside React.
+ *
+ * The viewer needs this when it re-opens the file under a different path (a relative path
+ * resolved to where the file actually is): the line was asked for against the old path, and
+ * it has to be asked again against the new one or the jump silently evaporates.
+ */
+export function currentViewerJump(): ViewerJump | null {
+  return current
+}
+
 /** The viewer has flown there; the request is spent */
 export function clearViewerJump(): void {
   if (!current) return

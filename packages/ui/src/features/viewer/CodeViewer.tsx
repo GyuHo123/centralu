@@ -5,7 +5,8 @@ import { useStore } from '../../store/store.js'
 import { useShortcut } from '../../app/shortcut.js'
 import { Kbd } from '../../components/primitives.jsx'
 import { TRUNCATED_NOTICE, caretAt, selectedText, wholeFileText, type Caret } from './copy.js'
-import { clearViewerJump, useViewerJump } from './jump.js'
+import { clearViewerJump, currentViewerJump, requestViewerJump, useViewerJump } from './jump.js'
+import { suffixMatches } from './resolve.js'
 
 /**
  * 코드 뷰어 (FR-6, C-3) — **읽기 전용**. 편집은 IDE 몫이다 (비목표).
@@ -35,6 +36,15 @@ export function CodeViewer({ projectId }: { projectId: string }) {
    * never load.
    */
   const [error, setError] = useState<string | null>(null)
+  /**
+   * 같은 이름으로 끝나는 파일이 여럿일 때의 후보들 (resolve.ts).
+   *
+   * 하나면 말없이 그리로 연다. 여럿이면 고르게 한다 — 그중 하나를 골라 주는 건
+   * 사실인 척하는 추측이고, 이 화면은 추측을 사실처럼 보이게 하지 않는다.
+   */
+  const [candidates, setCandidates] = useState<string[]>([])
+  /** 이미 한 번 열어 본 자리 — 그 파일마저 못 읽을 때 같은 곳을 무한히 다시 열지 않게 */
+  const resolved = useRef(new Set<string>())
   /** The row a `path:123` click asked for — highlighted, because landing mid-file is disorienting */
   const [landedIndex, setLandedIndex] = useState(-1)
   const [query, setQuery] = useState('')
@@ -49,6 +59,7 @@ export function CodeViewer({ projectId }: { projectId: string }) {
   useEffect(() => {
     setFile(null)
     setError(null)
+    setCandidates([])
     setLandedIndex(-1)
     if (!path) return
     // 파일·프로젝트를 옮기는 사이 늦게 온 응답이 **다른 파일의 내용**으로 그려지면 안 된다
@@ -58,8 +69,35 @@ export function CodeViewer({ projectId }: { projectId: string }) {
       .then((f) => alive && setFile(f))
       .catch((e: Error) => {
         if (!alive) return
-        setError(e.message)
-        setToast(e.message)
+        /*
+         * 루트에 없다고 죽은 링크는 아니다. 에이전트는 자기가 보던 자리 기준으로 경로를
+         * 적곤 한다 (`Media/ImageSearch.cs` ↔ 진짜는 `WzComparerR2.Cli/Media/…`).
+         * 프로젝트 파일 목록에서 그 꼬리를 가진 파일을 찾아본다 — 실패한 뒤에만, 그리고
+         * 색인은 host가 들고 있어 이 한 번은 싸다.
+         */
+        void platform.fs
+          .search(projectId, path, 20)
+          .catch(() => [] as { path: string; name: string }[])
+          .then((hits) => {
+            if (!alive) return
+            const found = suffixMatches(
+              hits.map((h) => h.path),
+              path,
+            ).filter((p) => !resolved.current.has(p))
+            if (found.length === 1) {
+              const target = found[0]!
+              resolved.current.add(target)
+              // 줄 번호는 옛 경로로 부탁해 둔 것이라, 새 경로로 다시 부탁해야 살아남는다
+              const jumpNow = currentViewerJump()
+              if (jumpNow?.path === path) requestViewerJump(target, jumpNow.line)
+              useStore.getState().openFile(target)
+              return
+            }
+            setCandidates(found.slice(0, 8))
+            setError(e.message)
+            // 후보를 고르라고 화면이 말하고 있으면 토스트까지 겹칠 이유가 없다
+            if (found.length === 0) setToast(e.message)
+          })
       })
     return () => {
       alive = false
@@ -236,9 +274,36 @@ export function CodeViewer({ projectId }: { projectId: string }) {
       </header>
 
       {error !== null ? (
-        <p className="p-3 text-[12px] text-ash" data-testid="viewer-error">
-          Could not open this file — {error}
-        </p>
+        <div className="p-3">
+          <p className="text-[12px] text-ash" data-testid="viewer-error">
+            Could not open this file — {error}
+          </p>
+          {candidates.length > 0 && (
+            <div className="mt-2" data-testid="viewer-candidates">
+              <p className="text-[11px] text-slate">
+                Files ending in <span className="readout text-ash">{path}</span> — did you mean:
+              </p>
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {candidates.map((c) => (
+                  <li key={c}>
+                    <button
+                      type="button"
+                      data-testid={`viewer-candidate-${c}`}
+                      onClick={() => {
+                        const jumpNow = currentViewerJump()
+                        if (jumpNow?.path === path) requestViewerJump(c, jumpNow.line)
+                        useStore.getState().openFile(c)
+                      }}
+                      className="readout rounded px-1 py-0.5 text-left text-[11px] text-chalk underline decoration-slate underline-offset-2 hover:decoration-chalk"
+                    >
+                      {c}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       ) : file === null ? (
         <p className="p-3 text-[12px] text-slate">Loading…</p>
       ) : file.binary ? (
