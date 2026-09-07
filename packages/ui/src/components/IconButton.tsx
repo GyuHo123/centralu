@@ -22,6 +22,7 @@ export function IconButton({
   type = 'button',
   placement = 'bottom',
   align = 'left',
+  lit = false,
   className = '',
 }: {
   /** 툴팁 문구이자 스크린리더가 읽는 이름 — 하나로 둔다 */
@@ -33,13 +34,24 @@ export function IconButton({
   type?: 'button' | 'submit'
   placement?: 'bottom' | 'top'
   align?: 'left' | 'right'
+  /**
+   * 켜져 있음 — 아이콘이 흰색으로 선다 (평소는 회색).
+   *
+   * 색을 className으로 덧씌우지 않고 프로퍼티로 받는 이유: Tailwind에서 `text-slate`와
+   * `text-chalk`가 같이 붙으면 어느 쪽이 이기는지는 class 속성의 순서가 아니라 생성된
+   * CSS의 순서가 정한다 — 빌드마다 달라질 수 있는 것에 눈에 보이는 상태를 걸 수 없다.
+   * 여기서는 둘 중 하나만 붙는다.
+   */
+  lit?: boolean
   className?: string
 }) {
   return (
     <Tooltip content={label} placement={placement} align={align}>
       <button
         type={type}
-        className={`flex items-center justify-center rounded p-1 text-slate transition-colors hover:bg-graphite/60 hover:text-chalk disabled:opacity-40 ${className}`}
+        className={`flex items-center justify-center rounded p-1 transition-colors hover:bg-graphite/60 hover:text-chalk disabled:opacity-40 ${
+          lit ? 'text-chalk' : 'text-slate'
+        } ${className}`}
         onClick={onClick}
         disabled={disabled}
         aria-label={label}

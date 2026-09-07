@@ -213,7 +213,7 @@ export function SessionPane({
           in and no terminal to run it in. So it gets no button rather than an empty menu:
           an entry that could never have anything in it is a worse answer than no entry.
         */}
-        {session.projectId && <RunMenu open={runOpen} onOpenChange={setRunOpen} />}
+        {session.projectId && <RunMenu projectId={session.projectId} open={runOpen} onOpenChange={setRunOpen} />}
         {/* 도구가 먹통이 됐을 때 세션을 새로 만들면 맥락이 끊긴다 — 프로세스만 갈아 끼운다 */}
         {/*
           누르는 동안 **아이콘이 돌고 버튼이 잠긴다.**

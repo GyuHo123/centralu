@@ -492,6 +492,38 @@ test('명령어 창: 데브 서버는 Stop으로 끄고, 로그는 남는다', a
   await expect(page.getByTestId('run-log')).toContainText('5173')
 })
 
+test('명령어가 도는 동안 여는 버튼이 흰색으로 선다', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', '작업')
+
+  const open = page.getByTestId('run-open')
+  // `hover:text-chalk`가 늘 붙어 있으므로 경계를 물린다 — 느슨하면 항상 통과하는 검사가 된다
+  const lit = /(^|\s)text-chalk(\s|$)/
+  const dim = /(^|\s)text-slate(\s|$)/
+  await expect(open).toHaveClass(dim)
+
+  await open.click()
+  await page.getByTestId('run-add-input').fill('pnpm dev')
+  await page.getByTestId('run-add').click()
+  await page.getByTestId('run-command-0').click()
+  await page.getByTestId('run-exec').click()
+
+  // 창을 닫아도 "돌고 있다"는 사실은 헤더에 남는다 — 문이 표시등을 겸한다
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('run-menu')).toBeHidden()
+  await expect(open).toHaveClass(lit)
+  await expect(open).toHaveAttribute('aria-label', /running/)
+
+  await page.evaluate(() => {
+    const w = window as never as { __mock: any; __store: any }
+    const pid = Object.keys(w.__store.getState().projects)[0]
+    w.__mock.exitCommand(pid, 'pnpm dev', 0)
+  })
+  // 끝나면 도로 회색 — 다 끝난 명령까지 켜 두면 표시등이 아니라 장식이 된다
+  await expect(open).toHaveClass(dim)
+  await expect(open).not.toHaveAttribute('aria-label', /running/)
+})
+
 test('명령어 창: 등록한 명령은 창을 닫았다 열어도 그대로 있다', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', '작업')
