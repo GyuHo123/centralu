@@ -205,6 +205,16 @@ function Suggestions({ ask }: { ask: (text: string) => void }) {
   const setToast = useStore((s) => s.setToast)
   const waking = useStore((s) => s.orchestratorWaking)
   const [picking, setPicking] = useState(false)
+  /*
+   * 호스트가 없으면 이 초대는 지킬 수 없는 약속이다 (도그푸딩 2026-09-07:
+   * "연결이 디스커넥티드였는데 오케스트레이터 화면은 연결된 것처럼 보였다").
+   *
+   * 끊긴 동안 눌러도 조용히 아무 일도 안 일어나는 게 아니라 **더 나쁘다**: RPC는
+   * 재연결을 기대하고 큐에 쌓이므로 30초를 기다린 뒤에야 실패한다. 그 30초 동안
+   * 화면은 "시작하는 중"이라고 말한다 — 사실이 아닌 말을.
+   */
+  const connection = useStore((s) => s.connection)
+  const offline = connection !== 'connected'
 
   return (
     <div className="w-full max-w-md px-6" data-testid="orchestrator-suggestions">
@@ -217,7 +227,7 @@ function Suggestions({ ask }: { ask: (text: string) => void }) {
           <button
             key={q.key}
             data-testid={`suggest-${q.key}`}
-            disabled={waking}
+            disabled={waking || offline}
             onClick={() => ask(q.text)}
             className="block w-full rounded-lg border border-edge bg-panel px-4 py-3 text-left text-[13px] text-chalk transition-colors hover:border-graphite disabled:opacity-40"
           >
@@ -225,9 +235,16 @@ function Suggestions({ ask }: { ask: (text: string) => void }) {
           </button>
         ))}
       </div>
-      {waking && (
+      {waking && !offline && (
         <p className="mt-2 text-[11px] text-slate" data-testid="orchestrator-waking">
           Starting the orchestrator…
+        </p>
+      )}
+      {offline && (
+        <p className="mt-2 text-[11px] leading-relaxed text-ash" data-testid="orchestrator-offline">
+          {connection === 'connecting'
+            ? 'Connecting to the agent host…'
+            : 'Not connected to the agent host — nothing can start until it is back.'}
         </p>
       )}
       {/*
@@ -237,7 +254,7 @@ function Suggestions({ ask }: { ask: (text: string) => void }) {
       <button
         className="mt-3 text-[12px] text-slate underline-offset-2 hover:text-chalk hover:underline disabled:opacity-40"
         data-testid="orchestrator-pick-folder"
-        disabled={picking}
+        disabled={picking || offline}
         onClick={async () => {
           setPicking(true)
           try {

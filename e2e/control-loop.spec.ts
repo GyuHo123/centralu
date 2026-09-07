@@ -3903,6 +3903,55 @@ test('아이콘 버튼은 호버하면 설명이 뜬다', async ({ page }) => {
 })
 
 /**
+ * 렌더가 터져도 창은 남는다 (도그푸딩 2026-09-07: "오류 생겼다고 하고 빈 화면이 되었어").
+ *
+ * React는 잡아 줄 곳이 없는 예외를 만나면 트리를 통째로 걷어낸다 — 하얀 화면이 남고,
+ * 그 화면은 "앱이 죽었다"와 구별되지 않는다. 여기서 깨뜨리는 것은 세션 하나의 모양인데,
+ * host가 이상한 것을 보내면 실제로 생길 수 있는 일이라 시험 재료로도 정직하다.
+ */
+test('화면이 터져도 빈 페이지가 아니라 무슨 일인지가 남는다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', 'work')
+  const id = await page.evaluate(() => (window as never as { __store: any }).__store.getState().focusedSessionId)
+
+  await page.evaluate((sid: string) => {
+    const store = (window as never as { __store: any }).__store
+    const s = store.getState()
+    // 배열이어야 할 자리가 비면 그리는 쪽에서 던진다
+    store.setState({ sessions: { ...s.sessions, [sid]: { ...s.sessions[sid], touchedPaths: undefined } } })
+  }, id)
+
+  await expect(page.getByTestId('app-crashed')).toBeVisible()
+  await expect(page.getByTestId('app-crashed-reload')).toBeVisible()
+})
+
+/**
+ * 끊긴 동안의 오케스트레이터 화면 (도그푸딩 2026-09-07: "디스커넥티드인데 화면은
+ * 연결된 것처럼 보이고, 질문을 눌렀더니 오류가 났다").
+ *
+ * 끊긴 채로 누르면 RPC는 재연결을 기대하고 큐에 쌓여, 30초를 기다린 끝에 실패한다 —
+ * 그동안 화면은 "시작하는 중"이라고 사실이 아닌 말을 한다. 못 하는 일은 못 한다고
+ * 먼저 말해야 한다.
+ */
+test('끊겨 있으면 오케스트레이터 화면이 그렇다고 말한다 — 질문은 눌리지 않는다', async ({ page }) => {
+  await setup(page, { projects: [] })
+  await expect(page.getByTestId('orchestrator-suggestions')).toBeVisible()
+  await expect(page.getByTestId('suggest-capabilities')).toBeEnabled()
+
+  await page.evaluate(() => (window as never as { __mock: any }).__mock.setConnectionState('disconnected'))
+
+  await expect(page.getByTestId('orchestrator-offline')).toBeVisible()
+  await expect(page.getByTestId('suggest-capabilities')).toBeDisabled()
+  // 폴더 고르기도 host를 거친다 — 초대만 살려두면 같은 함정이다
+  await expect(page.getByTestId('orchestrator-pick-folder')).toBeDisabled()
+
+  // 돌아오면 초대도 돌아온다
+  await page.evaluate(() => (window as never as { __mock: any }).__mock.setConnectionState('connected'))
+  await expect(page.getByTestId('orchestrator-offline')).toBeHidden()
+  await expect(page.getByTestId('suggest-capabilities')).toBeEnabled()
+})
+
+/**
  * host가 죽으면 수퍼바이저가 다시 띄우지만, 새 host는 살아 있던 에이전트를
  * 하나도 모른다 — 프로세스가 함께 죽었기 때문이다. 그래서 화면에는 세션이 전부
  * 잠든 채로 남았고 사람이 하나씩 눌러 깨워야 했다.

@@ -6,6 +6,7 @@ import { useShortcut } from './shortcut.js'
 import { letterOf } from './keys.js'
 import { isForeground } from './foreground.js'
 import { Gust } from './Gust.jsx'
+import { ErrorBoundary } from './ErrorBoundary.jsx'
 import { TEXT_SCALES, useStore } from '../store/store.js'
 import { useCounts, computeInbox } from '../store/selectors.js'
 import { Sidebar } from '../features/sidebar/Sidebar.jsx'
@@ -76,19 +77,25 @@ export function App({ platform }: { platform: Platform }) {
 
   return (
     <PlatformProvider platform={platform}>
-      {/* h-screen(100vh)이 아니라 h-full — vh는 zoom을 모르기 때문 (index.css의 --text-zoom 주석) */}
-      <div className="relative flex h-full flex-col bg-void text-chalk">
-        <TopBar />
-        <ApprovalBanner />
-        <Body />
-        <Inbox />
-        <CommandPalette />
-        <Settings />
-        <UsageModal />
-        <Gust />
-        <Toast />
-        <GlobalKeys />
-      </div>
+      {/*
+        렌더가 터져도 창은 남는다 (도그푸딩 2026-09-07). 경계가 없으면 React가 트리를
+        통째로 걷어내 하얀 화면만 남는데, 그 화면은 "앱이 죽었다"와 구별되지 않는다.
+      */}
+      <ErrorBoundary>
+        {/* h-screen(100vh)이 아니라 h-full — vh는 zoom을 모르기 때문 (index.css의 --text-zoom 주석) */}
+        <div className="relative flex h-full flex-col bg-void text-chalk">
+          <TopBar />
+          <ApprovalBanner />
+          <Body />
+          <Inbox />
+          <CommandPalette />
+          <Settings />
+          <UsageModal />
+          <Gust />
+          <Toast />
+          <GlobalKeys />
+        </div>
+      </ErrorBoundary>
     </PlatformProvider>
   )
 }
