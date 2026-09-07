@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { spawn } from 'node:child_process'
 import { CommandRunner } from './commands.js'
 
 /**
@@ -133,23 +134,49 @@ describe('CommandRunner', () => {
  * 계약: pid가 있으면 프로세스 **그룹**(-pid)으로 SIGTERM, 유예 안에 안 죽으면 SIGKILL.
  */
 describe('CommandRunner — 트리 킬', () => {
+  /*
+   * pid는 **진짜 살아 있는 것**이어야 한다. killTree는 ps로 트리를 훑고, ps가 읽혔는데
+   * 그 pid가 없으면 "이미 죽었다"로 보고 아무것도 쏘지 않는다 (재사용된 pid를 때리지
+   * 않으려는 규칙). 지어낸 pid를 주면 그 규칙에 걸려 여기서 검증할 것이 사라진다.
+   *
+   * detached로 띄워 **자기 프로세스 그룹**을 갖게 한다 — 우리 그룹에 붙어 있으면
+   * killTree가 "자기 자신"으로 보고 건너뛴다.
+   */
+  const spawned: number[] = []
+  const livePid = (): number => {
+    const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' })
+    child.unref()
+    spawned.push(child.pid!)
+    return child.pid!
+  }
+  afterEach(() => {
+    for (const pid of spawned.splice(0)) {
+      try {
+        process.kill(-pid, 'SIGKILL') // 진짜로 치운다 (process.kill 목은 이미 풀린 뒤다)
+      } catch {
+        // 벌써 없다
+      }
+    }
+  })
+
   it('stop은 프로세스 그룹에 SIGTERM을 보내고, 유예가 지나도 살아 있으면 SIGKILL한다', () => {
     vi.useFakeTimers()
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
     try {
       const fake = fakePty()
-      fake.mod.pid = 54321
+      const pid = livePid()
+      fake.mod.pid = pid
       const svc = new CommandRunner(() => {})
       stub(svc, fake.mod)
 
       svc.run('/tmp/p', 'pnpm dev')
       svc.stop('/tmp/p', 'pnpm dev')
-      expect(killSpy).toHaveBeenCalledWith(-54321, 'SIGTERM')
+      expect(killSpy).toHaveBeenCalledWith(-pid, 'SIGTERM')
       // 단일 pid 킬로 물러나지 않았다 — 그룹이 과녁이다
       expect(fake.instances[0]!.kill).not.toHaveBeenCalled()
 
       vi.advanceTimersByTime(3000)
-      expect(killSpy).toHaveBeenCalledWith(-54321, 'SIGKILL')
+      expect(killSpy).toHaveBeenCalledWith(-pid, 'SIGKILL')
     } finally {
       killSpy.mockRestore()
       vi.useRealTimers()
@@ -161,7 +188,8 @@ describe('CommandRunner — 트리 킬', () => {
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
     try {
       const fake = fakePty()
-      fake.mod.pid = 54321
+      const pid = livePid()
+      fake.mod.pid = pid
       const svc = new CommandRunner(() => {})
       stub(svc, fake.mod)
 
@@ -169,7 +197,7 @@ describe('CommandRunner — 트리 킬', () => {
       svc.stop('/tmp/p', 'pnpm dev')
       fake.instances[0]!.emitExit(143) // SIGTERM을 받고 죽었다
       vi.advanceTimersByTime(3000)
-      expect(killSpy).not.toHaveBeenCalledWith(-54321, 'SIGKILL')
+      expect(killSpy).not.toHaveBeenCalledWith(-pid, 'SIGKILL')
     } finally {
       killSpy.mockRestore()
       vi.useRealTimers()
@@ -180,13 +208,14 @@ describe('CommandRunner — 트리 킬', () => {
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
     try {
       const fake = fakePty()
-      fake.mod.pid = 54321
+      const pid = livePid()
+      fake.mod.pid = pid
       const svc = new CommandRunner(() => {})
       stub(svc, fake.mod)
 
       svc.run('/tmp/p', 'pnpm dev')
       svc.disposeAll()
-      expect(killSpy).toHaveBeenCalledWith(-54321, 'SIGKILL')
+      expect(killSpy).toHaveBeenCalledWith(-pid, 'SIGKILL')
     } finally {
       killSpy.mockRestore()
     }

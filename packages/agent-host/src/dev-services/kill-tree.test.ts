@@ -40,6 +40,12 @@ describe('killTargets', () => {
     expect(killTargets(table, 100, 900)).toEqual([100])
   })
 
+  it('ps는 읽혔는데 root가 없으면 아무것도 안 쏜다 — 재사용된 pid를 때릴 자리다', () => {
+    // 셸이 이미 죽은 뒤의 유예 타이머. 54321은 그새 남의 프로세스일 수 있다
+    const table = rows('  100   50  100\n  900   50  900\n')
+    expect(killTargets(table, 54321, 900)).toEqual([])
+  })
+
   it('ps를 못 읽으면 root의 그룹 하나 — 예전 동작으로 내려앉는다', () => {
     expect(killTargets([], 54321, 900)).toEqual([54321])
   })

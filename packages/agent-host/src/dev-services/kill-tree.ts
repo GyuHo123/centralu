@@ -71,6 +71,13 @@ export function killTargets(rows: ProcRow[], root: number, self: number): number
     }
   }
 
+  /*
+   * ps는 읽혔는데 root가 그 안에 없다 = 이미 죽었다. 그럴 땐 **아무것도 쏘지 않는다.**
+   * root의 그룹을 짐작해 쏘는 폴백은 ps 자체를 못 읽었을 때의 이야기고, 여기서 그러면
+   * 유예 뒤의 두 번째 발이 **재사용된 pid의 남의 그룹**을 때릴 수 있다.
+   */
+  if (rows.length > 0 && !pgidOf.has(root)) return []
+
   const selfPgid = pgidOf.get(self)
   const groups: number[] = []
   for (const pid of seen) {
