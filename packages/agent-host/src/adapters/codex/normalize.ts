@@ -95,9 +95,20 @@ function itemSummary(item: Record<string, unknown>): { tool: string; title: stri
       }
       return { tool, title: branch || tool, readOnly: false, paths: [] }
     }
+    /*
+     * **인자도 제목에 싣는다** (도그푸딩 2026-09-08).
+     *
+     * 같은 도구가 한 세션에서만 계속 실패한 일이 있었다. 원인은 인자 이름 하나였다 —
+     * 되던 호출은 `{message: …}`, 안 되던 호출은 `{query: …}`였고, 서버는 그 차이를
+     * "An unexpected error occurred"로만 답했다. 화면에는 도구 이름만 있었으니 두 호출이
+     * 똑같아 보였고, 사람이 롤아웃 파일을 열어야 알 수 있었다. 인자가 카드에 있으면
+     * 그 차이는 눈에 띈다.
+     */
+    const args = argsPreview(item.arguments ?? obj(item.invocation).arguments)
+    const name = [server, tool].filter(Boolean).join(': ') || str(item.title) || 'MCP tool'
     return {
       tool: tool || 'MCP',
-      title: [server, tool].filter(Boolean).join(': ') || str(item.title) || 'MCP tool',
+      title: args ? `${name} ${args}` : name,
       readOnly: false,
       paths: [],
     }
@@ -106,6 +117,30 @@ function itemSummary(item: Record<string, unknown>): { tool: string; title: stri
     return { tool: 'WebSearch', title: str(item.query), readOnly: true, paths: [] }
   }
   return { tool: type || 'tool', title: str(item.title) || type, readOnly: true, paths: [] }
+}
+
+/**
+ * 인자를 한 줄로 (카드 제목 꼬리표).
+ *
+ * 값이 아니라 **모양**을 보여주는 것이 목적이라 짧게 자른다 — 어떤 이름으로 무엇을
+ * 보냈는지가 읽히면 충분하고, 본문은 어차피 결과 카드에 있다.
+ */
+function argsPreview(raw: unknown): string {
+  let value: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      return raw.slice(0, 80)
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (entries.length === 0) return ''
+  const body = entries
+    .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+    .join(', ')
+  return `{${body.length > 80 ? `${body.slice(0, 79)}…` : body}}`
 }
 
 /** 조회성 명령은 카드를 접는다 (core의 정책과 같은 취지 — 여기선 힌트만 준다) */

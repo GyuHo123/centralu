@@ -114,6 +114,37 @@ describe('스트리밍·도구 호출', () => {
    * 그 자리를 안 읽어서, 실패한 MCP 카드가 이유 한 글자 없이 빨갛기만 했다
    * (도그푸딩 2026-09-08: 같은 도구가 옆 세션에서는 성공하고 있었다).
    */
+  /*
+   * 인자 이름 하나가 달라 한 세션에서만 계속 실패한 일이 있었다 (도그푸딩 2026-09-08:
+   * 되던 호출은 {message}, 안 되던 호출은 {query}). 카드에 도구 이름만 있으면 그 둘은
+   * 화면에서 같아 보인다.
+   */
+  it('MCP 호출 카드는 인자도 보여준다 — 같은 도구의 다른 호출을 가르는 것이 인자다', () => {
+    const out = n('item/started', {
+      item: {
+        type: 'mcpToolCall', id: 'm0', server: 'msw-mcp', tool: 'mlua_api_retriever',
+        status: 'inProgress', arguments: { query: 'Struct' },
+      },
+    })
+    expect(out[0]).toMatchObject({ type: 'tool_call' })
+    expect((out[0] as { summary: { title: string } }).summary.title).toBe(
+      'msw-mcp: mlua_api_retriever {query: Struct}',
+    )
+  })
+
+  it('인자가 길면 줄인다 — 모양이 보이면 되지 본문이 필요한 게 아니다', () => {
+    const out = n('item/started', {
+      item: {
+        type: 'mcpToolCall', id: 'm4', server: 's', tool: 't', status: 'inProgress',
+        arguments: { message: 'x'.repeat(200) },
+      },
+    })
+    const title = (out[0] as { summary: { title: string } }).summary.title
+    expect(title.length).toBeLessThan(120)
+    expect(title).toContain('message: xxx')
+    expect(title.endsWith('…}')).toBe(true)
+  })
+
   it('MCP 실패는 이유를 싣는다 — 빈 카드는 아무것도 말하지 않는다', () => {
     const out = n('item/completed', {
       item: {
