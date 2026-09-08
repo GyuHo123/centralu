@@ -2716,6 +2716,79 @@ test('문장 중간의 슬래시는 명령으로 보지 않는다', async ({ pag
   await expect(page.getByTestId('autocomplete')).toBeHidden()
 })
 
+/**
+ * 도는 세션이 있어도 이 창의 스크롤은 제자리다 (도그푸딩 2026-09-07: "워크트리를 켜서
+ * 길어진 모달에서 스크롤하면 조금 있다가 맨 위로 돌아간다").
+ *
+ * 원인은 줄마다 달려 있던 인라인 `ref` 콜백이었다: 정체가 매 렌더마다 달라져 React가
+ * 떼었다 붙이는데, 그때마다 고른 줄이 scrollIntoView를 불렀다. 이 창은 스토어를
+ * 구독하니 세션 하나만 돌아도 이벤트마다 다시 그려진다 — 그래서 목록이 계속 끌려갔다.
+ */
+test('세션 이벤트가 흘러도 새 세션 창의 스크롤은 그대로다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  const id = await newSession(page, 'alpha', 'work').then(() =>
+    page.evaluate(() => (window as never as { __store: any }).__store.getState().focusedSessionId),
+  )
+  // 목록이 접힌 칸을 넘도록 길게
+  await page.evaluate(() => {
+    const m = (window as never as { __mock: any }).__mock
+    m.externalSessions = {
+      supported: true,
+      sessions: Array.from({ length: 30 }, (_, i) => ({
+        externalId: `ext-${i}`,
+        tool: 'claude',
+        title: `지난 대화 ${i}`,
+        updatedAt: Date.now() - i * 60_000,
+        createdAt: null,
+        branch: null,
+        imported: false,
+        importedAs: null,
+      })),
+    }
+  })
+
+  await page.getByTestId('project-menu-alpha').click()
+  await page.getByTestId('new-session-alpha').click()
+  const list = page.getByTestId('past-sessions')
+  await expect(page.getByTestId('past-ext-0')).toBeVisible()
+
+  const bottom = await list.evaluate((el) => {
+    el.scrollTop = el.scrollHeight - el.clientHeight
+    return Math.round(el.scrollTop)
+  })
+  expect(bottom).toBeGreaterThan(0) // 접힌 칸을 넘겨야 이 시험이 뭔가를 본다
+
+  // 세션이 도는 중 — 이벤트가 창을 다시 그린다
+  for (let i = 0; i < 3; i++) {
+    await page.evaluate(
+      (sid: string) =>
+        (window as never as { __mock: any }).__mock.emit({
+          type: 'message_delta',
+          sessionId: sid,
+          role: 'assistant',
+          text: '진행 중… ',
+        }),
+      id,
+    )
+  }
+  await page.waitForTimeout(300)
+  await expect.poll(async () => list.evaluate((el) => Math.round(el.scrollTop))).toBe(bottom)
+
+  // 그래도 화살표로 고른 줄은 따라온다 — 고칠 때 잃으면 안 되는 쪽
+  await page.getByTestId('past-new').click()
+  await page.keyboard.press('ArrowDown')
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const el = document.querySelector('[data-testid="past-sessions"] [aria-pressed="true"]')!
+        const row = el.getBoundingClientRect()
+        const box = el.parentElement!.getBoundingClientRect()
+        return row.top >= box.top - 1 && row.bottom <= box.bottom + 1
+      }),
+    )
+    .toBe(true)
+})
+
 test('이미 열려 있는 대화를 다시 고르면 새로 만들지 않고 그 세션으로 간다', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await page.evaluate(() => {

@@ -129,8 +129,26 @@ export function NewSessionDialog({ projectId, onClose }: { projectId: string; on
 
   // 이어받을 이전 세션. null이면 '새 세션'이다 (기본값)
   const [resume, setResume] = useState<ExternalSession | null>(null)
+  const listRef = useRef<HTMLDivElement>(null)
   const focusSession = useStore((s) => s.focusSession)
   const [past, setPast] = useState<PastState>({ status: 'loading' })
+
+  /**
+   * 화살표로 고른 줄이 접힌 목록 밖에 있으면 따라간다 — **선택이 바뀔 때만**.
+   *
+   * 예전에는 줄 자신의 `ref` 콜백에서 불렀다. 인라인 ref는 함수 정체가 매 렌더마다
+   * 달라져 React가 떼었다 다시 붙이므로, **렌더할 때마다** scrollIntoView가 돌았다.
+   * 이 창은 스토어를 구독하니(프로젝트·세션 목록) 세션 하나만 돌고 있어도 이벤트마다
+   * 다시 그려지고, 그때마다 목록이 선택된 줄로 도로 끌려갔다 — 워크트리를 켜서 창이
+   * 길어졌을 때 "스크롤이 잠시 뒤 맨 위로 돌아간다"가 이것이다 (도그푸딩 2026-09-07,
+   * 실측: 이벤트 한 번에 바깥 324→13, 안쪽 1140→0).
+   *
+   * `block: 'nearest'`라 이미 보이는 줄에는 아무 일도 하지 않는다 — 마우스로 고를 때
+   * 화면이 튀지 않는 이유가 그것이다.
+   */
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest' })
+  }, [resume?.externalId])
 
   // 다이얼로그를 열 때마다 감지한다 — 사용자가 방금 설치·로그인했을 수 있다
   const detect = useCallback(async () => {
@@ -299,6 +317,7 @@ export function NewSessionDialog({ projectId, onClose }: { projectId: string; on
           이 앱이 '또 하나의 창'이 되지 않는다.
         */}
           <div
+            ref={listRef}
             className="max-h-64 overflow-y-auto rounded border border-edge bg-panel"
             data-testid="past-sessions"
           >
@@ -592,10 +611,6 @@ function PastRow({
       onClick={onSelect}
       data-testid={testId}
       aria-pressed={selected}
-      // 화살표로 고른 줄이 접힌 목록 밖에 있으면 선택이 안 보인다 — 보이는 곳까지만 따라간다
-      ref={(el) => {
-        if (selected) el?.scrollIntoView({ block: 'nearest' })
-      }}
       className={`flex w-full flex-col gap-0.5 border-l-2 px-2.5 py-1.5 text-left transition-colors ${
         selected
           ? 'border-l-ash bg-graphite/40 text-chalk'
