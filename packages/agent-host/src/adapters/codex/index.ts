@@ -747,6 +747,21 @@ export class CodexAdapter implements AgentAdapter {
       await client.request('initialize', { clientInfo: CLIENT_INFO, capabilities: null })
       client.notify('initialized')
       await client.request('thread/delete', { threadId: externalId })
+    } catch (e) {
+      /*
+       * **없는 것을 지우라는 요청은 실패가 아니다** (도그푸딩 2026-09-07: 워크트리 세션을
+       * 잘못 만들고 지우려다 "Could not delete: no rollout found for thread id …").
+       *
+       * 실측: codex는 thread/start에서 스레드 id만 발급하고 rollout 파일은 **첫 턴에**
+       * 쓴다. 그래서 한 번도 말을 안 건 세션은 지울 파일이 없고, thread/delete가
+       * -32600으로 거절한다. 그 거절을 그대로 던지면 매니저가 여기서 멈춰서 세션 행도
+       * 워크트리도 안 지워진다 — 잘못 만든 세션일수록 못 지우는 셈이다.
+       *
+       * 목적("도구 쪽에 남아 있지 않게 하기")은 이미 이뤄져 있으므로 성공으로 친다.
+       * 다른 실패는 그대로 던진다 — 원본이 살아 있는데 지웠다고 답하는 것이 최악이라는
+       * 규칙(매니저 주석)은 그대로다.
+       */
+      if (!/no rollout found/i.test((e as Error).message)) throw e
     } finally {
       await client.dispose()
     }
