@@ -541,19 +541,6 @@ test('안읽음 표시와 읽음 처리 (T5-6, FR-16)', async ({ page }) => {
   await expect(row).not.toHaveAttribute('data-unread', 'true', { timeout: 1000 })
 })
 
-test('동시 세션 경고를 사이드바에 표시한다 (T5-6, FR-2)', async ({ page }) => {
-  await setup(page, { projects: ['/tmp/alpha'] })
-  await newSession(page, 'alpha', '1번')
-  await expect(page.getByTestId('concurrent-alpha')).toBeHidden()
-  await newSession(page, 'alpha', '2번')
-
-  // 데이터 유실 위험은 툴팁 뒤로 숨기지 않는다 — 이름 줄에 표식이 남는다 (FR-2)
-  await expect(page.getByTestId('concurrent-alpha')).toContainText('2')
-  // 무엇이 위험한지는 물어보면 답한다
-  await page.getByTestId('project-header-alpha').hover()
-  await expect(page.getByTestId('concurrent-detail')).toContainText('lose')
-})
-
 test('컨텍스트 게이지와 한도 표시 (FR-14, FR-9)', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await newSession(page, 'alpha', 'x')
@@ -4155,11 +4142,6 @@ test('프로젝트 표식은 호버하면 무엇인지 알려준다', async ({ p
     await expect(page.getByRole('tooltip')).toContainText('uncommitted')
   }
 
-  // 동시 세션 경고는 데이터 유실 위험이라 무엇인지 반드시 읽혀야 한다
-  await newSession(page, 'alpha', 'one')
-  await newSession(page, 'alpha', 'two')
-  await page.getByTestId('concurrent-alpha').hover()
-  await expect(page.getByRole('tooltip')).toContainText('same folder')
 })
 
 /** 사이드바 순서는 사람이 정한다 — 끌어서 옮기고, 다시 켜도 그대로여야 한다 */

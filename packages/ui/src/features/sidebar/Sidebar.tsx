@@ -487,7 +487,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
           대신 물어볼 때(호버·포커스) 툴팁으로 답한다.
         */}
         <Tooltip
-          content={<ProjectDetail project={project} sessionCount={sessions.length} />}
+          content={<ProjectDetail project={project} />}
           testId={`project-tip-${project.name}`}
         >
           <button
@@ -508,7 +508,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
           특히 동시 세션은 데이터 유실 위험을 알리는 신호라, 툴팁 뒤로 완전히
           숨기면 "막지 말고 보이게 하라"를 어기게 된다 (FR-2).
         */}
-        <ProjectMarks project={project} sessionCount={sessions.length} />
+        <ProjectMarks project={project} />
         {/*
           이 줄의 모든 동작이 한 버튼 뒤에 있다 (도그푸딩 요청).
 
@@ -1348,10 +1348,15 @@ function ConfirmDelete({
   )
 }
 
-/** 이름 줄에 얹는 표식 — 세로 공간을 새로 쓰지 않는다 */
-function ProjectMarks({ project, sessionCount }: { project: ProjectInfo; sessionCount: number }) {
+/**
+ * 이름 줄에 얹는 표식 — 세로 공간을 새로 쓰지 않는다.
+ *
+ * 한때 여기 "같은 폴더에서 N개가 돈다"(⧉N)는 경고가 있었다. 뺐다 (사용자 요청 2026-09-07):
+ * 같은 폴더에서 여럿을 돌리는 것은 이 앱에서 **하기로 하고 하는 일**이고, 정말 갈라놓고
+ * 싶으면 워크트리가 그 답이다. 매번 켜져 있는 경고는 조언이 아니라 배경음이 된다.
+ */
+function ProjectMarks({ project }: { project: ProjectInfo }) {
   const changed = project.git?.changedFiles ?? 0
-  const risky = sessionCount > 1
   const denied = project.git?.denied === true
 
   return (
@@ -1373,17 +1378,6 @@ function ProjectMarks({ project, sessionCount }: { project: ProjectInfo; session
           <span data-testid={`mark-changed-${project.name}`}>{changed}</span>
         </Tooltip>
       )}
-      {/* 겹친 사각형 = 같은 폴더에서 여럿이 일하는 중 */}
-      {risky && (
-        <Tooltip
-          content={`${sessionCount} sessions running in the same folder — they can overwrite each other's edits`}
-          testId={`concurrent-tip-${project.name}`}
-        >
-          <span className="text-ash" data-testid={`concurrent-${project.name}`}>
-            ⧉{sessionCount}
-          </span>
-        </Tooltip>
-      )}
       {denied && (
         <Tooltip content="Folder access permission required" testId={`git-denied-tip-${project.name}`}>
           <span className="text-ash" data-testid={`git-denied-${project.name}`}>
@@ -1396,7 +1390,7 @@ function ProjectMarks({ project, sessionCount }: { project: ProjectInfo; session
 }
 
 /** 툴팁 내용 — 평소엔 자리를 안 주지만 물어보면 전부 답한다 */
-function ProjectDetail({ project, sessionCount }: { project: ProjectInfo; sessionCount: number }) {
+function ProjectDetail({ project }: { project: ProjectInfo }) {
   return (
     <span className="block" data-testid={`project-detail-${project.name}`}>
       <span className="readout block truncate text-slate">{project.path}</span>
@@ -1415,11 +1409,6 @@ function ProjectDetail({ project, sessionCount }: { project: ProjectInfo; sessio
           <span>not a git repo</span>
         )}
       </span>
-      {sessionCount > 1 && (
-        <span className="mt-1 block text-chalk" data-testid="concurrent-detail">
-          {sessionCount} concurrent sessions — editing the same files can lose changes
-        </span>
-      )}
     </span>
   )
 }
