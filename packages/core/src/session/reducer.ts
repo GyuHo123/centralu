@@ -112,6 +112,11 @@ export type SessionSummary = {
    * activity와 같은 수명: 진행 표시일 뿐이라 working을 벗어나면 죽는다.
    */
   plan: { text: string; status: 'pending' | 'inProgress' | 'completed' }[] | null
+  /**
+   * 이 세션을 만든 앱 (#81). null이면 주인 없음 — 그러면 사이드바가 받는다.
+   * 코어가 아는 것은 id 한 줄이고, 그 뜻은 앱만 안다.
+   */
+  appId: string | null
 }
 
 export function initialSession(init: Pick<SessionSummary, 'id' | 'projectId' | 'name'> & Partial<SessionSummary>): SessionSummary {
@@ -120,6 +125,7 @@ export function initialSession(init: Pick<SessionSummary, 'id' | 'projectId' | '
     live: true, preview: '', pendingApproval: null, pendingQuestions: [], usage: null, context: null,
     limit: null, lastError: null, touchedPaths: [], model: null, effort: null, verbosity: null, serviceTier: null,
     permissionPreset: 'normal', worktree: null, parentSessionId: null, merged: false, pr: null, goal: null, thinkingTokens: null, plan: null, kind: 'worker' as const,
+    appId: null,
     tool: 'claude' as const, ...init,
   }
 }

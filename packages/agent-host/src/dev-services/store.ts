@@ -687,6 +687,20 @@ export class Store {
           }
         },
       },
+      {
+        to: 31,
+        /**
+         * 세션의 소유 앱 (#81, 사용자 요청 2026-09-09). 켜진 앱이 자기 세션을 보여주고,
+         * 사이드바는 프로젝트만 든다 — 그 판정의 근거가 이 한 칸이다. 옛 행은 null이고,
+         * 그건 "주인 없음"으로 읽혀 사이드바가 받는다 (닿지 못하는 세션을 만들지 않는다).
+         */
+        run: () => {
+          const cols = this.db.pragma('table_info(sessions)') as { name: string }[]
+          if (!cols.some((c) => c.name === 'app_id')) {
+            this.db.exec(`ALTER TABLE sessions ADD COLUMN app_id TEXT`)
+          }
+        },
+      },
     ]
 
     const t0 = Date.now()
@@ -1024,8 +1038,8 @@ export class Store {
   upsertSession(s: SessionInfo): void {
     this.db
       .prepare(
-        `INSERT INTO sessions (id, project_id, tool, external_id, name, auto_named, state, is_orchestrator, last_read_seq, waiting_since, created_at, model, effort, verbosity, service_tier, permission_preset, imported_from, worktree_path, worktree_branch, worktree_base, parent_session_id, scope_session_ids, role_append, context_used, context_window, context_exactness)
-         VALUES (@id, @projectId, @tool, @externalId, @name, @autoNamed, @state, @isOrchestrator, @lastReadSeq, @waitingSince, @createdAt, @model, @effort, @verbosity, @serviceTier, @permissionPreset, @importedFrom, @worktreePath, @worktreeBranch, @worktreeBase, @parentSessionId, @scopeSessionIds, @roleAppend, @contextUsed, @contextWindow, @contextExactness)
+        `INSERT INTO sessions (id, project_id, tool, external_id, name, auto_named, state, is_orchestrator, last_read_seq, waiting_since, created_at, model, effort, verbosity, service_tier, permission_preset, imported_from, worktree_path, worktree_branch, worktree_base, parent_session_id, scope_session_ids, role_append, app_id, context_used, context_window, context_exactness)
+         VALUES (@id, @projectId, @tool, @externalId, @name, @autoNamed, @state, @isOrchestrator, @lastReadSeq, @waitingSince, @createdAt, @model, @effort, @verbosity, @serviceTier, @permissionPreset, @importedFrom, @worktreePath, @worktreeBranch, @worktreeBase, @parentSessionId, @scopeSessionIds, @roleAppend, @appId, @contextUsed, @contextWindow, @contextExactness)
          ON CONFLICT(id) DO UPDATE SET
            tool = excluded.tool,
            external_id = excluded.external_id, name = excluded.name, auto_named = excluded.auto_named,
@@ -1040,6 +1054,7 @@ export class Store {
            parent_session_id = excluded.parent_session_id,
            scope_session_ids = excluded.scope_session_ids,
            role_append = excluded.role_append,
+           app_id = excluded.app_id,
            context_used = excluded.context_used, context_window = excluded.context_window,
            context_exactness = excluded.context_exactness`,
       )
@@ -1059,6 +1074,7 @@ export class Store {
         // 시야는 JSON 배열로 눕는다 (#80·#81) — 관계는 행에 산다 (고아 교훈)
         scopeSessionIds: s.scopeSessionIds ? JSON.stringify(s.scopeSessionIds) : null,
         roleAppend: s.roleAppend ?? null,
+        appId: s.appId ?? null,
         /*
          * Context rides the ordinary upsert (issue #48), which the manager already runs after
          * every event — so a reading is on disk the instant it arrives, with no second write
@@ -1140,7 +1156,7 @@ export class Store {
                 s.worktree_path as worktreePath, s.worktree_branch as worktreeBranch,
                 s.worktree_base as worktreeBase,
                 s.parent_session_id as parentSessionId,
-                s.scope_session_ids as scopeSessionIdsJson, s.role_append as roleAppend,
+                s.scope_session_ids as scopeSessionIdsJson, s.role_append as roleAppend, s.app_id as appId,
                 s.context_used as contextUsed, s.context_window as contextWindow,
                 s.context_exactness as contextExactness,
                 COALESCE((SELECT MAX(seq) FROM messages m WHERE m.session_id = s.id), 0) as lastSeq

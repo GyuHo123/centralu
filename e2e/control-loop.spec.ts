@@ -7135,9 +7135,12 @@ test('업무 만들기: 레일 다이얼로그 → 반장 세션 → 사이드�
   expect(invoke.name).toBe('control_create_task')
   expect(invoke.args.memberSessionIds).toEqual([workerId])
 
-  // 반장이 코어 객체로 선다: 사이드바(코어 줄)와 레일(앱 줄) 양쪽
-  await expect(page.locator('[data-testid^="coordinator-row-"]')).toContainText('스킬 구현')
+  /*
+   * 반장은 **자기 앱의 줄에만** 선다 (사용자 요청 2026-09-09). 예전에는 사이드바에도
+   * 같은 것이 이름만 다른 줄로 서서, 업무가 늘면 양쪽이 같이 길어졌다.
+   */
   await expect(page.getByTestId('rail-tasks')).toContainText('스킬 구현')
+  await expect(page.locator('[data-testid^="homeless-row-"]')).toHaveCount(0)
 
   // 구성원이 이름으로 보인다 (2026-09-06) — 숫자만으로는 어느 세션들의 업무인지 안 읽혔다
   await expect(page.getByTestId('rail-tasks')).toContainText('구성원이 될 세션')
@@ -7148,6 +7151,35 @@ test('업무 만들기: 레일 다이얼로그 → 반장 세션 → 사이드�
     .toBe(workerId)
   // 반장은 레일의 내 차례/진행 중에는 안 선다 — 메타 층은 Tasks 섹션의 몫
   await expect(page.locator('[data-testid^="rail-turn-coord"]')).toHaveCount(0)
+})
+
+/**
+ * 앱을 끄면 그 앱의 세션은 사이드바가 받는다 (사용자 요청 2026-09-09).
+ *
+ * 규칙은 하나다: 뜻을 준 앱이 집이고, 집이 없으면 사이드바가 받는다. 이게 없으면
+ * 토글 하나가 세션을 화면에서 지워 버린다 — 말 걸 방법이 사라진다.
+ */
+test('관제 앱을 끄면 반장 세션이 사이드바로 내려온다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', '구성원이 될 세션')
+  const workerId = await page.evaluate(() => [...(window as never as { __mock: any }).__mock.sessions.keys()][0])
+
+  await page.getByTestId('orchestrator-button').click()
+  await page.getByTestId('rail-new-task').click()
+  await page.getByTestId('task-title').fill('스킬 구현')
+  await page.getByTestId('task-goal').fill('스킬 X를 끝까지')
+  await page.getByTestId(`task-member-${workerId}`).check()
+  await page.getByTestId('task-create').click()
+  await expect(page.getByTestId('new-task-dialog')).toBeHidden()
+  // 앱이 켜져 있는 동안은 앱의 줄에만 있다
+  await expect(page.locator('[data-testid^="homeless-row-"]')).toHaveCount(0)
+
+  await page.evaluate(() => (window as never as { __store: any }).__store.getState().setAppEnabled('control', false))
+
+  // 집이 사라졌으니 사이드바가 받는다 — 이름으로 찾아 열 수 있어야 한다
+  await expect(page.getByTestId('homeless-sessions')).toContainText('스킬 구현')
+  await page.locator('[data-testid^="homeless-row-"]').first().click()
+  await expect(page.getByTestId('session-view')).toBeVisible()
 })
 
 /*
@@ -7172,8 +7204,8 @@ test('반장 세션을 열면 증거 패널이 비어 선다 — 직전 프로�
   await page.getByTestId(`task-member-${workerId}`).check()
   await page.getByTestId('task-create').click()
 
-  // 반장을 연다 — 프로젝트 없는 세션이니 증거 레인 자체가 없어야 한다 (접힌 띠도)
-  await page.locator('[data-testid^="coordinator-row-"]').first().click()
+  // 반장을 연다 (업무 줄이 곧 반장이다) — 프로젝트 없는 세션이니 증거 레인 자체가 없어야 한다
+  await page.locator('[data-testid^="rail-task-open-"]').first().click()
   await expect(page.getByTestId('session-view')).toBeVisible()
   await expect(page.getByTestId('evidence-panel')).toHaveCount(0)
   await expect(page.getByTestId('evidence-rail-shell')).toHaveCount(0)

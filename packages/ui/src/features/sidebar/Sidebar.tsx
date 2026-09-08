@@ -4,6 +4,7 @@ import type { SessionSummary } from '@cc/core'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { useStore } from '../../store/store.js'
 import { NewSessionDialog } from '../project/NewSessionDialog.jsx'
+import { APPS } from '../../apps/registry.js'
 import { WorktreeManagerDialog } from '../project/WorktreeManagerDialog.jsx'
 import { DeleteProjectDialog } from '../project/DeleteProjectDialog.jsx'
 import { useIsProjectSelected, useSelectedSessionId, useSessionsOf } from '../../store/selectors.js'
@@ -258,25 +259,40 @@ function OrchestratorButton() {
           Evolving
         </span>
       </button>
-      <CoordinatorRows />
+      <HomelessSessions />
     </div>
   )
 }
 
 /**
- * 조율 세션들 (#80·#81 — kind 'coordinator'). **코어의 줄이다**: 앱(관제)이 의미를
- * 입히지만, 세션은 코어 객체라 앱을 꺼도 여기 남아 닿을 수 있어야 한다 (강등 원칙).
- * 프로젝트가 없으니 오케스트레이터 아래가 자리다.
+ * 주인 없는 세션들 (사용자 요청 2026-09-09) — **사이드바가 받는 자리**.
+ *
+ * 규칙 하나로 정리됐다: **세션에 뜻을 준 앱이 그 세션의 집이고, 집이 없으면 사이드바가
+ * 받는다.** 그래서 관제 앱이 켜져 있는 동안 반장 세션은 여기 안 선다 — 업무 줄이 곧
+ * 반장이라, 예전처럼 같은 것이 이름만 다른 두 줄로 서지 않는다.
+ *
+ * 여기 서는 것은 갈 곳이 없어진 세션뿐이다: 앱이 꺼졌거나(토글), 명부에서 사라졌거나,
+ * 아무 앱도 자기 것이라 하지 않은 옛 행. **앱을 꺼도 닿을 수 있어야 한다**는 규칙이
+ * 이 목록으로 지켜진다 — 안 그러면 토글 하나가 세션을 화면에서 지워 버린다.
+ *
+ * 프로젝트가 있는 세션은 프로젝트 아래에 있으므로 여기 오지 않는다.
  */
-function CoordinatorRows() {
+function HomelessSessions() {
   const sessions = useStore((s) => s.sessions)
+  const apps = useStore((s) => s.apps)
   const focused = useStore((s) => s.focusedSessionId)
   const focusSession = useStore((s) => s.focusSession)
-  const coordinators = Object.values(sessions).filter((s) => s.kind === 'coordinator')
-  if (coordinators.length === 0) return null
+  const homeless = Object.values(sessions).filter((s) => {
+    if (s.projectId || s.kind === 'orchestrator') return false
+    if (!s.appId) return true // 주인을 말한 앱이 없다
+    if (!APPS.some((a) => a.id === s.appId)) return true // 명부에서 사라진 앱
+    return apps[s.appId]?.enabled === false // 꺼진 앱
+  })
+  if (homeless.length === 0) return null
   return (
-    <div className="mt-1 space-y-0.5" data-testid="coordinator-rows">
-      {coordinators.map((s) => (
+    <div className="mt-1 space-y-0.5" data-testid="homeless-sessions">
+      <p className="px-2.5 text-[10px] uppercase text-slate">No app</p>
+      {homeless.map((s) => (
         <button
           key={s.id}
           className={`flex w-full items-center gap-2 rounded border-l-2 py-1 pl-2.5 pr-2 text-left text-[12px] transition-colors ${
@@ -285,7 +301,7 @@ function CoordinatorRows() {
               : 'border-l-transparent text-ash hover:bg-graphite/20 hover:text-chalk'
           }`}
           onClick={() => focusSession(s.id)}
-          data-testid={`coordinator-row-${s.id}`}
+          data-testid={`homeless-row-${s.id}`}
         >
           <ToolMark tool={s.tool} state={s.state} />
           <span className="truncate">{s.name}</span>

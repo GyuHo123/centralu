@@ -58,4 +58,12 @@ export type HostAppModule = {
    * app_state_changed는 앱 자신의 산물이라 되돌아오지 않는다 (고리 방지).
    */
   observe?(ctx: HostAppContext, event: NormalizedEvent): void
+  /**
+   * 기동에 한 번 — **이 앱이 이미 만들어 둔 세션들의 id**를 돌려준다 (사용자 요청 2026-09-09).
+   *
+   * 소유(appId)는 이제 세션 행에 적히지만, 그 칸이 생기기 전에 만들어진 세션은 비어 있다.
+   * 어느 세션이 자기 것인지는 **앱만 안다**(자기 문서의 모양을 아는 것도 앱뿐이다) —
+   * 그래서 앱이 말하고 코어가 적는다. 코어는 여전히 그 뜻을 모른다.
+   */
+  claimSessions?(ctx: HostAppContext): readonly string[]
 }

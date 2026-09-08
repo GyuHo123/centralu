@@ -2441,7 +2441,7 @@ describe('재개는 만들어진 곳으로 돌아간다', () => {
       id: 'old', projectId: p.id, kind: 'worker', tool: 'claude', externalId: 'ext-1', name: '예전 세션',
       autoNamed: false, state: 'idle', lastReadSeq: 0, lastSeq: 0,
       createdAt: 1, waitingSince: null, live: false, model: null, effort: null, verbosity: null, serviceTier: null,
-      permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, ...sessionLiveDefaults(),
+      permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null, ...sessionLiveDefaults(),
     })
     expect(store.sessionCwd('old')).toBeNull()
 
@@ -2721,7 +2721,7 @@ describe('워크트리 세션의 매니저 (#69)', () => {
     autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
     createdAt: 1, waitingSince: null, live: false, model: null, effort: null, verbosity: null,
     serviceTier: null, permissionPreset: 'normal', importedFrom: null,
-    worktree: { path: `/tmp/wt/${id}`, branch: `centralu/${id}` }, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+    worktree: { path: `/tmp/wt/${id}`, branch: `centralu/${id}` }, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
     ...sessionLiveDefaults(), ...over,
   })
   const boot = () =>
@@ -3194,6 +3194,25 @@ describe('조율 세션 — 시야가 잘린 오케스트레이터형 (#80·#81)
     expect(adapter.lastOpts?.toolProfile).toBe('scoped')
   })
 
+  it('앱이 예전에 만든 세션은 기동에 소유가 적힌다 — 옛 행도 자기 앱의 줄로 간다', async () => {
+    const orc = await mgr.orchestrator()
+    const p = await addProject()
+    const a = (await rpc('agents.createSession', { projectId: p.id, cwd: p.path, tool: 'claude' })) as SessionInfo
+    await mgr.runOrchestratorTool(orc.id, 'control_create_task', {
+      title: '옛 업무', goal: 'g', memberSessionIds: [a.id],
+    })
+    const doc = mgr.appState('control').doc as { tasks: { coordinatorId: string }[] }
+    const coordId = doc.tasks[0]!.coordinatorId
+
+    // appId 칸이 생기기 전에 만들어진 행을 흉내 낸다 — 소유가 비어 있다
+    const before = mgr.listSessions().find((s) => s.id === coordId)!
+    store.upsertSession({ ...before, appId: null })
+
+    // 다시 기동하면 앱이 자기 것이라 말하고, 코어가 받아 적는다
+    const again = new SessionManager(store, new Map<ToolName, AgentAdapter>([['claude', adapter]]), () => {})
+    expect(again.listSessions().find((s) => s.id === coordId)?.appId).toBe('control')
+  })
+
   it('관제 앱의 업무 생성 — 오케스트레이터의 도구 한 번으로 반장·보드·업무가 함께 선다', async () => {
     const orc = await mgr.orchestrator()
     const p = await addProject()
@@ -3212,6 +3231,12 @@ describe('조율 세션 — 시야가 잘린 오케스트레이터형 (#80·#81)
     expect(foreman.scopeSessionIds).toEqual([a.id])
     expect(foreman.roleAppend).toContain('반장')
     expect(foreman.roleAppend).toContain(task.id) // 역할문이 자기 업무 id를 안다
+    /*
+     * 소유 앱이 행에 적힌다 (#81, 사용자 요청 2026-09-09). 값은 인자가 아니라 **도구를
+     * 부른 앱의 바인딩**에서 오므로 앱이 남의 이름을 댈 수 없다. 이 한 줄이 "누가 이
+     * 세션을 보여주는가"의 근거고, 비어 있으면 사이드바가 받는다.
+     */
+    expect(foreman.appId).toBe('control')
 
     // 반장이 보드를 쓰고, 남(오케스트레이터 아닌 scoped)이 아니라서 허용된다
     const upd = await mgr.runOrchestratorTool(task.coordinatorId, 'board_update', {

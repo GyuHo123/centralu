@@ -504,6 +504,8 @@ export class MockPlatform implements Platform {
           createdAt: this.now(), waitingSince: null, live: true, model: null, effort: 'high',
           verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null,
           worktree: null, parentSessionId: null, scopeSessionIds: members, roleAppend: '(mock role)',
+          // 실물과 같은 규칙 (#81): 소유 앱은 도구를 부른 앱의 등록 id다 — 앱이 못 지어낸다
+          appId,
           ...sessionLiveDefaults(),
         })
         this.emit({ type: 'session_created', sessionId: id, session: this.sessions.get(id) } as NormalizedEvent)
@@ -590,7 +592,7 @@ export class MockPlatform implements Platform {
             permissionPreset: 'normal',
             importedFrom: null,
             worktree: null,
-            parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+            parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
             ...sessionLiveDefaults(),
           }
           this.sessions.set(mgrId, mgr)
@@ -607,6 +609,7 @@ export class MockPlatform implements Platform {
         kind: 'worker',
         scopeSessionIds: null,
         roleAppend: null,
+        appId: null,
         tool: params.tool,
         externalId: `ext-${id}`,
         worktree,
@@ -794,7 +797,7 @@ export class MockPlatform implements Platform {
         permissionPreset: 'normal' as const,
         importedFrom: null,
         worktree: null,
-        parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+        parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
         ...sessionLiveDefaults(),
       }
       this.sessions.set(id, info)
@@ -1145,7 +1148,7 @@ export class MockPlatform implements Platform {
         permissionPreset: 'normal',
         importedFrom: null,
         worktree: null,
-        parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+        parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
         ...sessionLiveDefaults(),
       }
       this.sessions.set(id, manager)

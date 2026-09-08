@@ -113,6 +113,8 @@ function boardDenied(task: ControlTask | undefined, caller: AppToolCaller): Tool
 
 export const controlHostApp: HostAppModule = {
   id: 'control',
+  /** 우리 문서가 든 업무들의 반장 세션이 우리 것이다 (appId 칸이 생기기 전에 만들어진 행들) */
+  claimSessions: (ctx) => readDoc(ctx).tasks?.map((t) => t.coordinatorId).filter(Boolean) ?? [],
   tools: {
     // scoped(반장)도 notify·보드를 쓴다 — 사람 호출과 기억이 반장 역할의 반쪽이다
     profiles: ['orchestrator', 'manager', 'scoped'],

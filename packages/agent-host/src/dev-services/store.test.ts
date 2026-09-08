@@ -13,7 +13,7 @@ import { Store } from './store.js'
  * v22·v23·v24가 연달아 같은 여섯 군데 단언을 깨뜨렸다: 버전이 여섯 번 적혀 있으면
  * 마이그레이션마다 여섯 번의 잔손질이 청구된다.
  */
-const LATEST_SCHEMA = 30
+const LATEST_SCHEMA = 31
 
 function seeded() {
   const s = new Store()
@@ -21,7 +21,7 @@ function seeded() {
   s.upsertSession({
     id: 's1', projectId: 'p1', kind: 'worker', tool: 'claude', externalId: null, name: '새 세션',
     autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
-    createdAt: Date.now(), waitingSince: null, live: true, model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+    createdAt: Date.now(), waitingSince: null, live: true, model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
     ...sessionLiveDefaults(),
   })
   return s
@@ -77,7 +77,7 @@ describe('v10 이관 — 프로젝트 없는 세션을 허용한다', () => {
       id: 'orc', projectId: null, kind: 'orchestrator', tool: 'claude', externalId: null, name: 'Orchestrator',
       autoNamed: false, state: 'idle', lastReadSeq: 0, lastSeq: 0,
       createdAt: 1, waitingSince: null, live: true, model: null, effort: null, verbosity: null, serviceTier: null,
-      permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, ...sessionLiveDefaults(),
+      permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null, ...sessionLiveDefaults(),
     })
     expect(store.listSessions().find((x) => x.id === 'orc')?.projectId).toBeNull()
     rmSync(dir, { recursive: true, force: true })
@@ -289,7 +289,7 @@ describe('마이그레이션 v5 — 이어받은 원본 기록', () => {
       id: 's-import', projectId: 'p1', kind: 'worker' as const, tool: 'claude' as const, externalId: 'ext-new',
       name: '이어받은 대화', autoNamed: true, state: 'idle' as const,
       lastReadSeq: 0, lastSeq: 0, createdAt: Date.now(), waitingSince: null, live: true,
-      model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal' as const, importedFrom: 'ext-old', worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+      model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal' as const, importedFrom: 'ext-old', worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
       ...sessionLiveDefaults(),
     }
     store.upsertSession(base)
@@ -309,7 +309,7 @@ describe('마이그레이션 v7 — 추론 강도', () => {
     id: 's-x', projectId: 'p1', kind: 'worker', tool: 'claude', externalId: null, name: '세션',
     autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
     createdAt: Date.now(), waitingSince: null, live: true,
-    model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+    model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
     ...sessionLiveDefaults(),
     ...over,
   })
@@ -341,7 +341,7 @@ describe('마이그레이션 v18 — 응답 길이', () => {
     id: 's-x', projectId: 'p1', kind: 'worker', tool: 'codex', externalId: null, name: '세션',
     autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
     createdAt: Date.now(), waitingSince: null, live: true,
-    model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+    model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
     ...sessionLiveDefaults(),
     ...over,
   })
@@ -387,7 +387,7 @@ describe('마이그레이션 v8 — 사이드바 순서', () => {
         id, projectId: 'p1', kind: 'worker', tool: 'claude', externalId: null, name: id,
         autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
         createdAt: Date.now(), waitingSince: null, live: true,
-        model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+        model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
         ...sessionLiveDefaults(),
       })
     }
@@ -426,7 +426,7 @@ describe('마이그레이션 v9 — 그리드 배치', () => {
         id, projectId: 'p1', kind: 'worker', tool: 'claude', externalId: null, name: id,
         autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
         createdAt: Date.now(), waitingSince: null, live: true,
-        model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+        model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
         ...sessionLiveDefaults(),
       })
     }
@@ -471,7 +471,7 @@ describe('오케스트레이터 표식(kind)', () => {
       id, projectId, kind, tool: 'claude', externalId: null, name: id,
       autoNamed: false, state: 'idle', lastReadSeq: 0, lastSeq: 0,
       createdAt: 1, waitingSince: null, live: true, model: null, effort: null, verbosity: null, serviceTier: null,
-      permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, ...sessionLiveDefaults(),
+      permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null, ...sessionLiveDefaults(),
     })
 
   it('표식이 없으면 중앙은 null', () => {
@@ -827,7 +827,7 @@ describe('v17 이관 — 컨텍스트 사용량이 재시작을 넘긴다', () =
     id: 'worked', projectId: 'p1', kind: 'worker', tool: 'claude', externalId: null, name: '일한 세션',
     autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
     createdAt: 1, waitingSince: null, live: true, model: null, effort: null, verbosity: null, serviceTier: null,
-    permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+    permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
     ...sessionLiveDefaults(),
     ...over,
   })
@@ -900,7 +900,7 @@ describe('WAL 체크포인트', () => {
     s.upsertSession({
       id: 's1', projectId: 'p1', kind: 'worker', tool: 'claude', externalId: null, name: '새 세션',
       autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
-      createdAt: Date.now(), waitingSince: null, live: true, model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+      createdAt: Date.now(), waitingSince: null, live: true, model: null, effort: null, verbosity: null, serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
       ...sessionLiveDefaults(),
     })
     for (let i = 1; i <= 200; i++) {
@@ -1019,7 +1019,7 @@ describe('v21 이관 — 델타 행을 메시지로 합친다', () => {
       id: 's1', projectId: 'p1', kind: 'worker', tool: 'codex', externalId: null, name: '새 세션',
       autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
       createdAt: Date.now(), waitingSince: null, live: true, model: null, effort: null, verbosity: null,
-      serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+      serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
       ...sessionLiveDefaults(),
     })
     // 실측한 모양 그대로: 토큰 하나가 행 하나
@@ -1127,7 +1127,7 @@ describe('v29 이관 — 짓밟힌 시각을 이웃으로 조인다', () => {
       id: 's1', projectId: 'p1', kind: 'worker', tool: 'claude', externalId: null, name: '세션',
       autoNamed: true, state: 'idle', lastReadSeq: 0, lastSeq: 0,
       createdAt: Date.now(), waitingSince: null, live: true, model: null, effort: null, verbosity: null,
-      serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+      serviceTier: null, permissionPreset: 'normal', importedFrom: null, worktree: null, parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
       ...sessionLiveDefaults(),
     })
     s0.appendMessages([

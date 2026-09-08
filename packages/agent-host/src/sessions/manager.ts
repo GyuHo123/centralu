@@ -275,6 +275,7 @@ export class SessionManager {
       }
     }
     this.adoptOrphanWorktrees()
+    this.claimAppSessions()
     this.renameLegacyManagers()
     this.nameUnnamedWorktrees()
     /*
@@ -382,8 +383,12 @@ export class SessionManager {
       },
       emitChanged: () => this.emit({ type: 'app_state_changed', appId }),
       sessions: {
-        // 물리 원시형의 위임 (#81) — 타입형이라 앱이 임의 권력의 세션을 주조할 수 없다
-        createCoordinator: (opts) => this.createCoordinator(opts),
+        /*
+         * 물리 원시형의 위임 (#81) — 타입형이라 앱이 임의 권력의 세션을 주조할 수 없다.
+         * **소유 앱은 여기서 찍는다**: 값이 인자가 아니라 바인딩에서 오므로 앱이 남의
+         * 이름을 댈 수 없다. 이 한 줄이 "누가 이 세션을 보여주는가"의 근거가 된다.
+         */
+        createCoordinator: (opts) => this.createCoordinator({ ...opts, appId }),
       },
     }
   }
@@ -487,6 +492,33 @@ export class SessionManager {
     }
   }
 
+  /**
+   * 앱이 예전에 만든 세션에 소유를 적는다 (기동에 한 번).
+   *
+   * appId 칸이 비어 있는 행만 채운다 — 이미 적힌 소유를 다시 쓰지 않는다. 어느 세션이
+   * 자기 것인지는 앱이 말하고(claimSessions), 코어는 그 id를 받아 적기만 한다.
+   */
+  private claimAppSessions(): void {
+    for (const app of HOST_APPS) {
+      if (!app.claimSessions) continue
+      let ids: readonly string[] = []
+      try {
+        ids = app.claimSessions(this.appContext(app.id))
+      } catch (e) {
+        // 앱의 실패가 기동을 막지 않는다 — 소유가 안 적히면 사이드바가 받는다
+        console.error(`[apps] claimSessions failed for ${app.id}: ${(e as Error).message}`)
+        continue
+      }
+      for (const id of ids) {
+        const m = this.meta.get(id)
+        if (!m || m.appId) continue
+        const owned = { ...m, appId: app.id }
+        this.meta.set(id, owned)
+        this.store.upsertSession(owned)
+      }
+    }
+  }
+
   private renameLegacyManagers(): void {
     for (const s of [...this.meta.values()]) {
       if (!SessionManager.LEGACY_MANAGER_NAMES.includes(s.name)) continue
@@ -552,7 +584,7 @@ export class SessionManager {
       permissionPreset: 'normal',
       importedFrom: null,
       worktree: null,
-      parentSessionId: null, scopeSessionIds: null, roleAppend: null,
+      parentSessionId: null, scopeSessionIds: null, roleAppend: null, appId: null,
       ...sessionLiveDefaults(),
     }
     this.store.upsertSession(manager)
@@ -868,6 +900,8 @@ export class SessionManager {
       /** 조율 세션의 시야·역할문 (#80·#81 물리) — createCoordinator()만 채운다 */
       scopeSessionIds?: string[]
       roleAppend?: string
+      /** 이 세션을 만든 앱 (#81). 앱이 아니라 **앱 문맥의 바인딩**이 채운다 */
+      appId?: string | null
     },
   ): Promise<SessionInfo> {
     const adapter = this.adapters.get(params.tool)
@@ -965,6 +999,7 @@ export class SessionManager {
     const info: SessionInfo = {
       id, projectId: params.projectId, kind: params.kind ?? 'worker', tool: params.tool, externalId: null,
       scopeSessionIds: params.scopeSessionIds ?? null, roleAppend: params.roleAppend ?? null,
+      appId: params.appId ?? null,
       name:
         namedByBranch ??
         (params.initialPrompt ? truncate(params.initialPrompt) : (worktree?.branch ?? 'New session')),
@@ -2518,6 +2553,8 @@ export class SessionManager {
     tool: ToolName
     model?: string
     effort?: string
+    /** 소유 앱 — appContext가 채운다. 앱은 자기 id를 스스로 적을 수 없다 */
+    appId?: string | null
   }): Promise<SessionInfo> {
     for (const id of params.memberSessionIds) {
       const t = this.meta.get(id)
@@ -2536,6 +2573,7 @@ export class SessionManager {
       permissionPreset: 'normal',
       scopeSessionIds: params.memberSessionIds,
       roleAppend: params.roleAppend,
+      appId: params.appId ?? null,
     })
     // 이름은 부르는 쪽의 의미다 — 자동 이름이 덮지 않게 사람이 정한 이름 취급 (FR-18)
     this.rename(info.id, params.name)
