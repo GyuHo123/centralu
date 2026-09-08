@@ -55,6 +55,15 @@ export const CreateSessionParams = z.object({
    * 검증은 host가 한다 (`git check-ref-format` — 규칙을 우리가 다시 적지 않는다).
    */
   worktreeBranch: z.string().optional(),
+  /**
+   * 어디서 갈라질까 (사용자 지적 2026-09-07: "워커 생성할 때 어디 브랜치에서 가져올지
+   * 정하는 게 없다").
+   *
+   * 생략하면 프로젝트의 줄기(매니저가 정한 baseBranch), 그것도 없으면 지금 HEAD다.
+   * 줄기를 정해 둔 사람도 "이번 하나만 저 브랜치에서"가 필요할 때가 있고, 그때 유일한
+   * 우회로가 원본 폴더에서 브랜치를 갈아 끼우는 것이면 워크트리를 쓰는 이유가 없어진다.
+   */
+  worktreeBase: z.string().optional(),
 })
 export type CreateSessionParams = z.infer<typeof CreateSessionParams>
 

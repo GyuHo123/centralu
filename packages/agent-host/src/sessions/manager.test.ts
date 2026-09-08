@@ -1950,7 +1950,7 @@ describe('워크트리 세션', () => {
 
     expect(isolated.parentSessionId).not.toBeNull()
     const manager = wtMgr.listSessions().find((x) => x.id === isolated.parentSessionId)!
-    expect(manager.name).toBe('Worktrees')
+    expect(manager.name).toBe('Worktree manager')
     expect(manager.worktree).toBeNull()
     // 두 번째 워크트리 세션은 같은 매니저를 재사용한다 — 프로젝트당 하나면 충분하다
     const second = await create(true)
@@ -1974,6 +1974,31 @@ describe('워크트리 세션', () => {
       cwd: s.worktree!.path, encoding: 'utf8',
     }).trim()
     expect(head).toBe('feat/login-fix')
+  })
+
+  it('어디서 갈라질지 고를 수 있다 (사용자 지적 2026-09-07) — 줄기도 HEAD도 아닌 그 브랜치에서', async () => {
+    // main과 다른 커밋을 든 브랜치를 하나 만들어 둔다
+    execFileSync('git', ['checkout', '-q', '-b', 'release'], { cwd: repo })
+    writeFileSync(join(repo, 'only-on-release.txt'), 'x\n')
+    execFileSync('git', ['add', '.'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'release'], { cwd: repo })
+    execFileSync('git', ['checkout', '-q', 'main'], { cwd: repo })
+
+    const s = (await wtRpc('agents.createSession', {
+      projectId: project.id, cwd: repo, tool: 'claude', worktree: true, worktreeBase: 'release',
+    })) as SessionInfo
+
+    // 증거는 파일이다 — release에만 있는 파일이 새 작업대에 있다
+    expect(existsSync(join(s.worktree!.path, 'only-on-release.txt'))).toBe(true)
+  })
+
+  it('없는 브랜치에서 갈라 달라면 거절한다 — 조용히 HEAD로 물러나면 착각이 커밋 뒤에 드러난다', async () => {
+    await expect(
+      wtRpc('agents.createSession', {
+        projectId: project.id, cwd: repo, tool: 'claude', worktree: true, worktreeBase: 'no-such-branch',
+      }),
+    ).rejects.toThrow(/Not a branch in this repository/)
+    expect(wtMgr.listSessions().filter((x) => x.worktree).length).toBe(0)
   })
 
   it('브랜치 이름이 될 수 없는 것은 거절한다 — 판정은 git이 한다', async () => {
@@ -2230,7 +2255,7 @@ describe('워크트리 세션', () => {
   it('매니저 자리를 먼저 만든다 — 자식이 없어도 매니저다 (#76)', async () => {
     const manager = await wtMgr.createWorktreeManager(project.id, 'main')
 
-    expect(manager.name).toBe('Worktrees')
+    expect(manager.name).toBe('Worktree manager')
     expect(manager.live).toBe(false) // 행만 만든다 — 프로세스는 말을 걸 때 뜬다
     expect(wtMgr.listSessions().some((s) => s.parentSessionId === manager.id)).toBe(false)
     expect(wtMgr.toolProfileOf(manager.id)).toBe('manager')
@@ -2244,7 +2269,7 @@ describe('워크트리 세션', () => {
 
     expect(again.id).toBe(first.id)
     expect(store.worktreeManager(project.id)?.baseBranch).toBe('develop')
-    expect(wtMgr.listSessions().filter((s) => s.name === 'Worktrees')).toHaveLength(1)
+    expect(wtMgr.listSessions().filter((s) => s.name === 'Worktree manager')).toHaveLength(1)
   })
 
   it('먼저 만든 자리 아래로 워크트리가 들어간다 — 두 번째 매니저가 생기지 않는다 (#76)', async () => {
@@ -2252,7 +2277,7 @@ describe('워크트리 세션', () => {
     const kid = await create(true)
 
     expect(kid.parentSessionId).toBe(manager.id)
-    expect(wtMgr.listSessions().filter((s) => s.name === 'Worktrees')).toHaveLength(1)
+    expect(wtMgr.listSessions().filter((s) => s.name === 'Worktree manager')).toHaveLength(1)
   })
 
   /*
@@ -2703,12 +2728,37 @@ describe('워크트리 세션의 매니저 (#69)', () => {
     const m2 = boot()
 
     const all = m2.listSessions()
-    const manager = all.find((s) => s.name === 'Worktrees')!
+    const manager = all.find((s) => s.name === 'Worktree manager')!
     expect(manager).toBeDefined()
     expect(manager.worktree).toBeNull()
     expect(manager.live).toBe(false) // 입양은 행을 만들 뿐 에이전트를 깨우지 않는다 (lazy-spawn)
     expect(all.find((s) => s.id === 'wt-a')?.parentSessionId).toBe(manager.id)
     expect(all.find((s) => s.id === 'wt-b')?.parentSessionId).toBe(manager.id)
+  })
+
+  it('옛 이름(Worktrees)으로 앉아 있던 매니저는 기동에 새 이름을 받는다 (사용자 요청 2026-09-07)', async () => {
+    const p = await addProject()
+    // 자식을 가진 옛 이름의 매니저 — 우리가 지어 줬던 이름이다
+    store.upsertSession(
+      wtRow('old-mgr', p.id, { worktree: null, name: 'Worktrees', autoNamed: false }),
+    )
+    store.upsertSession(wtRow('wt-a', p.id, { parentSessionId: 'old-mgr' }))
+
+    const m2 = boot()
+
+    expect(m2.listSessions().find((s) => s.id === 'old-mgr')?.name).toBe('Worktree manager')
+    // 이름만 바뀐다 — 자리도 자식도 그대로다 (두 번째 매니저가 생기면 안 된다)
+    expect(m2.listSessions().find((s) => s.id === 'wt-a')?.parentSessionId).toBe('old-mgr')
+    expect(m2.listSessions().filter((s) => s.name === 'Worktree manager').length).toBe(1)
+  })
+
+  it('매니저가 아닌 남의 세션이 같은 이름이면 건드리지 않는다', async () => {
+    const p = await addProject()
+    store.upsertSession(wtRow('mine', p.id, { worktree: null, name: 'Worktrees', autoNamed: false }))
+
+    const m2 = boot()
+
+    expect(m2.listSessions().find((s) => s.id === 'mine')?.name).toBe('Worktrees')
   })
 
   it('두 번 기동해도 매니저는 하나다 (멱등)', async () => {
@@ -2718,7 +2768,7 @@ describe('워크트리 세션의 매니저 (#69)', () => {
     boot()
     const m3 = boot()
 
-    expect(m3.listSessions().filter((s) => s.name === 'Worktrees').length).toBe(1)
+    expect(m3.listSessions().filter((s) => s.name === 'Worktree manager').length).toBe(1)
   })
 
   it('부모가 사라진 자식도 고아다 — 다음 기동이 다시 입양한다', async () => {
@@ -2736,7 +2786,7 @@ describe('워크트리 세션의 매니저 (#69)', () => {
     const p = await addProject()
     store.upsertSession(wtRow('wt-a', p.id))
     const m2 = boot()
-    const manager = m2.listSessions().find((s) => s.name === 'Worktrees')!
+    const manager = m2.listSessions().find((s) => s.name === 'Worktree manager')!
 
     await expect(m2.deleteSession(manager.id)).rejects.toThrow(/worktree session/)
 
@@ -2749,7 +2799,7 @@ describe('워크트리 세션의 매니저 (#69)', () => {
     const p = await addProject()
     store.upsertSession(wtRow('wt-a', p.id))
     const m2 = boot()
-    const manager = m2.listSessions().find((s) => s.name === 'Worktrees')!
+    const manager = m2.listSessions().find((s) => s.name === 'Worktree manager')!
 
     expect(m2.toolProfileOf(manager.id)).toBe('manager')
     // 허용된 것: 제안 도구가 돈다 (아무것도 만들지 않는다 — 가리키기만)
@@ -2768,7 +2818,7 @@ describe('워크트리 세션의 매니저 (#69)', () => {
     store.upsertSession(wtRow('wt-a', p.id))
     store.upsertSession(wtRow('other', p.id, { worktree: null, parentSessionId: null }))
     const m2 = boot()
-    const manager = m2.listSessions().find((s) => s.name === 'Worktrees')!
+    const manager = m2.listSessions().find((s) => s.name === 'Worktree manager')!
 
     const list = await m2.runOrchestratorTool(manager.id, 'list_sessions', {})
     expect(list.text).toContain('wt-a')

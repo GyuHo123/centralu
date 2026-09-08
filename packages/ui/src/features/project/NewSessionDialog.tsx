@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { TOOL_META, TOOL_NAMES, type ExternalSession, type ToolName } from '@cc/protocol'
+import { TOOL_META, TOOL_NAMES, type ExternalSession, type GitBranch, type ToolName } from '@cc/protocol'
 import { useStore } from '../../store/store.js'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { useSessionsOf } from '../../store/selectors.js'
@@ -114,6 +114,34 @@ export function NewSessionDialog({ projectId, onClose }: { projectId: string; on
    * 보여준다 — 이 목록에서 사람이 실제로 하는 판단이 "이건 너무 크다"라서다.
    * 워크트리를 켰을 때만 물어본다 (안 쓸 목록을 위해 du를 돌리지 않는다).
    */
+  /**
+   * 어디서 갈라질까 (사용자 지적 2026-09-07: "워커 만들 때 어디 브랜치에서 가져올지 정하는 게 없다").
+   *
+   * 기본값은 프로젝트의 줄기(매니저가 정한 것), 없으면 지금 브랜치 — 즉 **지금까지
+   * 조용히 일어나던 일을 글자로 적어 둔 것**이다. 목록은 거들 뿐이라 못 읽어도 만들기를
+   * 막지 않는다 (매니저 창과 같은 규칙).
+   */
+  const trunk = project?.worktreeManager?.baseBranch || project?.git?.branch || ''
+  /**
+   * null = 아직 손대지 않음 → 화면은 줄기를 보여준다. 빈 문자열은 **사람이 지운 것**이라
+   * 다르게 다룬다(그때는 host의 순서에 맡긴다). 상태를 줄기로 초기화하면 깃 정보가
+   * 늦게 오는 저장소에서 칸이 빈 채로 굳는다.
+   */
+  const [base, setBase] = useState<string | null>(null)
+  const baseValue = base ?? trunk
+  const [branches, setBranches] = useState<GitBranch[] | null>(null)
+  useEffect(() => {
+    if (!isRepo || !worktree || branches) return
+    let alive = true
+    void platform.git
+      .branches(projectId)
+      .then((list) => alive && setBranches(list.filter((b) => !b.remote)))
+      .catch(() => alive && setBranches([]))
+    return () => {
+      alive = false
+    }
+  }, [isRepo, worktree, branches, platform, projectId])
+
   const [ignored, setIgnored] = useState<{ path: string; bytes: number | null }[] | null>(null)
   useEffect(() => {
     if (!isRepo || !worktree || ignored) return
@@ -262,6 +290,8 @@ export function NewSessionDialog({ projectId, onClose }: { projectId: string; on
               importHistory: resume ? true : undefined,
               worktree: worktree || undefined,
               worktreeBranch: (worktree && branch.trim()) || undefined,
+              // 화면에 적힌 그대로 보낸다 — 비었을 때만 host의 순서(줄기 → HEAD)에 맡긴다
+              worktreeBase: (worktree && baseValue.trim()) || undefined,
             })
             onClose()
           } catch (err) {
@@ -436,6 +466,24 @@ export function NewSessionDialog({ projectId, onClose }: { projectId: string; on
                   spellCheck={false}
                   className={inputClass}
                 />
+              </Field>
+              {/* 새 브랜치가 **어디서** 갈라지는가 — 예전에는 화면 어디에도 없던 사실이다 */}
+              <Field label="From" hint="the new branch forks from here">
+                <input
+                  type="text"
+                  value={baseValue}
+                  onChange={(e) => setBase(e.target.value)}
+                  list="worktree-base-options"
+                  placeholder={trunk || 'current branch'}
+                  data-testid="worktree-base-input"
+                  spellCheck={false}
+                  className={inputClass}
+                />
+                <datalist id="worktree-base-options">
+                  {(branches ?? []).map((b) => (
+                    <option key={b.name} value={b.name} />
+                  ))}
+                </datalist>
               </Field>
               {/*
               프로비저닝 (#69) — 새 워크트리는 빈 작업대다 (추적 파일만 있고 node_modules도

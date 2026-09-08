@@ -635,6 +635,8 @@ export type AppState = {
       worktree?: boolean
       /** 워크트리 브랜치 이름 (#69). 비우면 host가 자동 이름을 쓴다 */
       worktreeBranch?: string
+      /** 어디서 갈라질까. 비우면 프로젝트의 줄기, 그것도 없으면 지금 HEAD */
+      worktreeBase?: string
     },
   ): Promise<SessionInfo>
   send(sessionId: string, text: string, attachments?: ChatAttachment[]): Promise<void>
@@ -2227,6 +2229,7 @@ export const useStore = create<AppState>((set, get) => ({
       importHistory: opts?.importHistory,
       worktree: opts?.worktree,
       worktreeBranch: opts?.worktreeBranch,
+      worktreeBase: opts?.worktreeBase,
     })
     set((s) => ({
       sessions: {

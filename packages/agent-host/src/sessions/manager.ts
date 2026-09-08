@@ -275,6 +275,7 @@ export class SessionManager {
       }
     }
     this.adoptOrphanWorktrees()
+    this.renameLegacyManagers()
     /*
      * 병합 감지도 기동에 한 번 돈다 (#69) — 앱이 꺼진 사이 터미널에서 병합됐을 수 있다.
      * 실패는 세션 복원을 막을 이유가 못 되므로 기다리지 않는다.
@@ -450,6 +451,35 @@ export class SessionManager {
    * 같은 분리). 기존 세션을 조용히 매니저로 승격시키지도 않는다: 매니저가 된다는 것은
    * 삭제 보호를 받는다는 뜻이라, 조용한 승격은 조용한 잠금이다.
    */
+  /**
+   * 매니저 자리의 이름 (사용자 요청 2026-09-07: "이름에 매니저를 붙여줘").
+   *
+   * 예전 이름은 'Worktrees'였다. 사이드바에서 그 줄만 보면 워크트리 **목록**처럼 읽혀서,
+   * 말을 걸 수 있는 세션이라는 것이 이름에 없었다 — 매니저는 화면이 아니라 상대다.
+   */
+  private static readonly MANAGER_NAME = 'Worktree manager'
+  /** 우리가 지어 준 옛 이름. 사람이 고친 이름은 여기 없으므로 건드리지 않는다 */
+  private static readonly LEGACY_MANAGER_NAMES = ['Worktrees']
+
+  /**
+   * 옛 이름으로 앉아 있는 매니저를 새 이름으로 (기동에 한 번).
+   *
+   * **우리가 지어 준 이름일 때만** 바꾼다 — 사람이 고쳐 둔 이름을 앱이 덮으면 그건
+   * 이름이 아니라 우리 것이다. 덧셈뿐이라 다시 돌아도 안전하다.
+   */
+  private renameLegacyManagers(): void {
+    for (const s of [...this.meta.values()]) {
+      if (!SessionManager.LEGACY_MANAGER_NAMES.includes(s.name)) continue
+      // 매니저 자리로 등록돼 있거나 워크트리 자식을 가진 것만 (이름이 같은 남의 세션 보호)
+      const seated = s.projectId ? this.store.worktreeManager(s.projectId)?.sessionId === s.id : false
+      const hasKids = [...this.meta.values()].some((k) => k.parentSessionId === s.id)
+      if (!seated && !hasKids) continue
+      const renamed = { ...s, name: SessionManager.MANAGER_NAME }
+      this.meta.set(s.id, renamed)
+      this.store.upsertSession(renamed)
+    }
+  }
+
   private managerFor(projectId: string, baseBranch?: string): SessionInfo {
     /*
      * 찾는 순서가 곧 이 기능의 역사다 (#76).
@@ -486,7 +516,7 @@ export class SessionManager {
       kind: 'worker',
       tool: stored.defaultTool === 'codex' ? 'codex' : 'claude',
       externalId: null,
-      name: 'Worktrees',
+      name: SessionManager.MANAGER_NAME,
       autoNamed: false,
       state: 'idle',
       lastReadSeq: 0,
@@ -867,13 +897,25 @@ export class SessionManager {
       }
       const branch = requested || `${APP_SLUG}/${id.slice(0, 8)}`
       /*
-       * 어디서 갈라지는가 (#76). 매니저가 줄기를 쥐고 있으면 거기서, 없으면 예전처럼
-       * 루트의 HEAD에서 갈라진다. 줄기를 못 찾으면(브랜치가 지워졌다) HEAD로 물러나되
-       * 조용히는 아니다 — 로그에 남긴다.
+       * 어디서 갈라지는가 (#76). 순서는 **부탁받은 것 → 프로젝트의 줄기 → HEAD**.
+       *
+       * 부탁받은 것이 맨 앞인 이유 (사용자 지적 2026-09-07: "워커 만들 때 어디서
+       * 가져올지 정하는 게 없다"): 줄기는 프로젝트의 기본값이지 매번의 답이 아니다.
+       * "이번 것만 저 브랜치에서"가 안 되면 남는 길은 원본 폴더에서 브랜치를 갈아 끼우는
+       * 것뿐인데, 그건 워크트리를 쓰는 이유 자체를 무르는 일이다.
+       *
+       * 없는 것을 부탁받으면 **거절한다.** 조용히 HEAD로 물러나면 사람은 저 브랜치에서
+       * 갈라진 줄 알고, 그 착각은 커밋이 쌓인 뒤에야 드러난다. 줄기가 사라진 경우는
+       * 다르다 — 그건 지금 부탁이 아니라 옛 설정이라 HEAD로 물러나되 로그에 남긴다.
        */
+      const asked = params.worktreeBase?.trim()
+      if (asked && !(await gitRevParse(params.cwd, asked))) {
+        throw Object.assign(new Error(`Not a branch in this repository: ${asked}`), { code: 'internal' })
+      }
       const trunk = params.projectId ? this.trunkOf(params.projectId) : null
-      const from = trunk && (await gitRevParse(params.cwd, trunk)) ? trunk : null
-      if (trunk && !from) console.error(`[worktree] trunk not found, forking from HEAD instead: ${trunk}`)
+      const fromTrunk = trunk && (await gitRevParse(params.cwd, trunk)) ? trunk : null
+      if (trunk && !fromTrunk) console.error(`[worktree] trunk not found, forking from HEAD instead: ${trunk}`)
+      const from = asked ?? fromTrunk
       // 병합 감지의 기준점 (#69): 브랜치가 갈라진 지점. 이게 없으면 갓 만든 브랜치가
       // 줄기의 조상이라는 이유만으로 "병합됨"으로 읽힌다.
       const baseSha = from ? await gitRevParse(params.cwd, from) : await gitHeadSha(params.cwd)

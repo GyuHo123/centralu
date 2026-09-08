@@ -6508,7 +6508,7 @@ test('워크트리 세션은 사이드바에서 매니저 아래에 선다', asy
   await expect(page.getByTestId('new-session-dialog')).toBeHidden()
 
   // 매니저 줄이 생겼고, 워크트리 세션이 그 아래에 들여 그려진다
-  const manager = page.getByText('Worktrees', { exact: true })
+  const manager = page.getByText('Worktree manager', { exact: true })
   await expect(manager).toBeVisible()
   const nested = page.locator('li[data-nested]')
   await expect(nested).toHaveCount(1)
@@ -6524,7 +6524,7 @@ test('워크트리 세션은 사이드바에서 매니저 아래에 선다', asy
   await page.getByTestId('create-session-confirm').click()
   await expect(page.getByTestId('new-session-dialog')).toBeHidden()
   await expect(page.locator('li[data-nested]')).toHaveCount(2)
-  await expect(page.getByText('Worktrees', { exact: true })).toHaveCount(1)
+  await expect(page.getByText('Worktree manager', { exact: true })).toHaveCount(1)
 })
 
 /**
@@ -6550,8 +6550,8 @@ test('워크트리 매니저를 먼저 만들면 그 아래로 워크트리가 �
   */
   // 사이드바로 좁혀서 센다 — 매니저를 열어 둔 상태라 대화창 머리에도 같은 이름이 있다
   const sidebar = page.getByTestId('sidebar')
-  await expect(sidebar.getByText('Worktrees', { exact: true })).toHaveCount(1)
-  await expect(page.getByTestId('session-name')).toHaveText('Worktrees')
+  await expect(sidebar.getByText('Worktree manager', { exact: true })).toHaveCount(1)
+  await expect(page.getByTestId('session-name')).toHaveText('Worktree manager')
   await expect(page.locator('li[data-nested]')).toHaveCount(0)
   // 자리가 생겼으니 만들기 문은 닫힌다 — 메뉴를 열어도 그 줄이 없다
   await page.getByTestId('project-menu-alpha').click()
@@ -6565,7 +6565,7 @@ test('워크트리 매니저를 먼저 만들면 그 아래로 워크트리가 �
   await page.getByTestId('create-session-confirm').click()
   await expect(page.getByTestId('new-session-dialog')).toBeHidden()
   await expect(page.locator('li[data-nested]')).toHaveCount(1)
-  await expect(sidebar.getByText('Worktrees', { exact: true })).toHaveCount(1)
+  await expect(sidebar.getByText('Worktree manager', { exact: true })).toHaveCount(1)
 })
 
 test('프로젝트 헤더의 +로 열면 워크트리는 여전히 꺼져 있다 — 예열은 매니저 줄의 +만 한다', async ({
@@ -6579,7 +6579,7 @@ test('프로젝트 헤더의 +로 열면 워크트리는 여전히 꺼져 있다
   await page.getByTestId('worktree-toggle').locator('input').check()
   await page.getByTestId('create-session-confirm').click()
   await expect(page.getByTestId('new-session-dialog')).toBeHidden()
-  const manager = page.getByText('Worktrees', { exact: true })
+  const manager = page.getByText('Worktree manager', { exact: true })
   await page.locator('li', { has: manager }).locator('[data-testid^="session-menu-"]').click()
   await page.locator('li', { has: manager }).locator('[data-testid^="new-worktree-session-"]').click()
   await page.keyboard.press('Escape')
@@ -6608,6 +6608,43 @@ test('워크트리 브랜치 이름을 정하면 세션 이름이 된다', async
 })
 
 /**
+ * 어디서 갈라지는가 (사용자 지적 2026-09-07: "워커 만들 때 어디 브랜치에서 가져올지 정하는 게 없다").
+ *
+ * 예전에는 화면 어디에도 없는 사실이었다 — host가 줄기(없으면 HEAD)에서 조용히 갈랐다.
+ * 이제 그 기본값이 칸에 적혀 있고, 고칠 수 있다.
+ */
+test('워크트리를 켜면 어디서 갈라지는지가 화면에 있고, 바꿔서 보낼 수 있다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await page.evaluate(() => {
+    const m = (window as never as { __mock: any }).__mock
+    m.gitState.branches = [
+      { name: 'main', current: true, remote: false },
+      { name: 'release', current: false, remote: false },
+    ]
+  })
+
+  await page.getByTestId('project-menu-alpha').click()
+  await page.getByTestId('new-session-alpha').click()
+  // 꺼진 옵션의 세부는 미리 펼치지 않는다 — 브랜치 칸과 같은 규칙
+  await expect(page.getByTestId('worktree-base-input')).toHaveCount(0)
+  await page.getByTestId('worktree-toggle').locator('input').check()
+
+  // 기본값은 지금까지 조용히 일어나던 일 그대로 (프로젝트의 현재 브랜치)
+  await expect(page.getByTestId('worktree-base-input')).toHaveValue('main')
+
+  await page.getByTestId('worktree-base-input').fill('release')
+  await page.getByTestId('create-session-confirm').click()
+  await expect(page.getByTestId('new-session-dialog')).toBeHidden()
+
+  // 고른 것이 실제로 host까지 갔다 — 화면에만 있는 칸이면 아무것도 고친 게 아니다
+  await expect
+    .poll(async () =>
+      page.evaluate(() => (window as never as { __mock: any }).__mock.lastCreateParams?.worktreeBase),
+    )
+    .toBe('release')
+})
+
+/**
  * 매니저의 워크트리 제안 (#69) — propose-not-power의 세 번째 사례.
  * 제안 줄이 대화에 남고, + 버튼이 밝아지고, 열면 브랜치 이름이 채워져 있다.
  * 만드는 것은 끝까지 사람이다.
@@ -6623,10 +6660,10 @@ test('워크트리 제안: 대화에 줄이 남고, +가 밝아지고, 창에 �
   await expect(page.getByTestId('new-session-dialog')).toBeHidden()
 
   // 매니저 세션을 열고, 매니저가 제안했다고 친다 — 브랜치 이름은 제목에 실려 온다
-  await page.getByText('Worktrees', { exact: true }).click()
+  await page.getByText('Worktree manager', { exact: true }).click()
   await page.evaluate(() => {
     const m = (window as any).__mock
-    const manager = [...m.sessions.values()].find((s: any) => s.name === 'Worktrees')
+    const manager = [...m.sessions.values()].find((s: any) => s.name === 'Worktree manager')
     m.emit({
       type: 'tool_call',
       sessionId: manager.id,
@@ -6855,7 +6892,7 @@ test('워크트리 제안 둘은 창을 두 번 열어 순서대로 채워진다
 
   await page.evaluate(() => {
     const m = (window as any).__mock
-    const manager = [...m.sessions.values()].find((s: any) => s.name === 'Worktrees')
+    const manager = [...m.sessions.values()].find((s: any) => s.name === 'Worktree manager')
     for (const branch of ['feat/first', 'feat/second']) {
       m.emit({
         type: 'tool_call',
