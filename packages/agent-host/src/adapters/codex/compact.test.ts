@@ -14,6 +14,8 @@ const state = vi.hoisted(() => ({
   handlers: null as null | { onNotification: (n: { method: string; params?: unknown }) => void },
   /** 여기 든 메서드는 실패한다 — compact 시작 실패 경로용 */
   failMethods: new Set<string>(),
+  /** thread/goal/set이 돌려줄 상태 (codex가 complete로 둔 채 목표만 갈아 끼우는 경우가 있다) */
+  goalStatus: 'active' as string,
 }))
 
 vi.mock('./client.js', () => ({
@@ -25,6 +27,7 @@ vi.mock('./client.js', () => ({
       state.requests.push({ method, params })
       if (state.failMethods.has(method)) return Promise.reject(new Error(`${method} failed (test)`))
       if (method === 'thread/start') return Promise.resolve({ thread: { id: 't1' } })
+      if (method === 'thread/goal/set') return Promise.resolve({ goal: { status: state.goalStatus } })
       if (method === 'skills/list') {
         return Promise.resolve({
           data: [{ skills: [{ name: 'deploy', description: '배포' }, { name: 'compact', description: '중복' }] }],
@@ -46,6 +49,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 beforeEach(() => {
   state.requests.length = 0
   state.failMethods.clear()
+  state.goalStatus = 'active'
 })
 
 async function session(emit: (e: unknown) => void = () => {}) {
@@ -227,6 +231,21 @@ describe('codex /goal — 함수로 실행된다', () => {
     expect(set?.params).toMatchObject({ threadId: 't1', objective: '테스트 전부 초록' })
     expect(methods()).not.toContain('turn/start')
     expect(events.some((e) => e.type === 'message_delta' && /Goal set/.test(e.text ?? ''))).toBe(true)
+  })
+
+  /*
+   * 도그푸딩 2026-09-08: "등록은 된 것 같은데 동작을 안 한다". 실측하니 그 스레드에는
+   * 이미 끝난 골이 있었고, codex는 새 목표를 넣어도 status를 complete로 둔 채 objective만
+   * 갈아 끼웠다. 그때 "Goal set"이라고만 답하면 화면은 됐다고 하는데 골 루프는 안 돈다.
+   */
+  it('codex가 돌려준 상태가 active가 아니면 그대로 말한다', async () => {
+    state.goalStatus = 'complete'
+    const events: { type: string; text?: string }[] = []
+    const h = await session((e) => events.push(e as { type: string; text?: string }))
+    h.send('/goal 리팩토링 끝내기')
+    await tick()
+    await tick()
+    expect(events.some((e) => /Goal set \(complete\)/.test(e.text ?? ''))).toBe(true)
   })
 
   it('/goal 단독 → thread/goal/get, 걸린 골을 한 줄로 말한다', async () => {

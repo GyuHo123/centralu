@@ -442,9 +442,24 @@ class CodexSession implements SessionHandle {
               .request('thread/goal/clear', { threadId: this.threadId })
               .then(() => say('Goal cleared.'))
           }
+          /*
+           * 응답이 준 **상태를 그대로 말한다** (도그푸딩 2026-09-08: "등록은 된 것 같은데
+           * 동작을 안 한다").
+           *
+           * 실측: 스레드에 이미 끝난 골이 있으면, 새 목표를 넣어도 codex가 status를
+           * complete로 둔 채 objective만 갈아 끼운 기록을 남겼다. 그때 우리가 "Goal set"
+           * 이라고만 답하면, 화면은 됐다고 하는데 골 루프는 돌지 않는 상태가 된다 —
+           * 배지도 안 뜬다(완료된 골은 배지를 안 세우는 것이 우리 규칙이라).
+           */
           return this.client
-            .request('thread/goal/set', { threadId: this.threadId, objective: arg })
-            .then(() => say(`Goal set: ${arg}`))
+            .request<{ goal?: { status?: string } }>('thread/goal/set', {
+              threadId: this.threadId,
+              objective: arg,
+            })
+            .then((r) => {
+              const status = typeof r?.goal?.status === 'string' ? r.goal.status : 'active'
+              say(status === 'active' ? `Goal set: ${arg}` : `Goal set (${status}): ${arg}`)
+            })
         }
         return (
           this.client
