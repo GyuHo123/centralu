@@ -12,6 +12,45 @@ const obj = (v: unknown): Record<string, unknown> => (typeof v === 'object' && v
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
 
+/**
+ * 도구가 **뭐라고 답했나** — 카드에 실릴 본문.
+ *
+ * 예전에는 `aggregatedOutput`/`output`만 읽었는데, 그 둘은 commandExecution의 필드다.
+ * **MCP 호출은 답을 다른 자리에 싣는다**(generated/v2/ThreadItem.ts: `result`와 `error`).
+ * 그래서 MCP가 실패하면 화면에 빨간 줄만 뜨고 이유가 한 글자도 없었다 — 도그푸딩에서
+ * "왜 이 세션에서만 스킬이 실패하지"를 사람이 에이전트에게 물어서 알아내야 했다
+ * (실측 2026-09-08: 같은 도구가 다른 세션에서 90초 전에 성공, 실패한 쪽 카드는 빈칸).
+ *
+ * 순서: 명령 출력 → 오류 메시지 → 결과 내용. 오류가 결과보다 앞인 이유는, 둘 다 있으면
+ * 사람이 먼저 알아야 할 것이 실패의 이유이기 때문이다.
+ */
+function resultSummary(item: Record<string, unknown>): string {
+  const direct = str(item.aggregatedOutput) || str(item.output)
+  if (direct) return direct
+
+  const err = str(obj(item.error).message)
+  if (err) return err
+
+  const content = obj(item.result).content
+  if (Array.isArray(content)) {
+    const text = content
+      .map((c) => str(obj(c).text))
+      .filter(Boolean)
+      .join('\n')
+    if (text) return text
+  }
+  const structured = obj(item.result).structuredContent
+  // 구조화된 답만 있는 서버도 있다 — 빈 카드보다는 JSON 한 줄이 낫다
+  if (structured && typeof structured === 'object') {
+    try {
+      return JSON.stringify(structured)
+    } catch {
+      return ''
+    }
+  }
+  return ''
+}
+
 /** 도구 호출 항목을 사람이 읽는 한 줄로 (대화창 카드 제목) */
 function itemSummary(item: Record<string, unknown>): { tool: string; title: string; readOnly: boolean; paths: string[] } {
   const type = str(item.type)
@@ -230,7 +269,7 @@ export function normalizeNotification(sessionId: string, n: Notification): Norma
           sessionId,
           callId: str(item.id),
           ok: str(item.status) !== 'failed',
-          summary: (str(item.aggregatedOutput) || str(item.output) || '').slice(0, 2000),
+          summary: resultSummary(item).slice(0, 2000),
         },
       ]
       // 파일을 실제로 바꿨으면 충돌 감지·하이라이트용으로 알린다 (FR-2, FR-5)

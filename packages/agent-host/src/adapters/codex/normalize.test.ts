@@ -109,6 +109,42 @@ describe('스트리밍·도구 호출', () => {
     expect(out[0]).toMatchObject({ type: 'tool_result', ok: false })
   })
 
+  /*
+   * MCP 호출의 답은 commandExecution과 **다른 자리**에 실린다 (result·error).
+   * 그 자리를 안 읽어서, 실패한 MCP 카드가 이유 한 글자 없이 빨갛기만 했다
+   * (도그푸딩 2026-09-08: 같은 도구가 옆 세션에서는 성공하고 있었다).
+   */
+  it('MCP 실패는 이유를 싣는다 — 빈 카드는 아무것도 말하지 않는다', () => {
+    const out = n('item/completed', {
+      item: {
+        type: 'mcpToolCall', id: 'm1', server: 'msw-mcp', tool: 'mlua_document_retriever',
+        status: 'failed', error: { message: 'unexpected error' }, result: null,
+      },
+    })
+    expect(out[0]).toMatchObject({ type: 'tool_result', ok: false, summary: 'unexpected error' })
+  })
+
+  it('MCP 성공은 답의 본문을 싣는다', () => {
+    const out = n('item/completed', {
+      item: {
+        type: 'mcpToolCall', id: 'm2', server: 'msw-mcp', tool: 'mlua_api_retriever',
+        status: 'completed', error: null,
+        result: { content: [{ type: 'text', text: '첫 줄' }, { type: 'text', text: '둘째 줄' }] },
+      },
+    })
+    expect(out[0]).toMatchObject({ ok: true, summary: '첫 줄\n둘째 줄' })
+  })
+
+  it('구조화된 답만 있으면 그것이라도 싣는다', () => {
+    const out = n('item/completed', {
+      item: {
+        type: 'mcpToolCall', id: 'm3', server: 's', tool: 't', status: 'completed',
+        error: null, result: { content: [], structuredContent: { ok: 1 } },
+      },
+    })
+    expect(out[0]).toMatchObject({ summary: '{"ok":1}' })
+  })
+
   it('사용자 메시지·추론 항목은 버린다 (대화창 소음)', () => {
     expect(n('item/started', { item: { type: 'userMessage', id: 'u' } })).toEqual([])
     expect(n('item/completed', { item: { type: 'reasoning', id: 'r' } })).toEqual([])
