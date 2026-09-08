@@ -451,15 +451,32 @@ class CodexSession implements SessionHandle {
            * 이라고만 답하면, 화면은 됐다고 하는데 골 루프는 돌지 않는 상태가 된다 —
            * 배지도 안 뜬다(완료된 골은 배지를 안 세우는 것이 우리 규칙이라).
            */
-          return this.client
-            .request<{ goal?: { status?: string } }>('thread/goal/set', {
-              threadId: this.threadId,
+          const setGoal = () =>
+            this.client.request<{ goal?: { status?: string } }>('thread/goal/set', {
+              threadId: this.threadId as string,
               objective: arg,
             })
-            .then((r) => {
-              const status = typeof r?.goal?.status === 'string' ? r.goal.status : 'active'
-              say(status === 'active' ? `Goal set: ${arg}` : `Goal set (${status}): ${arg}`)
-            })
+          const statusOf = (r: { goal?: { status?: string } }) =>
+            typeof r?.goal?.status === 'string' ? r.goal.status : 'active'
+          return setGoal().then(async (first) => {
+            /*
+             * **끝난 골 위에 새 목표를 얹으면 끝난 채로 남는다** (실측 2026-09-08).
+             *
+             * 그 스레드에는 이틀 전 모델이 스스로 complete로 표시한 골이 있었고, 새
+             * 목표를 set하자 codex는 objective만 갈아 끼운 채 status를 complete로 두었다.
+             * 완료된 골은 아무것도 굴리지 않으므로, 사람 눈에는 "등록은 됐는데 동작을
+             * 안 하는" 상태가 된다.
+             *
+             * 사람이 새 목표를 적었다는 것은 **다시 시작하겠다는 뜻**이다. 그래서 한 번만
+             * 비우고 다시 건다 — 그래도 active가 아니면 지어내지 않고 그 상태를 말한다.
+             */
+            let status = statusOf(first)
+            if (status !== 'active') {
+              await this.client.request('thread/goal/clear', { threadId: this.threadId }).catch(() => {})
+              status = statusOf(await setGoal())
+            }
+            say(status === 'active' ? `Goal set: ${arg}` : `Goal set (${status}): ${arg}`)
+          })
         }
         return (
           this.client

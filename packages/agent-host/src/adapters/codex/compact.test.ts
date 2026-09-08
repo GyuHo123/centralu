@@ -16,6 +16,8 @@ const state = vi.hoisted(() => ({
   failMethods: new Set<string>(),
   /** thread/goal/set이 돌려줄 상태 (codex가 complete로 둔 채 목표만 갈아 끼우는 경우가 있다) */
   goalStatus: 'active' as string,
+  /** true면 비우고 다시 걸어도 그 상태 그대로 — "그래도 안 살아나는" 경우 */
+  goalSetSticky: false,
 }))
 
 vi.mock('./client.js', () => ({
@@ -27,7 +29,12 @@ vi.mock('./client.js', () => ({
       state.requests.push({ method, params })
       if (state.failMethods.has(method)) return Promise.reject(new Error(`${method} failed (test)`))
       if (method === 'thread/start') return Promise.resolve({ thread: { id: 't1' } })
-      if (method === 'thread/goal/set') return Promise.resolve({ goal: { status: state.goalStatus } })
+      if (method === 'thread/goal/set') {
+        const status = state.goalStatus
+        // 두 번째 set은 clear 뒤라 살아난다 — 실물의 흐름을 목도 따른다
+        if (state.goalSetSticky !== true) state.goalStatus = 'active'
+        return Promise.resolve({ goal: { status } })
+      }
       if (method === 'skills/list') {
         return Promise.resolve({
           data: [{ skills: [{ name: 'deploy', description: '배포' }, { name: 'compact', description: '중복' }] }],
@@ -50,6 +57,7 @@ beforeEach(() => {
   state.requests.length = 0
   state.failMethods.clear()
   state.goalStatus = 'active'
+  state.goalSetSticky = false
 })
 
 async function session(emit: (e: unknown) => void = () => {}) {
@@ -238,11 +246,26 @@ describe('codex /goal — 함수로 실행된다', () => {
    * 이미 끝난 골이 있었고, codex는 새 목표를 넣어도 status를 complete로 둔 채 objective만
    * 갈아 끼웠다. 그때 "Goal set"이라고만 답하면 화면은 됐다고 하는데 골 루프는 안 돈다.
    */
-  it('codex가 돌려준 상태가 active가 아니면 그대로 말한다', async () => {
+  it('끝난 골 위에 새 목표를 걸면 비우고 다시 건다 — 새 목표는 다시 시작하겠다는 뜻이다', async () => {
     state.goalStatus = 'complete'
     const events: { type: string; text?: string }[] = []
     const h = await session((e) => events.push(e as { type: string; text?: string }))
     h.send('/goal 리팩토링 끝내기')
+    await tick()
+    await tick()
+    await tick()
+    expect(methods()).toContain('thread/goal/clear')
+    expect(state.requests.filter((r) => r.method === 'thread/goal/set')).toHaveLength(2)
+    expect(events.some((e) => /Goal set: 리팩토링 끝내기/.test(e.text ?? ''))).toBe(true)
+  })
+
+  it('비우고 다시 걸어도 active가 아니면 그 상태를 말한다 — 지어내지 않는다', async () => {
+    state.goalStatus = 'complete'
+    state.goalSetSticky = true
+    const events: { type: string; text?: string }[] = []
+    const h = await session((e) => events.push(e as { type: string; text?: string }))
+    h.send('/goal 리팩토링 끝내기')
+    await tick()
     await tick()
     await tick()
     expect(events.some((e) => /Goal set \(complete\)/.test(e.text ?? ''))).toBe(true)
