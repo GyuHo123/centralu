@@ -7,6 +7,11 @@ import { Kbd, StateDot, formatWaiting, waitingTone } from '../../components/prim
 /**
  * 인박스 (FR-15) — 자리로 돌아왔을 때의 진입점.
  * 프로젝트 구조를 무시하고 "지금 내 개입을 기다리는 것"만 긴급도 순으로 보여준다.
+ *
+ * **상단 바 숫자 아래로 내려오는 드롭다운이다** (사용자 요청 2026-09-09). 화면 가운데
+ * 모달이던 동안에는 누른 자리와 열린 자리가 멀어서, 숫자를 확인하고 목록을 여는 한
+ * 동작이 눈을 두 번 움직이게 했다. 자리는 옮겼지만 **키보드 소유권은 그대로다** —
+ * ↑↓·↵·esc로 목록을 비우는 것이 이 화면의 본체고, 그건 자리와 무관하다.
  */
 export function Inbox() {
   const open = useStore((s) => s.inboxOpen)
@@ -57,19 +62,16 @@ export function Inbox() {
   if (!open) return null
 
   return (
-    <div
-      className="absolute inset-0 z-20 flex items-start justify-center bg-void/80 pt-[calc(12vh/var(--text-zoom))] backdrop-blur-[2px]"
-      onClick={() => toggle(false)}
-      data-testid="inbox"
-    >
+    <>
+      {/* 바깥을 누르면 닫힌다. 화면을 덮되 어둡히지 않는다 — 드롭다운은 화면을 뺏지 않는다 */}
+      <div className="fixed inset-0 z-30" onClick={() => toggle(false)} data-testid="inbox-backdrop" />
       <div
         ref={panelRef}
         tabIndex={-1}
         role="dialog"
-        aria-modal="true"
         aria-label="Waiting"
-        className="w-[640px] max-w-[calc(90vw/var(--text-zoom))] overflow-hidden rounded-lg border border-edge bg-pit shadow-[0_24px_60px_-12px_rgb(0_0_0/0.9)] focus:outline-none"
-        onClick={(e) => e.stopPropagation()}
+        className="cc-drop absolute left-0 top-full z-40 mt-1 w-[560px] max-w-[calc(92vw/var(--text-zoom))] overflow-hidden rounded-lg border border-edge bg-pit shadow-[0_24px_60px_-12px_rgb(0_0_0/0.9)] focus:outline-none"
+        data-testid="inbox"
       >
         <header className="flex items-baseline gap-2 border-b border-edge px-4 py-2.5">
           <h2 className="text-[12px] font-medium text-chalk">Waiting</h2>
@@ -88,7 +90,7 @@ export function Inbox() {
             <span className="mt-1 block text-[11px] text-slate">Finished agents collect here</span>
           </p>
         ) : (
-          <ul className="max-h-[calc(60vh/var(--text-zoom))] overflow-y-auto">
+          <ul className="max-h-[calc(56vh/var(--text-zoom))] overflow-y-auto">
             {items.map((it, i) => (
               <li key={it.id}>
                 <button
@@ -127,6 +129,6 @@ export function Inbox() {
           </ul>
         )}
       </div>
-    </div>
+    </>
   )
 }

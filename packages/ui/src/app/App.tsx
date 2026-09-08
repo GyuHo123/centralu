@@ -87,7 +87,6 @@ export function App({ platform }: { platform: Platform }) {
           <TopBar />
           <ApprovalBanner />
           <Body />
-          <Inbox />
           <CommandPalette />
           <Settings />
           <UsageModal />
@@ -188,8 +187,15 @@ function Body() {
 }
 
 /**
- * 상단 바 = 계기판. 승인과 응답대기는 절대 합산하지 않는다 (FR-12).
- * 기다리는 것이 없으면 숫자도 어두워진다 — 순백은 나를 기다리는 것의 몫이다.
+ * 상단 바 = 계기판.
+ *
+ * **숫자는 하나다** (사용자 요청 2026-09-09). FR-12는 승인과 응답대기를 합산하지 말라고
+ * 적었고 오래 그렇게 했는데, 도그푸딩에서 그 둘을 가르는 일이 상단 바에서 일어나지
+ * 않았다: 어느 쪽이든 답은 "목록을 열어 하나씩 처리한다"였고, 종류는 목록의 줄마다
+ * 이미 적혀 있다. 계기판에 둘을 세워 두면 읽는 사람이 매번 합을 자기 머리로 냈다.
+ *
+ * 대신 **긴급함은 밝기가 나른다**: 승인·오류가 하나라도 있으면 순백(beacon), 응답대기만
+ * 있으면 회색. 순백은 나를 **막고 있는 것**의 몫이라는 규칙은 그대로다.
  */
 function TopBar() {
   const counts = useCounts()
@@ -243,32 +249,32 @@ function TopBar() {
         CENTRALU
       </span>
 
-      <button
-        className="group flex items-center gap-2.5 rounded px-2 py-0.5 transition-colors hover:bg-graphite/50"
-        onClick={() => toggleInbox()}
-        data-testid="counter"
-        title={`Waiting (${sc('mod', 'I')})`}
-      >
-        <Metric
-          label="Approvals"
-          value={counts.approval}
-          tone={counts.approval > 0 ? 'beacon' : 'text-slate'}
-          testId="count-approval"
-        />
-        <span className="text-edge">│</span>
-        <Metric
-          label="Waiting for input"
-          value={counts.input}
-          tone={counts.input > 0 ? 'text-ash' : 'text-slate'}
-          testId="count-input"
-        />
-        {counts.error > 0 && (
-          <>
-            <span className="text-edge">│</span>
-            <Metric label="Error" value={counts.error} tone="beacon" testId="count-error" />
-          </>
-        )}
-      </button>
+      {/*
+        목록은 **이 버튼 바로 아래**로 내려온다 (사용자 요청 2026-09-09). 화면 가운데
+        모달이던 동안에는 누른 자리와 열린 자리가 멀어서, 숫자를 보고 목록을 여는 한
+        동작이 눈을 두 번 움직이게 했다. 누르는 곳과 나타나는 곳은 같아야 한다 (#4의 규칙).
+      */}
+      {/* inline이 아니라 flex — inline span의 상자는 글줄이라 top-full이 버튼 밑이 아니다 */}
+      <span className="relative flex">
+        <button
+          className="group flex items-center gap-2.5 rounded px-2 py-0.5 transition-colors hover:bg-graphite/50"
+          onClick={() => toggleInbox()}
+          data-testid="counter"
+          title={`Waiting (${sc('mod', 'I')})`}
+        >
+          <Metric
+            label="Waiting for input"
+            value={counts.approval + counts.input + counts.error}
+            tone={
+              counts.approval + counts.error > 0 ? 'beacon'
+              : counts.input > 0 ? 'text-ash'
+              : 'text-slate'
+            }
+            testId="count-waiting"
+          />
+        </button>
+        <Inbox />
+      </span>
 
       {/*
         단축키 칩(⌘I · ⌘⇧A)은 여기 없다 (이슈 #33).

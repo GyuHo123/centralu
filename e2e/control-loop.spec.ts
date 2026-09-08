@@ -417,7 +417,39 @@ test('배너: 명령은 제자리 승인, 파일 수정은 확인 필요 (T5-4, 
   await expect(page.getByTestId('approval-card')).toBeVisible() // 점프해서 카드로
 })
 
-test('전역 카운터는 승인과 응답대기를 분리 표기한다 (T5-5, FR-12)', async ({ page }) => {
+/**
+ * 목록은 **누른 자리 바로 아래**에 뜬다 (사용자 요청 2026-09-09).
+ * 가운데 모달이던 동안에는 숫자를 보고 목록을 여는 한 동작이 눈을 두 번 움직이게 했다.
+ */
+test('대기 목록은 상단 바 숫자 밑으로 내려온다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', 'A')
+  await emitEvent(page, 0, { type: 'turn_complete' })
+
+  await page.getByTestId('counter').click()
+  const panel = page.getByTestId('inbox')
+  await expect(panel).toBeVisible()
+
+  /*
+   * 내려오는 애니메이션(cc-drop)이 끝난 뒤에 잰다 — 도중에 재면 아직 버튼 위에 걸쳐 있다.
+   * poll이 그 자리를 기다린다 (재보고 정한 규칙: 시작 위치가 실제로 버튼 위였다).
+   */
+  const gap = async () => {
+    const c = (await page.getByTestId('counter').boundingBox())!
+    const d = (await panel.boundingBox())!
+    return { below: Math.round(d.y - (c.y + c.height)), dx: Math.round(Math.abs(d.x - c.x)) }
+  }
+  await expect.poll(async () => (await gap()).below).toBeGreaterThanOrEqual(0)
+  const g = await gap()
+  expect(g.below).toBeLessThan(24) // 붙어 있다 (멀리 떨어진 모달이 아니다)
+  expect(g.dx).toBeLessThan(24) // 왼쪽 모서리가 버튼과 맞는다
+})
+
+/**
+ * 계기판의 숫자는 하나다 (사용자 요청 2026-09-09 — FR-12의 분리 표기를 접었다).
+ * 종류는 목록의 줄이 말하고, 상단 바는 **긴급함을 밝기로** 나른다.
+ */
+test('전역 카운터는 기다리는 것을 하나로 세고, 밝기로 급한지를 말한다', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await newSession(page, 'alpha', 'A')
   await newSession(page, 'alpha', 'B')
@@ -425,8 +457,10 @@ test('전역 카운터는 승인과 응답대기를 분리 표기한다 (T5-5, F
   await injectApproval(page, 0, { kind: 'command', command: 'x', cwd: '/tmp' })
   await emitEvent(page, 1, { type: 'turn_complete' })
 
-  await expect(page.getByTestId('count-approval')).toContainText('01')
-  await expect(page.getByTestId('count-input')).toContainText('01')
+  const count = page.getByTestId('count-waiting')
+  await expect(count).toContainText('02')
+  // 승인이 하나라도 있으면 순백 — 순백은 나를 막고 있는 것의 몫이다
+  await expect(count).toHaveClass(/beacon/)
 })
 
 test('관제 루프: 대기 5개를 키보드만으로 비운다 (T5-5 핵심 시나리오)', async ({ page }) => {
@@ -446,8 +480,7 @@ test('관제 루프: 대기 5개를 키보드만으로 비운다 (T5-5 핵심 �
   await injectApproval(page, 3, { kind: 'command', command: 'pytest', cwd: '/tmp/beta' })
   for (const idx of [1, 2, 4]) await emitEvent(page, idx, { type: 'turn_complete' })
 
-  await expect(page.getByTestId('count-approval')).toContainText('02')
-  await expect(page.getByTestId('count-input')).toContainText('03')
+  await expect(page.getByTestId('count-waiting')).toContainText('05')
 
   // 인박스 열기 — 긴급도 순으로 정렬돼 있어야 한다
   await page.keyboard.press('Meta+i')
@@ -465,7 +498,12 @@ test('관제 루프: 대기 5개를 키보드만으로 비운다 (T5-5 핵심 �
     await expect(page.getByTestId('approval-card')).toBeHidden()
     await page.keyboard.press('Meta+i')
   }
-  await expect(page.getByTestId('count-approval')).toContainText('00')
+  /*
+   * 승인을 다 처리하면 **순백이 내려간다** — 막고 있던 것이 사라졌다는 뜻이다.
+   * 숫자 자체는 여기서 못 박지 않는다: 허용된 세션이 곧바로 다음 답을 기다리게 되면
+   * 그만큼 다시 세어지고, 그건 이 시험이 보려는 사실(급한 것이 남았나)이 아니다.
+   */
+  await expect(page.getByTestId('count-waiting')).not.toHaveClass(/beacon/)
 
   /*
     남은 응답대기 3건은 **답을 해서** 비운다.
@@ -1488,13 +1526,13 @@ test('상단 바: 단축키 칩 대신 숫자가 신호다 (#33)', async ({ page
 
   // 대기가 있어도 바는 키를 광고하지 않는다 — 예전엔 바로 이때 칩이 가장 밝았다
   const bar = page.getByTestId('app-header')
-  await expect(bar).toContainText('Approvals')
+  await expect(bar).toContainText('Waiting for input')
   await expect(bar).not.toContainText('Next item')
   await expect(bar).not.toContainText('List')
 
   // 밝아지는 일은 숫자가 계속 맡는다 (승인 대기 = 순백)
-  await expect(page.getByTestId('count-approval')).toContainText('01')
-  await expect(page.getByTestId('count-approval')).toHaveClass(/beacon/)
+  await expect(page.getByTestId('count-waiting')).toContainText('01')
+  await expect(page.getByTestId('count-waiting')).toHaveClass(/beacon/)
 
   // 키 자체는 그대로 듣는다 (FR-17은 안 건드렸다)
   await page.keyboard.press('Meta+i')
