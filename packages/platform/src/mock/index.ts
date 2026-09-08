@@ -599,9 +599,16 @@ export class MockPlatform implements Platform {
         effort: params.effort ?? null,
         verbosity: params.verbosity ?? null,
         serviceTier: params.serviceTier ?? null,
-        // 실물과 같은 규칙 (#69): 사람이 브랜치를 정했으면 그 이름이 세션 이름이고, 자동 이름이 덮지 않는다
+        /*
+         * 실물과 같은 규칙 (#69): 사람이 브랜치를 정했으면 그 이름이 세션 이름이고 자동
+         * 이름이 덮지 않는다. 안 정했으면 자동 브랜치 이름으로 **시작**한다 — 'New session'
+         * 이던 자리라 워크트리 칸에서 어느 줄이 어느 브랜치인지 안 읽혔다.
+         */
         name:
-          (params.worktreeBranch?.trim() || undefined) ?? params.initialPrompt?.slice(0, 40) ?? 'New session',
+          (params.worktreeBranch?.trim() || undefined) ??
+          params.initialPrompt?.slice(0, 40) ??
+          worktree?.branch ??
+          'New session',
         autoNamed: !params.worktreeBranch?.trim(),
         state: 'idle',
         lastReadSeq: 0,

@@ -276,6 +276,7 @@ export class SessionManager {
     }
     this.adoptOrphanWorktrees()
     this.renameLegacyManagers()
+    this.nameUnnamedWorktrees()
     /*
      * 병합 감지도 기동에 한 번 돈다 (#69) — 앱이 꺼진 사이 터미널에서 병합됐을 수 있다.
      * 실패는 세션 복원을 막을 이유가 못 되므로 기다리지 않는다.
@@ -467,6 +468,25 @@ export class SessionManager {
    * **우리가 지어 준 이름일 때만** 바꾼다 — 사람이 고쳐 둔 이름을 앱이 덮으면 그건
    * 이름이 아니라 우리 것이다. 덧셈뿐이라 다시 돌아도 안전하다.
    */
+  /**
+   * 아직 이름을 못 받은 워크트리 세션에 **브랜치 이름을 앉힌다** (기동에 한 번).
+   *
+   * 'New session'은 이름이 아니라 빈칸이다. 워크트리 세션은 태어나는 순간 브랜치를 갖고
+   * 있으므로 그 빈칸을 채울 것이 이미 손에 있다 — 채워 두면 말을 걸기 전의 세션도
+   * 사이드바에서 서로 구별된다 (도그푸딩 2026-09-07).
+   *
+   * **자동 이름일 때만.** autoNamed=false는 사람이 정한 이름이라는 뜻이고, 그건 우리가
+   * 건드릴 것이 아니다. 자격은 그대로 두므로 첫 메시지가 오면 뜻 있는 이름이 덮는다.
+   */
+  private nameUnnamedWorktrees(): void {
+    for (const s of [...this.meta.values()]) {
+      if (!s.worktree || !s.autoNamed || s.name !== 'New session') continue
+      const renamed = { ...s, name: s.worktree.branch }
+      this.meta.set(s.id, renamed)
+      this.store.upsertSession(renamed)
+    }
+  }
+
   private renameLegacyManagers(): void {
     for (const s of [...this.meta.values()]) {
       if (!SessionManager.LEGACY_MANAGER_NAMES.includes(s.name)) continue
@@ -931,16 +951,23 @@ export class SessionManager {
     }
 
     /*
-     * 세션 이름 = 브랜치 이름 (#69, 사람이 브랜치를 정한 경우). Conductor는 워크스페이스마다
-     * "고유한 도시 이름"을 붙이는데 그 이름은 브랜치가 무엇을 하는지 아무것도 말하지 않는다 —
-     * 뜻을 나르는 사람이 읽을 식별자는 브랜치 이름뿐이다. autoNamed=false로 두어
-     * 자동 이름이 덮지 않는다.
+     * 세션 이름 = 브랜치 이름 (#69). Conductor는 워크스페이스마다 "고유한 도시 이름"을
+     * 붙이는데 그 이름은 브랜치가 무엇을 하는지 아무것도 말하지 않는다 — 뜻을 나르는
+     * 사람이 읽을 식별자는 브랜치 이름뿐이다.
+     *
+     * 사람이 브랜치를 정했으면 그 이름은 **박제된다** (autoNamed=false — 자동 이름이 덮지
+     * 않는다). 안 정했으면 이름은 자동 브랜치(`centralu/…`)로 **시작**하되 자동 이름 자격을
+     * 남긴다: 예전에는 그 자리가 'New session'이었는데, 워크트리 칸에 세션이 여럿이면
+     * 어느 것이 어느 브랜치인지 화면에서 읽을 방법이 없었다 (도그푸딩 2026-09-07).
+     * 첫 메시지가 오면 뜻 있는 이름이 그 자리를 대신한다.
      */
     const namedByBranch = worktree && params.worktreeBranch ? worktree.branch : null
     const info: SessionInfo = {
       id, projectId: params.projectId, kind: params.kind ?? 'worker', tool: params.tool, externalId: null,
       scopeSessionIds: params.scopeSessionIds ?? null, roleAppend: params.roleAppend ?? null,
-      name: namedByBranch ?? (params.initialPrompt ? truncate(params.initialPrompt) : 'New session'),
+      name:
+        namedByBranch ??
+        (params.initialPrompt ? truncate(params.initialPrompt) : (worktree?.branch ?? 'New session')),
       autoNamed: !namedByBranch, state: 'idle', lastReadSeq: 0, lastSeq: 0,
       createdAt: Date.now(), waitingSince: null, live: true,
       model: params.model ?? null, effort: params.effort ?? null,

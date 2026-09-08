@@ -2001,6 +2001,13 @@ describe('워크트리 세션', () => {
     expect(wtMgr.listSessions().filter((x) => x.worktree).length).toBe(0)
   })
 
+  it('브랜치를 안 정해도 이름은 브랜치다 — \'New session\'은 이름이 아니라 빈칸이다', async () => {
+    const s = await create(true)
+    expect(s.name).toBe(s.worktree!.branch)
+    // 자동 이름 자격은 남는다 — 첫 메시지가 오면 뜻 있는 이름이 이 자리를 대신한다
+    expect(s.autoNamed).toBe(true)
+  })
+
   it('브랜치 이름이 될 수 없는 것은 거절한다 — 판정은 git이 한다', async () => {
     await expect(
       wtRpc('agents.createSession', {
@@ -2750,6 +2757,18 @@ describe('워크트리 세션의 매니저 (#69)', () => {
     // 이름만 바뀐다 — 자리도 자식도 그대로다 (두 번째 매니저가 생기면 안 된다)
     expect(m2.listSessions().find((s) => s.id === 'wt-a')?.parentSessionId).toBe('old-mgr')
     expect(m2.listSessions().filter((s) => s.name === 'Worktree manager').length).toBe(1)
+  })
+
+  it("이미 'New session'으로 굳은 워크트리 행도 기동에 브랜치 이름을 받는다", async () => {
+    const p = await addProject()
+    store.upsertSession(wtRow('wt-a', p.id, { name: 'New session', autoNamed: true }))
+    // 사람이 정한 이름은 건드리지 않는다
+    store.upsertSession(wtRow('wt-b', p.id, { name: 'New session', autoNamed: false }))
+
+    const m2 = boot()
+
+    expect(m2.listSessions().find((x) => x.id === 'wt-a')?.name).toBe('centralu/wt-a')
+    expect(m2.listSessions().find((x) => x.id === 'wt-b')?.name).toBe('New session')
   })
 
   it('매니저가 아닌 남의 세션이 같은 이름이면 건드리지 않는다', async () => {
