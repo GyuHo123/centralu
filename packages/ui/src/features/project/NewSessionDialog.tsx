@@ -421,7 +421,12 @@ export function NewSessionDialog({ projectId, onClose }: { projectId: string; on
               className="mt-2 space-y-2.5 rounded border border-edge bg-panel p-2.5"
               data-testid="worktree-options"
             >
-              <Field label="Branch" hint="blank = auto">
+              {/*
+                빈 칸의 결과를 적는다 (도그푸딩 2026-09-07: "이름 안 넣으면 브랜치명 뭐야?").
+                "blank = auto"는 자동이라는 사실만 말하고 무엇이 되는지는 안 말한다 —
+                host가 짓는 이름은 `centralu/<세션 id 앞 8자>`다 (manager.ts).
+              */}
+              <Field label="Branch" hint="blank = centralu/<session id>">
                 <input
                   type="text"
                   value={branch}
