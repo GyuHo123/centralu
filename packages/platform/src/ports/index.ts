@@ -462,6 +462,18 @@ export interface AppsPort {
   invoke(appId: string, name: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }>
 }
 
+/**
+ * 우리 폴더에서 아직 도는 남은 프로세스 (사용자 요청 2026-09-07).
+ *
+ * 에이전트가 bash로 띄운 데브 서버는 부모도 프로세스 그룹도 우리와 끊겨 있어 종료
+ * 절차가 못 잡는다 (실측). 그래서 죽이는 대신 **보여주고** 사람이 고른다 — 같은 폴더에서
+ * 사람이 직접 띄운 것을 앱이 말없이 죽이면 고아를 없애려다 남의 일을 끊는 셈이다.
+ */
+export interface ProcessPort {
+  strays(): Promise<{ pid: number; command: string; cwd: string }[]>
+  stop(pids: number[]): Promise<{ stopped: number }>
+}
+
 export interface Platform {
   agents: AgentPort
   apps: AppsPort
@@ -475,6 +487,7 @@ export interface Platform {
   updates: UpdatePort
   terminal: TerminalPort
   commands: CommandRunPort
+  processes: ProcessPort
   capabilities: PlatformCapabilities
   dispose(): Promise<void>
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentProps } from 'react'
+import { useCallback, useEffect, useState, type ComponentProps } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from '@cc/ui'
 import { createTauriPlatform, focusWindow } from '@cc/platform/tauri'
@@ -33,14 +33,41 @@ createTauriPlatform()
  */
 function DesktopRoot({ platform }: { platform: ComponentProps<typeof App>['platform'] }) {
   const [askQuit, setAskQuit] = useState(false)
+  /**
+   * 우리 폴더에서 아직 도는 남은 프로세스 (사용자 요청 2026-09-07).
+   *
+   * 에이전트가 bash로 띄운 데브 서버는 종료 절차가 못 잡는다 — 실측하면 그 프로세스는
+   * ppid=1에 자기 프로세스 그룹이라 부모 사슬도 그룹도 우리와 끊겨 있다. 그래서 죽이는
+   * 대신 **여기서 보여준다.** 종료 모달은 이미 "정말 끌 거냐"를 읽는 자리라, 남는 것이
+   * 있다는 사실이 놓일 자리로 이만한 곳이 없다.
+   *
+   * **기본은 끈 채다.** 같은 폴더에서 사람이 직접 띄운 것도 이 목록에 들 수 있고, 앱이
+   * 말없이 죽이면 고아를 없애려다 남의 일을 끊는다. 목록이 눈앞에 있으니 한 번 누르면
+   * 함께 정리된다 — 고르는 쪽이 사람이다.
+   */
+  const [strays, setStrays] = useState<{ pid: number; command: string; cwd: string }[]>([])
+  const [alsoStop, setAlsoStop] = useState(false)
+  const quit = useCallback(async () => {
+    if (alsoStop && strays.length > 0) {
+      // 실패해도 종료를 막지 않는다 — 사람이 누른 것은 '끄기'였다
+      await platform.processes.stop(strays.map((s) => s.pid)).catch(() => {})
+    }
+    await invoke('quit_app')
+  }, [alsoStop, strays, platform])
+
   useEffect(() => {
     const un = listen('quit-requested', () => {
       setAskQuit(true)
+      setAlsoStop(false)
+      void platform.processes
+        .strays()
+        .then(setStrays)
+        .catch(() => setStrays([]))
       // 최소화된 채 ⌘Q면 모달이 안 보여 "종료가 안 되는 앱"이 된다 — 물을 때는 얼굴을 보인다
       void focusWindow()
     })
     return () => void un.then((f) => f())
-  }, [])
+  }, [platform.processes])
   useEffect(() => {
     if (!askQuit) return
     const onKey = (e: KeyboardEvent) => {
@@ -50,12 +77,12 @@ function DesktopRoot({ platform }: { platform: ComponentProps<typeof App>['platf
         setAskQuit(false)
       } else if (e.key === 'Enter') {
         e.stopPropagation()
-        void invoke('quit_app')
+        void quit()
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [askQuit])
+  }, [askQuit, quit])
   return (
     <>
       <App platform={platform} />
@@ -74,6 +101,34 @@ function DesktopRoot({ platform }: { platform: ComponentProps<typeof App>['platf
               Running agent processes stop with the app. Conversations are saved and resume when
               you come back.
             </p>
+            {strays.length > 0 && (
+              <div className="mt-3 rounded border border-edge bg-void p-2" data-testid="quit-strays">
+                <p className="text-[11px] text-ash">
+                  {strays.length} process{strays.length > 1 ? 'es' : ''} started in your project
+                  folders will keep running:
+                </p>
+                <ul className="mt-1 max-h-24 overflow-y-auto">
+                  {strays.slice(0, 6).map((s) => (
+                    <li key={s.pid} className="readout truncate text-[10px] text-slate" title={s.cwd}>
+                      {s.pid} · {s.command}
+                    </li>
+                  ))}
+                  {strays.length > 6 && (
+                    <li className="text-[10px] text-slate">…and {strays.length - 6} more</li>
+                  )}
+                </ul>
+                <label className="mt-2 flex items-center gap-1.5 text-[11px] text-ash">
+                  <input
+                    type="checkbox"
+                    className="accent-graphite"
+                    checked={alsoStop}
+                    onChange={(e) => setAlsoStop(e.target.checked)}
+                    data-testid="quit-stop-strays"
+                  />
+                  Stop them too
+                </label>
+              </div>
+            )}
             <div className="mt-4 flex justify-end gap-2">
               <button
                 className="rounded px-2 py-1 text-[12px] text-slate hover:text-chalk"
@@ -84,7 +139,7 @@ function DesktopRoot({ platform }: { platform: ComponentProps<typeof App>['platf
               </button>
               <button
                 className="rounded border border-del/40 bg-del-bg px-3 py-1 text-[12px] text-del hover:border-del/70"
-                onClick={() => void invoke('quit_app')}
+                onClick={() => void quit()}
                 data-testid="confirm-quit-yes"
               >
                 Quit <span className="text-[10px]">⏎</span>

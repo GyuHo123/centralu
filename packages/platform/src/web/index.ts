@@ -351,6 +351,11 @@ export function createWebPlatform(opts: WebPlatformOptions): Platform {
         await rpc.call('commands.resize', { projectId, command, cols, rows })
       },
     },
+    // 우리 폴더에서 아직 도는 남은 프로세스 (종료 모달이 묻는 자리)
+    processes: {
+      strays: () => rpc.call('processes.strays', {}),
+      stop: (pids) => rpc.call('processes.stop', { pids }),
+    },
     workspace: {
       async save(snapshot) {
         await rpc.call('workspace.save', { layout: snapshot })

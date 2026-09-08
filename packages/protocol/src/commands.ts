@@ -868,6 +868,21 @@ export const RpcMethods = {
     result: z.object({ supported: z.boolean(), reason: z.string().optional(), usage: UsageSnapshot.nullable() }),
   },
   /** `@` 자동완성용 파일 검색 (프로젝트 안에서만) */
+  /**
+   * 우리 폴더에서 아직 도는 남은 프로세스 (사용자 요청 2026-09-07).
+   *
+   * 에이전트가 bash로 띄운 데브 서버는 부모도 프로세스 그룹도 우리와 끊겨 있어 종료
+   * 절차가 못 잡는다 (실측). 죽이는 대신 **보여주고** 사람이 고르게 한다.
+   */
+  'processes.strays': {
+    params: z.object({}),
+    result: z.array(z.object({ pid: z.number(), command: z.string(), cwd: z.string() })),
+  },
+  /** 고른 것들을 멈춘다 (SIGTERM). 죽이기 직전에 host가 조건을 다시 잰다 */
+  'processes.stop': {
+    params: z.object({ pids: z.array(z.number()) }),
+    result: z.object({ stopped: z.number() }),
+  },
   'files.search': {
     params: z.object({ projectId: z.string(), query: z.string(), limit: z.number().default(20) }),
     result: z.array(z.object({ path: z.string(), name: z.string() })),

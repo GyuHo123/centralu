@@ -521,6 +521,21 @@ export class MockPlatform implements Platform {
   }
   lastInvoke: { appId: string; name: string; args: Record<string, unknown> } | null = null
 
+  /**
+   * 테스트가 심는 "남은 프로세스" 목록 — 실물은 ps·lsof로 찾지만 목은 그 자리를 흉내만 낸다
+   * (검증 대상은 종료 흐름이지 프로세스 탐지가 아니다. 탐지 규칙은 host 단위 시험이 본다).
+   */
+  strayProcesses: { pid: number; command: string; cwd: string }[] = []
+
+  readonly processes = {
+    strays: async () => [...this.strayProcesses],
+    stop: async (pids: number[]) => {
+      const before = this.strayProcesses.length
+      this.strayProcesses = this.strayProcesses.filter((s) => !pids.includes(s.pid))
+      return { stopped: before - this.strayProcesses.length }
+    },
+  }
+
   readonly agents: AgentPort = {
     createSession: async (params: CreateSessionParams) => {
       this.lastCreateParams = params

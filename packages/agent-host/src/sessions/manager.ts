@@ -2403,6 +2403,17 @@ export class SessionManager {
     return derived
   }
 
+  /**
+   * "우리 폴더" — 남은 프로세스를 찾을 때의 과녁 범위 (strays.ts).
+   *
+   * 프로젝트 디렉토리들과 워크트리 뿌리. 워크트리를 따로 싣는 이유: 그 아래는 **앱이
+   * 만든 폴더**라 거기서 도는 것은 정의상 우리 일이고, 프로젝트 목록에서 지운 뒤에도
+   * 남아 있을 수 있다.
+   */
+  folderRoots(): string[] {
+    return [...this.store.listProjects().map((p) => p.path), this.worktreeRoot]
+  }
+
   /** 워크트리는 **저장소 밖**에 만든다 — 사용자 저장소를 더럽히지 않는다 (.gitignore도 안 건드린다) */
   private worktreePathFor(projectId: string, sessionId: string): string {
     return join(this.worktreeRoot, projectId, sessionId)

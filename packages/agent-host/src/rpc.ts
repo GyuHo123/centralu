@@ -3,6 +3,7 @@ import type { SessionManager } from './sessions/manager.js'
 import { searchFiles } from './dev-services/file-search.js'
 import type { TerminalHandle, TerminalService } from './dev-services/terminal.js'
 import type { CommandRunner } from './dev-services/commands.js'
+import { findStrays, stopStrays } from './dev-services/strays.js'
 
 /** 내부 핸들 → 프로토콜 모양 (history는 그때그때 스냅샷으로 뜬다) */
 const toInfo = (h: TerminalHandle) => ({
@@ -236,6 +237,9 @@ export function createRpcHandler(
     'grid.get': async () => mgr.grid(),
     'grid.set': async (p) =>
       mgr.setGridView(RpcMethods['grid.set'].params.parse(p).sessionIds),
+    'processes.strays': async () => findStrays(mgr.folderRoots()),
+    'processes.stop': async (p) =>
+      stopStrays(RpcMethods['processes.stop'].params.parse(p).pids, mgr.folderRoots()),
     'projects.list': async () => mgr.listProjects(),
     'projects.reorder': async (p) =>
       mgr.reorderProjects(RpcMethods['projects.reorder'].params.parse(p).orderedIds),
