@@ -115,6 +115,19 @@ test('로그인 안 된 도구는 도넛이 없다', async ({ page }) => {
 
   await expect(page.getByTestId('usage-donut-claude')).toBeVisible()
   await expect(page.getByTestId('usage-donut-codex')).toHaveCount(0)
+
+  /*
+   * 하나도 못 쓰면 빈 자리로 두지 않는다 — "볼 게 없다"가 아니라 **할 일이 있다**
+   * (설치·로그인). 끊김을 적는 것과 같은 규칙이다.
+   */
+  await page.evaluate(() => {
+    const m = (window as never as { __mock: any }).__mock
+    m.detected = [{ tool: 'claude', installed: true, loggedIn: false, detail: 'not logged in' }]
+  })
+  // 닫고(첫 클릭) 다시 열면(둘째) 그때 다시 묻는다 — 닫기는 아무것도 안 물어본다
+  await page.getByTestId('usage-donut-claude').click()
+  await page.getByTestId('usage-donut-claude').click()
+  await expect(page.getByTestId('usage-no-agent')).toBeVisible()
 })
 
 /**

@@ -113,6 +113,29 @@ export function UsageDonuts() {
     )
   }
 
+  /*
+   * host는 붙었는데 쓸 수 있는 도구가 하나도 없다 — 빈 자리로 두면 "볼 게 없다"로 읽히지만
+   * 실은 **할 일이 있는 상태**다(설치 또는 로그인). 끊김과 같은 규칙으로 그 사실을 적는다.
+   * 아직 안 물어봤을 때(null)는 아무 말도 안 한다 — 첫 답 전의 침묵은 사실이 아니다.
+   */
+  if (live !== null && live.length === 0) {
+    return (
+      <Tooltip
+        testId="usage-no-agent-tip"
+        content={
+          <span className="block">
+            <span className="block text-chalk">No agent connected</span>
+            <span className="mt-1 block text-slate">Install or sign in to Claude Code or Codex</span>
+          </span>
+        }
+      >
+        <span className="text-[11px] text-ash" data-testid="usage-no-agent">
+          No agent
+        </span>
+      </Tooltip>
+    )
+  }
+
   return (
     <span className="relative flex items-center gap-1.5" data-testid="usage-donuts">
       {(live ?? []).map((tool) => (
