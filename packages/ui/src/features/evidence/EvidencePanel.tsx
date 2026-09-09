@@ -949,7 +949,7 @@ function ChangeRow({
         title={`${file.path} — view diff`}
       >
         {/* 종류는 색이 아니라 글자로 구분한다 (완전 무채색) */}
-        <span className="readout w-3 shrink-0 text-[10px] text-ash">{file.status.slice(0, 1).toUpperCase()}</span>
+        <span className="readout w-3 shrink-0 text-[10px] text-ash">{statusMark(file.status)}</span>
         <span className="truncate text-[12px] text-ash" dir="rtl">
           {file.path}
         </span>
@@ -1070,6 +1070,21 @@ function CommitHistory({ projectId }: { projectId: string }) {
       )}
     </section>
   )
+}
+
+/**
+ * 줄 앞의 한 글자 (사용자 요청 2026-09-10: "새 파일이 물음표로 뜨는데 A로").
+ *
+ * git은 아직 추적하지 않는 파일을 `?`로 적는데, 화면에서 그건 **모른다**로 읽힌다 —
+ * 실제로는 아는 사실(새 파일)이다. 사람이 읽는 글자는 M·A·D·R처럼 무슨 일이 있었나를
+ * 말해야 하므로 A(added)로 적는다. 스테이징 여부는 이미 묶음(Staged/Changed)이 말하므로
+ * 이 글자가 또 말할 필요가 없다.
+ *
+ * **데이터는 안 바꾼다.** host의 `'?'`는 "추적되지 않음"이라는 사실 그대로 남는다 —
+ * 여기서 바꾸는 것은 표시뿐이다 (diff의 파일 밴드가 복사에는 원문을 남기는 것과 같은 규칙).
+ */
+function statusMark(status: GitFileStatus['status']): string {
+  return status === '?' ? 'A' : status.toUpperCase()
 }
 
 /** 에이전트가 만진 파일 수 — 목록을 다시 읽을 시점을 아는 신호 */

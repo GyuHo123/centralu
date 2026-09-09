@@ -277,6 +277,30 @@ test('상한에 못 미치면 끊겼다는 말도 하지 않는다', async ({ pa
  * land in the diff every time, not just the first time.
  */
 
+/**
+ * 줄 앞 글자는 **무슨 일이 있었나**를 말한다 (사용자 요청 2026-09-10).
+ * git이 새 파일에 쓰는 `?`는 화면에서 "모른다"로 읽히지만, 실은 아는 사실이다 —
+ * 새로 생긴 파일이니 A(added)다. D(삭제)·M(수정)은 git의 글자를 그대로 쓴다.
+ */
+test('새 파일은 A로, 지운 파일은 D로 선다', async ({ page }) => {
+  await setup(page)
+  await page.evaluate(() => {
+    const m = (window as never as { __mock: any }).__mock
+    m.gitState.files = [
+      { path: 'src/new.ts', staged: false, status: '?' },
+      { path: 'src/gone.ts', staged: false, status: 'D' },
+      { path: 'src/old.ts', staged: false, status: 'M' },
+    ]
+  })
+  await newSession(page, 'alpha', 'claude', '작업')
+
+  const mark = async (path: string) =>
+    page.getByTestId(`evidence-file-${path}`).locator('span').first().textContent()
+  expect(await mark('src/new.ts')).toBe('A')
+  expect(await mark('src/gone.ts')).toBe('D')
+  expect(await mark('src/old.ts')).toBe('M')
+})
+
 test('두 번째 파일을 눌러도 diff가 따라온다 — 목록은 덮이지 않으니 계속 눌린다', async ({ page }) => {
   await setup(page)
   await page.evaluate(() => {
