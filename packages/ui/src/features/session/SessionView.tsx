@@ -25,6 +25,12 @@ import { anchorAt, decideFollow, isAtBottom, MOVED_UP_SLACK, shouldFollowAgain }
 /** 입력창이 커질 수 있는 최대 높이. CSS의 max-h-40과 같은 값이어야 한다 */
 const COMPOSER_MAX_H = 160
 
+/**
+ * 접힌 입력창이 떠오르는 감지 범위 (칸 아래에서부터, px).
+ * 내민 카드 머리(14px) + 손이 겨누는 여유 40px — 대화 한복판에서는 안 뜬다.
+ */
+const COMPOSER_REACH = 54
+
 /** 셀렉터가 매번 새 배열을 만들면 zustand 스냅샷이 불안정해져 무한 리렌더가 난다 */
 const EMPTY_CHAT: ChatItem[] = []
 
@@ -97,6 +103,7 @@ export function SessionPane({
   sessionId,
   headerExtra,
   headerDrag,
+  fold = false,
 }: {
   sessionId: string
   /**
@@ -107,6 +114,14 @@ export function SessionPane({
    * 필요가 없다 — 애초에 어긋날 수가 없다.
    */
   headerExtra?: ReactNode
+  /**
+   * 입력창을 접어 둘까 (그리드, 사용자 요청 2026-09-10).
+   *
+   * 두 줄짜리 그리드에서 읽는 자리가 좁다는 데서 나왔다 — 칸 370px 중 입력 영역이 95px,
+   * 그중 글자를 넣는 칸은 22px뿐이었다. 접으면 **둥근 카드의 윗머리만** 남고, 아래에
+   * 손이 오면 대화 위로 떠오른다. 밀지 않고 덮으므로 읽던 줄은 안 움직인다.
+   */
+  fold?: boolean
   /**
    * 머리글을 **칸을 옮기는 손잡이**로 쓴다 (그리드).
    *
@@ -146,6 +161,17 @@ export function SessionPane({
    */
   const [runOpen, setRunOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  /**
+   * 접힌 입력창이 떠 있나 (fold일 때만 뜻이 있다).
+   *
+   * 방아쇠 셋을 **OR로** 묶는다: 아래쪽에 손이 왔거나(hover), 입력칸에 포커스가 있거나,
+   * 그 줄의 메뉴(모델·권한)가 열려 있거나. 마우스가 떠나도 포커스·메뉴가 살아 있으면
+   * 내려가지 않는다 — 쓰는 도중에 발밑이 꺼지면 안 된다.
+   */
+  const [nearComposer, setNearComposer] = useState(false)
+  const [composerFocused, setComposerFocused] = useState(false)
+  const [composerMenu, setComposerMenu] = useState(false)
+  const composerUp = !fold || nearComposer || composerFocused || composerMenu
 
   const loadHistory = useStore((s) => s.loadHistory)
   const loaded = useStore((s) => !!s.chat[sessionId])
@@ -249,7 +275,33 @@ export function SessionPane({
       그래서 대화가 길어지면 이 칸이 통째로 늘어나 입력창을 밖으로 밀어냈다
       (그리드에서 칸 높이가 정해져 있으니 곧바로 드러났다 — 입력창이 아예 안 보였다).
     */
-    <section className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-void" data-testid="session-view">
+    <section
+      /*
+       * fold면 **clip이다 (hidden이 아니라).**
+       *
+       * 접힌 입력창은 칸 밖으로 내려가 있다 — 그건 스크롤 가능한 넘침이다. `overflow:hidden`은
+       * 그림만 자를 뿐 상자는 여전히 스크롤 컨테이너라, 브라우저가 밖에 있는 입력칸에 포커스를
+       * 주는 순간 **칸을 통째로 밀어 올려** 보여주려 한다 (실측: 칸이 85px 스크롤되어 머리글이
+       * 위로 사라지고, 그 사이 눌린 버튼은 mouseup을 못 받아 클릭이 통째로 사라졌다).
+       * `clip`은 스크롤 컨테이너를 만들지 않으므로 밀어 올릴 자리가 아예 없다.
+       */
+      className={`relative flex min-h-0 min-w-0 flex-1 flex-col bg-void ${fold ? 'overflow-clip' : ''}`}
+      data-testid="session-view"
+      /*
+       * 손이 아래쪽에 오면 입력창이 뜬다. 감지는 **가짜 요소가 아니라 좌표로** 한다 —
+       * 투명한 감지판을 깔면 그만큼 대화의 글자를 못 고르고 링크도 못 누른다.
+       * 띠(14px) 위로 40px까지가 범위다: 겨누기 쉬우면서, 대화 한복판을 지날 땐 안 뜬다.
+       */
+      onMouseMove={
+        fold
+          ? (e) => {
+              const r = e.currentTarget.getBoundingClientRect()
+              setNearComposer(e.clientY > r.bottom - COMPOSER_REACH)
+            }
+          : undefined
+      }
+      onMouseLeave={fold ? () => setNearComposer(false) : undefined}
+    >
       {headerDrag ? (
         <div
           className={`${HEADER} cursor-grab active:cursor-grabbing`}
@@ -267,6 +319,7 @@ export function SessionPane({
       )}
 
       <ChatStream
+        bottomPeek={fold}
         scrollRef={scrollRef}
         chat={chat}
         pending={session.pendingApproval}
@@ -283,7 +336,41 @@ export function SessionPane({
       */}
       {!session.live && <DormantNote sessionId={session.id} />}
 
-      <Composer sessionId={session.id} />
+      {/*
+        접힘 (사용자 요청 2026-09-10): 둥근 카드가 아래에서 윗머리만 내밀고 있다가 떠오른다.
+        **글자로 안내하지 않는다** — 둥근 모서리가 위로 올라올 수 있는 카드라고 말한다.
+        절대 배치라 대화의 높이를 안 건드린다: 떠오를 때 읽던 줄이 밀리지 않는다.
+      */}
+      <div
+        className={
+          fold
+            ? `absolute inset-x-0 bottom-0 z-20 rounded-t-xl border px-1 pt-1 shadow-[0_-12px_28px_-12px_rgb(0_0_0/0.9)] transition-[transform,background-color,border-color] duration-200 motion-reduce:transition-none ${
+                composerUp
+                  ? 'translate-y-0 border-edge bg-pit'
+                  : /*
+                     * 내려가 있을 때는 **더 밝게** 선다 (사용자 지적 2026-09-10: "잘 안 보이는데").
+                     * pit(#0c0c0c)은 칸 바닥(void #090909)과 3의 차이라 카드가 아니라 그림자였다.
+                     * 쉬는 동안만 panel+graphite로 뜬 표면이 되고, 떠오르면 원래 색으로 돌아간다 —
+                     * 밝은 띠는 "여기 뭔가 있다"는 신호일 뿐, 펼쳐진 입력창의 배경이어선 안 된다.
+                     */
+                    'translate-y-[calc(100%_-_26px)] border-graphite bg-panel'
+              }`
+            : undefined
+        }
+        data-testid="composer-shell"
+        data-up={fold ? composerUp || undefined : undefined}
+        onFocusCapture={fold ? () => setComposerFocused(true) : undefined}
+        onBlurCapture={
+          fold
+            ? (e) => {
+                // 같은 상자 안으로 옮겨간 포커스는 떠난 것이 아니다 (첨부 버튼 ↔ 입력칸)
+                if (!e.currentTarget.contains(e.relatedTarget as Node)) setComposerFocused(false)
+              }
+            : undefined
+        }
+      >
+        <Composer sessionId={session.id} onMenuOpenChange={fold ? setComposerMenu : undefined} />
+      </div>
 
       {/* 자주 쓰는 명령어 창 (#60) — 칸 안에 뜬다. 그리드 칸이면 그 칸 크기의 창이다 */}
       {runOpen && session.projectId && (
@@ -309,7 +396,14 @@ export function SessionPane({
  * 한 곳뿐이고, 거기서는 누른 그 순간에 getState()로 훑는다. 구독했다면 스트리밍
  * 델타마다 입력창이 다시 그려져 방금 옮긴 비용이 그대로 돌아온다.
  */
-const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
+const Composer = memo(function Composer({
+  sessionId,
+  onMenuOpenChange,
+}: {
+  sessionId: string
+  /** 아래 줄의 메뉴가 열렸나 — 접힌 입력창이 그동안 안 내려가야 한다 (fold) */
+  onMenuOpenChange?: (open: boolean) => void
+}) {
   /*
    * 세션에서 **여기 정말로 필요한 것만** 집는다.
    *
@@ -761,7 +855,7 @@ const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
           기본값이라 한 번 배우면 끝인데, 안내는 매번 자리를 차지한다 —
           한 번 읽고 나면 그때부터는 노이즈다 (도그푸딩: "당연한 것들이라").
         */}
-      <ComposerFooter sessionId={sessionId} />
+      <ComposerFooter sessionId={sessionId} onMenuOpenChange={onMenuOpenChange} />
     </form>
   )
 })
@@ -776,7 +870,13 @@ const Composer = memo(function Composer({ sessionId }: { sessionId: string }) {
  * 자리가 여기인 것은 그대로다 — 모델·권한은 **보내기 직전에** 정하는 것들이라
  * 헤더(화면 반대쪽 끝)가 아니라 손과 눈이 머무는 이 자리에 있어야 한다.
  */
-const ComposerFooter = memo(function ComposerFooter({ sessionId }: { sessionId: string }) {
+const ComposerFooter = memo(function ComposerFooter({
+  sessionId,
+  onMenuOpenChange,
+}: {
+  sessionId: string
+  onMenuOpenChange?: (open: boolean) => void
+}) {
   const session = useStore((s) => s.sessions[sessionId])
   if (!session) return null
   const ctxPct = session.context ? Math.round((session.context.used / session.context.window) * 100) : null
@@ -792,6 +892,7 @@ const ComposerFooter = memo(function ComposerFooter({ sessionId }: { sessionId: 
         serviceTier={session.serviceTier}
         preset={session.permissionPreset}
         live={session.live}
+        onOpenChange={onMenuOpenChange}
       />
       {/*
           워크트리 세션은 **다른 디렉토리에서 돈다.** 그 사실이 안 보이면 사용자는
@@ -853,6 +954,7 @@ function ChatStream({
   projectRoot,
   working,
   activity,
+  bottomPeek = false,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>
   chat: ChatItem[]
@@ -862,6 +964,8 @@ function ChatStream({
   projectRoot: string | null
   working: boolean
   activity: SessionSummary['activity']
+  /** 접힌 입력창이 아래를 조금 가린다 — 마지막 줄이 그 밑에 영영 깔리지 않게 여백을 준다 */
+  bottomPeek?: boolean
 }) {
   /*
    * "Was I at the bottom" is the session's fact, not this component's (issue #31).
@@ -1289,9 +1393,9 @@ function ChatStream({
        * invisible(= visibility:hidden)은 자리를 잡는 동안만이다 (#61 위 주석).
        * 재는 일은 계속되어야 하므로 레이아웃은 남기고 그림만 감춘다.
        */
-      className={`min-h-0 flex-1 overflow-y-auto px-4 py-4 text-[13px] leading-relaxed ${
-        settling ? 'invisible' : ''
-      }`}
+      className={`min-h-0 flex-1 overflow-y-auto px-4 pt-4 text-[13px] leading-relaxed ${
+        bottomPeek ? 'pb-14' : 'pb-4'
+      } ${settling ? 'invisible' : ''}`}
       data-testid="chat-stream"
       data-settling={settling || undefined}
     >

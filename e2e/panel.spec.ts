@@ -63,6 +63,106 @@ async function stubUsage(page: Page, windows?: unknown[]) {
   }, windows)
 }
 
+/**
+ * 그리드의 접힌 입력창 (사용자 요청 2026-09-10).
+ *
+ * 두 줄짜리 그리드에서 읽는 자리가 좁았다 — 칸 370px 중 입력 영역이 95px인데 정작
+ * 글자 칸은 22px이었다. 접으면 둥근 카드가 윗머리만 내밀고 있다가, 아래에 손이 오면
+ * 대화 **위로 떠오른다.** 미는 게 아니라 덮으므로 읽던 줄은 움직이지 않는다.
+ */
+test('그리드에서 입력창은 접혀 있다가 아래에 손이 오면 떠오른다', async ({ page }) => {
+  await setup(page)
+  const a = await newSession(page, 'alpha', 'claude', '하나')
+  const b = await newSession(page, 'alpha', 'claude', '둘')
+  await openGrid(page, [a, b])
+  // 새로 만든 칸의 입력칸이 잡혀 있으면 접힘을 못 본다 — 손을 뗀다
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+
+  const panel = page.getByTestId(`grid-panel-${a}`)
+  const shell = panel.getByTestId('composer-shell')
+  const chat = panel.getByTestId('chat-stream')
+  await expect(shell).not.toHaveAttribute('data-up', 'true')
+  const resting = (await chat.boundingBox())!.height
+
+  // 칸의 아래쪽에 손을 올린다
+  const box = (await panel.boundingBox())!
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 20)
+  await expect(shell).toHaveAttribute('data-up', 'true')
+
+  // **덮는다** — 대화의 높이는 그대로다 (읽던 줄이 밀리면 안 된다)
+  expect(Math.round((await chat.boundingBox())!.height)).toBe(Math.round(resting))
+
+  // 대화 한복판으로 손을 옮기면 다시 내려간다
+  await page.mouse.move(box.x + box.width / 2, box.y + 80)
+  await expect(shell).not.toHaveAttribute('data-up', 'true')
+
+  // 입력칸을 잡으면 손이 떠나도 안 내려간다 — 쓰는 도중에 발밑이 꺼지면 안 된다.
+  // (잡으려면 먼저 떠올라야 한다 — 내려가 있는 입력칸은 칸 밖이라 애초에 눌리지 않는다)
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 20)
+  await panel.getByTestId('prompt-input').click()
+  await page.mouse.move(box.x + box.width / 2, box.y + 80)
+  await expect(shell).toHaveAttribute('data-up', 'true')
+})
+
+/**
+ * 접힌 입력창은 **칸을 밀어 올리지 않는다** (도그푸딩 2026-09-10: 머리글이 사라지고
+ * 명령어 버튼이 첫 클릭을 먹었다).
+ *
+ * 접힌 입력칸은 칸 밖에 있고, 세션을 갓 만들면 거기에 포커스가 잡혀 있다. 칸이 스크롤
+ * 컨테이너면 브라우저가 그 입력칸을 보여주려고 칸을 통째로 밀어 올린다 — 머리글이 위로
+ * 사라지고, 그 사이에 눌린 버튼은 mousedown과 mouseup이 서로 다른 곳에서 나 클릭이
+ * 통째로 없어진다. 스크롤 위치는 0이어야 한다.
+ */
+test('접힌 입력창은 칸을 스크롤로 밀어 올리지 않는다 — 머리글의 버튼이 한 번에 눌린다', async ({
+  page,
+}) => {
+  await setup(page)
+  const a = await newSession(page, 'alpha', 'claude', '하나')
+  const b = await newSession(page, 'alpha', 'claude', '둘')
+  await openGrid(page, [a, b])
+
+  // 접혀 있는 칸(a): 밀어 올릴 자리 자체가 없어야 한다 — 밀어 보고 확인한다
+  expect(
+    await page.getByTestId(`grid-panel-${a}`).evaluate((el) => {
+      el.scrollTop = 500
+      return el.scrollTop
+    }),
+  ).toBe(0)
+
+  // 그리고 방금 만들어 입력칸을 잡고 있는 칸(b)에서도 머리글 버튼이 **첫 클릭에** 열린다
+  // (누르는 순간 손이 떠나 입력창이 내려가는데, 그때 칸이 밀리면 mouseup이 딴 데서 난다)
+  const panel = page.getByTestId(`grid-panel-${b}`)
+  await expect(panel.getByTestId('prompt-input')).toBeFocused()
+  await panel.getByTestId('run-open').click()
+  await expect(page.getByTestId('run-menu')).toBeVisible()
+})
+
+/**
+ * 설정이 꺼져 있으면 예전 그대로 — 접기는 **선택**이다.
+ * 그리고 접기는 그리드의 사정이라 포커스 뷰는 처음부터 이 문제가 없다.
+ */
+test('접기를 끄면 입력창이 늘 펼쳐져 있고, 포커스 뷰는 애초에 안 접힌다', async ({ page }) => {
+  await setup(page)
+  const a = await newSession(page, 'alpha', 'claude', '하나')
+  await openGrid(page, [a])
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+
+  const panel = page.getByTestId(`grid-panel-${a}`)
+  const folded = (await panel.getByTestId('chat-stream').boundingBox())!.height
+
+  await page.evaluate(() => (window as never as { __store: any }).__store.getState().setFoldComposer(false))
+  await expect(panel.getByTestId('composer-shell')).not.toHaveAttribute('data-up', 'true')
+  // 접기를 끄면 입력창이 자리를 도로 차지한다 — 그만큼 대화가 짧아진다
+  const open = (await panel.getByTestId('chat-stream').boundingBox())!.height
+  expect(open).toBeLessThan(folded)
+
+  // 포커스 뷰: 설정과 무관하게 접히지 않는다
+  await page.evaluate(() => (window as never as { __store: any }).__store.getState().setFoldComposer(true))
+  await page.evaluate((id: string) => (window as never as { __store: any }).__store.getState().focusSession(id), a)
+  await expect(page.getByTestId('session-view').getByTestId('composer-shell')).not.toHaveAttribute('data-up', 'true')
+  await expect(page.getByTestId('prompt-input')).toBeVisible()
+})
+
 /*
  * ── 사용량 (#26 → 2026-09-09) ────────────────────────────────────────
  *
@@ -822,6 +922,9 @@ test('그리드에서 다른 칸의 입력창을 누르면 고른 세션이 따�
   // 마지막으로 고른 세션(b)에서 시작한다
   await expect(page.getByTestId(`grid-panel-${b}`)).toHaveAttribute('data-focused', 'true')
 
+  // 접힌 입력창은 아래쪽에 손이 와야 떠오른다 (사람이 하는 것과 같은 순서)
+  const boxA = (await page.getByTestId(`grid-panel-${a}`).boundingBox())!
+  await page.mouse.move(boxA.x + boxA.width / 2, boxA.y + boxA.height - 20)
   await page.getByTestId(`grid-panel-${a}`).getByTestId('prompt-input').click()
 
   await expect(page.getByTestId(`grid-panel-${a}`)).toHaveAttribute('data-focused', 'true')

@@ -31,6 +31,7 @@ export function GridView() {
    * 답을 치려면 그 칸의 입력창에 손이 가 있어야 한다.
    */
   const focusedSessionId = useStore((s) => s.focusedSessionId)
+  const foldComposer = useStore((s) => s.foldComposer)
   const focusSession = useStore((s) => s.focusSession)
   const setGridPanels = useStore((s) => s.setGridPanels)
   const ref = useRef<HTMLDivElement>(null)
@@ -311,6 +312,12 @@ export function GridView() {
               */}
               <SessionPane
                 sessionId={id}
+                /*
+                  입력창 접기는 **그리드에만** 있다 (사용자 요청 2026-09-10). 두 줄짜리
+                  그리드에서 읽는 자리가 좁다는 데서 나온 설정이라, 자리가 넉넉한 포커스
+                  뷰까지 접으면 매번 올려야 하는 수고만 남는다.
+                */
+                fold={foldComposer}
                 /*
                   칸을 옮기는 손잡이는 **머리글뿐**이다.
                   예전엔 칸 전체가 draggable이었는데, draggable인 조상이 있으면

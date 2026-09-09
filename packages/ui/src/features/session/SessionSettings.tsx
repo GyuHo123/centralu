@@ -164,6 +164,7 @@ export function SessionSettings({
   serviceTier,
   preset,
   live,
+  onOpenChange,
 }: {
   sessionId: string
   tool: ToolName
@@ -176,6 +177,13 @@ export function SessionSettings({
   preset: PermissionPreset
   /** 프로세스가 살아 있는가 — Claude는 살아 있어야 모델 목록을 준다 */
   live: boolean
+  /**
+   * 메뉴가 열리고 닫히는 것을 밖에 알린다 (그리드의 접힌 입력창).
+   *
+   * 접힌 입력창은 손이 떠나면 내려가는데, 이 메뉴는 그 입력창 **위에** 뜬다 —
+   * 고르는 동안 발밑이 꺼지면 안 되므로 열려 있는 동안은 붙잡아 둔다.
+   */
+  onOpenChange?: (open: boolean) => void
 }) {
   const update = useStore((s) => s.updateSessionSettings)
   const { models, reason } = useModels(tool, live)
@@ -183,6 +191,10 @@ export function SessionSettings({
   const [open, setOpen] = useState(false)
   /** 닫힘 애니메이션이 도는 중 — 다 내려앉은 뒤에 unmount한다 (cc-hang-out) */
   const [closing, setClosing] = useState(false)
+  // 열림/닫힘을 밖에 알린다 (접힌 입력창이 그동안 안 내려가야 한다)
+  useEffect(() => {
+    onOpenChange?.(open)
+  }, [open, onOpenChange])
   const close = useCallback(() => {
     setOpen(false)
     setClosing(true)

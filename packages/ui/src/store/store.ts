@@ -313,6 +313,14 @@ export type AppState = {
   showIgnored: boolean
   /** 전체 글자 크기 단계 — TEXT_SCALES의 인덱스 (0..4). 보는 방식이라 스냅샷에 실린다 */
   textScale: number
+  /**
+   * 그리드 칸의 입력창을 접어 둘까 (사용자 요청 2026-09-10).
+   *
+   * 켜면 칸마다 입력창이 **둥근 카드의 윗머리만** 내놓고 접혀 있다가, 아래쪽에 마우스를
+   * 대면 대화 **위로 떠올라** 덮는다. 대화의 높이는 그대로라 읽던 줄이 안 밀린다.
+   * 끄면 예전처럼 언제나 펼쳐져 있다.
+   */
+  foldComposer: boolean
   focusedSessionId: string | null
   /** 깃·파일·뷰어는 프로젝트의 것이다 — 세션 없이도 봐야 한다 */
   focusedProjectId: string | null
@@ -544,6 +552,7 @@ export type AppState = {
   /** Show or hide what .gitignore hides (#17) */
   setShowIgnored(show: boolean): void
   setTextScale(step: number): void
+  setFoldComposer(fold: boolean): void
   setToast(msg: string | null): void
   /** 세션 생성 창을 연다/닫는다 (null이면 닫기) */
   openNewSession(projectId: string | null, opts?: { worktree?: boolean }): void
@@ -1014,6 +1023,8 @@ export const useStore = create<AppState>((set, get) => ({
   expandedDirs: {},
   showIgnored: true,
   textScale: TEXT_SCALE_DEFAULT,
+  // 기본은 접음 — 두 줄짜리 그리드에서 읽는 자리가 좁다는 것이 이 기능의 출발점이다
+  foldComposer: true,
   focusedSessionId: null,
   focusedProjectId: null,
   newSessionFor: null,
@@ -1269,6 +1280,9 @@ export const useStore = create<AppState>((set, get) => ({
         // 글자 크기도 보는 방식이다 — 같은 typeof 가드, 같은 이유 (없음 ≠ 기본으로 정했음)
         const savedScale = (snap as { textScale?: number }).textScale
         if (typeof savedScale === 'number') get().setTextScale(savedScale)
+        // 같은 typeof 가드 — 저장된 false는 사람의 결정이라 기본값보다 세다
+        const savedFold = (snap as { foldComposer?: boolean }).foldComposer
+        if (typeof savedFold === 'boolean') set({ foldComposer: savedFold })
       }
     } catch {
       /* 스냅샷이 없어도 앱은 정상 동작한다 */
@@ -1320,6 +1334,7 @@ export const useStore = create<AppState>((set, get) => ({
         notifyPolicy: s.notifyPolicy,
         showIgnored: s.showIgnored,
         textScale: s.textScale,
+        foldComposer: s.foldComposer,
         introSeen: s.introSeen,
       } as never)
       .catch(() => {})
@@ -1994,6 +2009,11 @@ export const useStore = create<AppState>((set, get) => ({
     set({ showIgnored: show })
     get().saveWorkspace()
   },
+  setFoldComposer(fold) {
+    set({ foldComposer: fold })
+    get().saveWorkspace()
+  },
+
   setTextScale(step) {
     // 다섯 단계 밖의 값(망가진 스냅샷·미래 버전)은 가장 가까운 단계로 접는다
     set({ textScale: Math.min(TEXT_SCALES.length - 1, Math.max(0, Math.round(step))) })
