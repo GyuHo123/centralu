@@ -22,7 +22,7 @@ import { CommandPalette } from '../features/palette/CommandPalette.jsx'
 import { Settings } from '../features/settings/Settings.jsx'
 import { UpdateLine } from '../features/settings/UpdateLine.jsx'
 import { Notices } from '../features/notices/Notices.jsx'
-import { UsageModal } from '../features/usage/UsagePanel.jsx'
+import { UsageDonuts } from '../features/usage/UsageDonuts.jsx'
 import { DragRegion } from '../components/DragRegion.jsx'
 
 export function App({ platform }: { platform: Platform }) {
@@ -89,7 +89,6 @@ export function App({ platform }: { platform: Platform }) {
           <Body />
           <CommandPalette />
           <Settings />
-          <UsageModal />
           <Gust />
           <Toast />
           <GlobalKeys />
@@ -331,14 +330,11 @@ function TopBar() {
           />
           {connection === 'connected' ? 'Connected' : connection === 'connecting' ? 'Connecting' : 'Disconnected'}
         </span>
-        <button
-          className="rounded px-2 py-1 text-[11px] text-slate transition-colors hover:bg-graphite/50 hover:text-chalk"
-          onClick={() => useStore.getState().toggleUsage(true)}
-          data-testid="open-usage"
-          title="Usage (plan limits)"
-        >
-          Usage
-        </button>
+        {/*
+          사용량은 글자 버튼이 아니라 **도구마다 도넛 하나**다 (사용자 요청 2026-09-09).
+          계기판은 물어보기 전에 답이 있어야 하는 자리고, 상세는 그 도넛 아래로 내려온다.
+        */}
+        <UsageDonuts />
         {/*
           설정에는 입구가 커맨드 팔레트 하나뿐이었다. 그런데 그 안에 **단축키 표**가 들어 있다 —
           단축키를 이미 아는 사람만 단축키 표를 볼 수 있었던 셈이다. 도그푸딩에서 "설정이

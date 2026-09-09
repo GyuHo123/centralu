@@ -2928,7 +2928,7 @@ test('사용량 모달: 창마다 도넛, 호버하면 초기화 시각까지', 
     }
   })
 
-  await page.getByTestId('open-usage').click()
+  await page.getByTestId('usage-donut-claude').click()
   await expect(page.getByTestId('usage-plan')).toContainText('max')
   await expect(page.getByTestId('usage-window-session')).toContainText('8%')
   await expect(page.getByTestId('usage-window-weekly_all')).toContainText('93%')
@@ -2951,7 +2951,7 @@ test('사용량 모달: 창마다 도넛, 호버하면 초기화 시각까지', 
   await expect(page.getByTestId('usage-daily')).toHaveCount(0)
 
   await page.keyboard.press('Escape')
-  await expect(page.getByTestId('usage-modal')).toBeHidden()
+  await expect(page.getByTestId('usage-drop')).toBeHidden()
 })
 
 test('일별 토큰을 주는 도구면 함께 보여준다', async ({ page }) => {
@@ -2973,7 +2973,7 @@ test('일별 토큰을 주는 도구면 함께 보여준다', async ({ page }) =
       },
     }
   })
-  await page.getByTestId('open-usage').click()
+  await page.getByTestId('usage-donut-claude').click()
   await expect(page.getByTestId('usage-daily')).toContainText('Today 9.0M')
 })
 
@@ -2990,7 +2990,7 @@ test('사용량을 못 읽으면 이유를 말한다 (빈 화면으로 두지 �
       usage: null,
     }
   })
-  await page.getByTestId('open-usage').click()
+  await page.getByTestId('usage-donut-claude').click()
   await expect(page.getByTestId('usage-unavailable')).toContainText('does not support usage queries')
 })
 
@@ -3232,9 +3232,14 @@ test('세션 목록과 헤더가 각 세션의 도구를 보여준다', async ({
   await expect(page.getByTestId('tool-mark-claude')).toHaveCount(1)
   await expect(page.getByTestId('tool-mark-codex')).toHaveCount(1)
 
-  // 지금 보고 있는 건 codex 세션 — 사용량도 그 도구를 물어야 한다
-  await page.getByTestId('open-usage').click()
-  await expect(page.getByTestId('usage-modal')).toContainText('Codex')
+  /*
+   * 사용량은 이제 **도구마다 도넛 하나**다 (사용자 요청 2026-09-09) — 어느 도구의
+   * 한도인지 화면이 추론하지 않고 사람이 고른다. 가운데 한 글자가 사이드바 칩과 같아서
+   * 범례 없이 읽힌다.
+   */
+  await expect(page.getByTestId('usage-donut-claude')).toBeVisible()
+  await page.getByTestId('usage-donut-codex').click()
+  await expect(page.getByTestId('usage-drop')).toContainText('Codex')
 })
 
 /**
@@ -3653,17 +3658,17 @@ test('/usage 엔터는 메시지가 아니라 사용량 화면을 연다 — 인
 
   await page.getByTestId('prompt-input').fill('/usage')
   await page.getByTestId('prompt-input').press('Enter')
-  await expect(page.getByTestId('usage-modal')).toBeVisible()
+  await expect(page.getByTestId('usage-drop')).toBeVisible()
   // 메시지는 나가지 않았고, 입력창은 비었다
   expect(await page.evaluate(userCount, id)).toBe(before)
   await expect(page.getByTestId('prompt-input')).toHaveValue('')
   await page.keyboard.press('Escape')
-  await expect(page.getByTestId('usage-modal')).toBeHidden()
+  await expect(page.getByTestId('usage-drop')).toBeHidden()
 
   // 이름 뒤에 무언가 있으면 세션에게 말하는 것이다 — 보통 메시지로 나간다
   await page.getByTestId('prompt-input').fill('/usage 지난주 요약해줘')
   await page.getByTestId('prompt-input').press('Enter')
-  await expect(page.getByTestId('usage-modal')).toBeHidden()
+  await expect(page.getByTestId('usage-drop')).toBeHidden()
   await expect.poll(() => page.evaluate(userCount, id)).toBe(before + 1)
 
   // /model은 CLI의 그 화면이 이미 여기 있다 — 이 세션의 설정 메뉴가 열린다

@@ -50,83 +50,69 @@ async function openGrid(page: Page, ids: string[]) {
 }
 
 /** 기본 목은 창이 비어 있어 'usage-unavailable'만 그린다 — 도넛이 나오는 상태를 만든다 */
-async function stubUsage(page: Page) {
-  await page.evaluate(() => {
+async function stubUsage(page: Page, windows?: unknown[]) {
+  await page.evaluate((ws: unknown[] | undefined) => {
     ;(window as never as { __mock: any }).__mock.usageState = {
       supported: true,
       usage: {
         plan: 'max',
-        windows: [{ id: 'session', label: '5 hours', percent: 41, resetsAt: null, scope: null }],
+        windows: ws ?? [{ id: 'session', label: '5 hours', percent: 41, resetsAt: null, scope: null }],
         daily: [],
       },
     }
-  })
+  }, windows)
 }
 
 /*
- * ── 사용량 (#26) ─────────────────────────────────────────────────────
+ * ── 사용량 (#26 → 2026-09-09) ────────────────────────────────────────
  *
- * 사용량은 **계정** 단위인데 도구마다 다르다. 그래서 답해야 할 질문은 하나뿐이다:
- * 지금 화면에 어느 도구가 떠 있나. 그리드는 그 답이 여럿인 유일한 화면이다.
+ * 사용량은 **계정** 단위인데 도구마다 다르다. 오래 그 답을 화면에서 추론했다(그리드에 뜬
+ * 도구들). 이제 추론하지 않는다: **도구마다 도넛 하나**가 계기판에 상주하고, 어느 한도를
+ * 볼지는 사람이 고른다. 그래서 여기서 볼 것은 "짐작이 맞나"가 아니라 "각 도넛이 자기
+ * 도구를 말하나"다.
  */
 
-test('그리드: 화면에 뜬 도구마다 한 칸씩 나온다', async ({ page }) => {
-  await setup(page)
-  await stubUsage(page)
-  const claude = await newSession(page, 'alpha', 'claude', '클로드 작업')
-  const codex = await newSession(page, 'alpha', 'codex', '코덱스 작업')
-  await openGrid(page, [claude, codex])
-  await expect(page.getByTestId(`grid-panel-${codex}`)).toBeVisible()
-
-  await page.getByTestId('open-usage').click()
-  await expect(page.getByTestId('usage-section-claude')).toContainText('Claude Code')
-  await expect(page.getByTestId('usage-section-codex')).toContainText('Codex')
-  // 두 칸 다 실제로 숫자를 그린다 — 제목만 있고 속이 비면 반쪽이다
-  await expect(page.getByTestId('usage-panel')).toHaveCount(2)
-})
-
-test('그리드: 같은 도구 둘은 한 칸으로 합친다 — 계정이 하나라 숫자도 하나다', async ({ page }) => {
-  await setup(page)
-  await stubUsage(page)
-  const a = await newSession(page, 'alpha', 'claude', '첫째')
-  const b = await newSession(page, 'alpha', 'claude', '둘째')
-  await openGrid(page, [a, b])
-  await expect(page.getByTestId(`grid-panel-${b}`)).toBeVisible()
-
-  await page.getByTestId('open-usage').click()
-  // 41%가 두 번 적히면 예산이 둘인 것처럼 읽힌다
-  await expect(page.getByTestId('usage-panel')).toHaveCount(1)
-  await expect(page.getByTestId('usage-modal')).toContainText('Claude Code')
-})
-
-/**
- * 예전에는 도구를 못 정하면 조용히 `'claude'`로 떨어졌다.
- * 그러면 '알 수 없음'이 사용자에게 '틀린 값'으로 도착한다 — 틀렸다는 사실조차 화면에 없이.
- */
-test('그리드가 비어 있으면 짐작하지 않고 모른다고 말한다', async ({ page }) => {
-  await setup(page)
-  await newSession(page, 'alpha', 'claude', '작업')
-  await openGrid(page, [])
-  await expect(page.getByTestId('grid-empty')).toBeVisible()
-
-  await page.getByTestId('open-usage').click()
-  await expect(page.getByTestId('usage-no-tool')).toContainText('per tool')
-  // 짐작한 도구 이름이 머리글에 남아 있으면 안 된다
-  await expect(page.getByTestId('usage-modal')).not.toContainText('Claude Code')
-})
-
-test('포커스 뷰는 그대로 — 보고 있는 세션의 도구 하나만', async ({ page }) => {
+test('사용량은 도구마다 도넛 하나 — 화면이 어느 도구인지 짐작하지 않는다', async ({ page }) => {
   await setup(page)
   await stubUsage(page)
   await newSession(page, 'alpha', 'claude', '클로드 작업')
-  await newSession(page, 'alpha', 'codex', '코덱스 작업')
 
-  await page.getByTestId('open-usage').click()
-  await expect(page.getByTestId('usage-modal')).toContainText('Codex')
+  // 클로드 세션만 보고 있어도 코덱스 도넛은 자기 자리에 있다
+  await expect(page.getByTestId('usage-donut-claude')).toBeVisible()
+  await expect(page.getByTestId('usage-donut-codex')).toBeVisible()
+
+  await page.getByTestId('usage-donut-codex').click()
+  await expect(page.getByTestId('usage-drop')).toContainText('Codex')
+  await expect(page.getByTestId('usage-drop')).not.toContainText('Claude Code')
   await expect(page.getByTestId('usage-panel')).toHaveCount(1)
-  // 옆 세션이 클로드라고 해서 그 한도가 딸려 오면 안 된다
-  await expect(page.getByTestId('usage-modal')).not.toContainText('Claude Code')
+
+  // 다른 도넛을 누르면 그 도구의 한도로 갈아탄다 (같은 자리, 다른 답)
+  await page.getByTestId('usage-donut-claude').click()
+  await expect(page.getByTestId('usage-drop')).toContainText('Claude Code')
 })
+
+/**
+ * 모르는 것을 0%로 그리지 않는다.
+ *
+ * 꽉 찬 회색 고리는 "하나도 안 썼다"로 읽힌다 — 못 읽었다는 사실이 화면에서 사라지는
+ * 실패다(#26이 'claude로 조용히 떨어지던' 것과 같은 종류). 모를 때는 점선이고, 이유는
+ * 눌러서 여는 상세가 말한다.
+ */
+test('주간 한도를 모르면 도넛이 모른다고 말한다', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', '작업')
+
+  // 기본 목은 창이 없다 — 주간을 못 고른다
+  const donut = page.getByTestId('usage-donut-claude')
+  await expect(donut).toHaveAttribute('data-percent', '')
+
+  await stubUsage(page, [{ id: 'weekly_all', label: 'Weekly', percent: 93, resetsAt: null, scope: null }])
+  await donut.click()
+  await expect(page.getByTestId('usage-drop')).toBeVisible()
+  // 값이 오면 도넛이 그 숫자를 든다
+  await expect.poll(async () => donut.getAttribute('data-percent')).toBe('93')
+})
+
 
 /*
  * ── 기록 탭 (#21) ────────────────────────────────────────────────────
