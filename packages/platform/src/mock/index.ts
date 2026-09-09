@@ -59,7 +59,8 @@ export class MockPlatform implements Platform {
   private projectsList: ProjectInfo[] = []
   sessions = new Map<string, SessionInfo>()
   private gridPanels: string[] = []
-  private messages = new Map<string, StoredMessage[]>()
+  /** 세션별 저장된 메시지 — 시험이 "이미 긴 기록이 있는 세션"을 만들 수 있게 열어 둔다 */
+  messages = new Map<string, StoredMessage[]>()
   private handlers = new Set<(e: NormalizedEvent) => void>()
   private connHandlers = new Set<(s: ConnectionState) => void>()
   private idc = 0

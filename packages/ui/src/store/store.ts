@@ -1718,14 +1718,47 @@ export const useStore = create<AppState>((set, get) => ({
     if (prev && prev !== id) {
       const items = get().chat[prev]
       if (items && items.length > WINDOW_SIZE) {
-        set((s) => ({ chat: { ...s.chat, [prev]: items.slice(-WINDOW_SIZE) } }))
+        const kept = items.slice(-WINDOW_SIZE)
+        /*
+         * **창을 줄이면 커서도 함께 옮긴다** (도그푸딩 2026-09-09: "위에 대화가 안 불러와져").
+         *
+         * 예전에는 chat만 잘랐다. 그러면 화면의 맨 위는 방금 자른 자리인데 커서(oldestSeq)는
+         * 예전 그대로라, '이전 대화 불러오기'가 **화면과 안 이어지는 구간**을 앞에 붙였다 —
+         * 잘려 나간 사이가 영영 안 보인다. 자른 자리가 곧 새 커서고, 잘랐다는 것은 곧
+         * 더 있다는 뜻이므로 more는 참이다.
+         */
+        set((s) => ({
+          chat: { ...s.chat, [prev]: kept },
+          history: {
+            ...s.history,
+            [prev]: { oldestSeq: kept[0]?.seq ?? 0, more: true, loading: false },
+          },
+        }))
       }
     }
 
     if (!id) return
     void get().markRead(id)
     // 아직 안 읽어온 세션이면 저장된 대화를 불러온다 (host 재시작 후에도 기록은 남는다)
-    if (!get().chat[id]) void get().loadHistory(id)
+    const cur = get()
+    if (!cur.chat[id]) void get().loadHistory(id)
+    else if (!cur.history[id]) {
+      /*
+       * chat은 있는데 **커서가 없는** 세션 (도그푸딩 2026-09-09: "위에 대화가 안 불러와져").
+       *
+       * 이벤트가 화면보다 먼저 오면 chat만 생긴다 — 그때 커서가 없어서 '이전 대화
+       * 불러오기'가 아예 안 떴다. 화면에는 최근 몇 줄뿐인데 위로 갈 길이 없는 상태다.
+       *
+       * 커서는 **화면의 맨 위**에 맞춘다. 저장소에서 다시 읽어 갈아 끼우면 그 순간
+       * 스트리밍 중이던 말이나 낙관적으로 그린 첫 프롬프트가 지워질 수 있다 —
+       * 화면을 건드리지 않고 커서만 화면에 맞추는 편이 잃는 것이 없다.
+       * seq 1이 맨 위면 더 위는 없다: 그때는 버튼도 안 뜬다.
+       */
+      const top = cur.chat[id]?.[0]?.seq ?? 0
+      set((s) => ({
+        history: { ...s.history, [id]: { oldestSeq: top, more: top > 1, loading: false } },
+      }))
+    }
     void get().wake(id)
   },
 

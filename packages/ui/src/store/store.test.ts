@@ -108,6 +108,58 @@ describe('resync_required 소비 (U3)', () => {
   })
 })
 
+/**
+ * 위로 거슬러 읽기 (도그푸딩 2026-09-09: "위에 대화가 안 불러와져").
+ *
+ * 화면이 든 대화와 기록 커서는 **함께 움직여야** 한다. 어긋나면 '이전 대화'가 화면과
+ * 안 이어지는 구간을 앞에 붙이거나, 아예 불러올 길이 사라진다.
+ */
+describe('기록 커서', () => {
+  const many = (id: string, n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      sessionId: id, seq: i + 1, role: 'user' as const, kind: 'text' as const,
+      payload: { text: `줄 ${i + 1}` }, ts: i + 1,
+    }))
+
+  it('세션을 떠나며 창을 줄이면 커서도 잘린 자리로 옮긴다', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('h1', sessionInfo('h1'))
+    mock.sessions.set('h2', sessionInfo('h2'))
+    mock.messages.set('h1', many('h1', 120))
+    await useStore.getState().attach(mock)
+
+    await useStore.getState().focusSession('h1')
+    await vi.waitFor(() => expect(useStore.getState().chat['h1']?.length).toBe(100))
+
+    await useStore.getState().focusSession('h2')
+
+    const chat = useStore.getState().chat['h1']!
+    const info = useStore.getState().history['h1']!
+    expect(chat.length).toBe(50)
+    // 커서가 화면 맨 위와 같은 자리다 — 그래야 다음 페이지가 이어 붙는다
+    expect(info.oldestSeq).toBe(chat[0]!.seq)
+    expect(info.more).toBe(true)
+  })
+
+  it('이벤트로만 생긴 대화에도 커서를 세운다 — 없으면 위로 갈 길이 없다', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('h3', sessionInfo('h3'))
+    mock.messages.set('h3', many('h3', 120))
+    await useStore.getState().attach(mock)
+
+    // 화면을 열기 전에 이벤트가 먼저 왔다 — chat만 생기고 커서는 없다
+    mock.emit({ sessionId: 'h3', type: 'message_delta', role: 'assistant', text: '먼저 온 말' } as never)
+    await vi.waitFor(() => expect(useStore.getState().chat['h3']).toBeDefined())
+    expect(useStore.getState().history['h3']).toBeUndefined()
+
+    await useStore.getState().focusSession('h3')
+
+    await vi.waitFor(() => expect(useStore.getState().history['h3']?.more).toBe(true))
+    const chat = useStore.getState().chat['h3']!
+    expect(useStore.getState().history['h3']!.oldestSeq).toBe(chat[0]!.seq)
+  })
+})
+
 describe('재연결 시 세션 목록 병합 (U4)', () => {
   it('끊긴 사이 생기고·이름이 바뀌고·지워진 세션이 화면에 반영된다', async () => {
     const mock = new MockPlatform()
