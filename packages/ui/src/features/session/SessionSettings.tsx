@@ -48,6 +48,16 @@ export function useModels(tool: ToolName, live: boolean): { models: ModelOption[
    */
   useEffect(() => {
     let alive = true
+    /*
+     * **먼저 비운다** (도그푸딩 2026-09-09: "클로드 세션인데 코덱스 모델이 떠 있다").
+     *
+     * 목록은 도구의 어휘다 — 'sonnet'과 'gpt-5.6-sol'은 서로의 사전에 없는 낱말이라,
+     * 다른 도구의 목록을 잠깐이라도 보여주면 화면이 고를 수 없는 것을 권한다. 예전에는
+     * 새 응답이 올 때까지 **옛 도구의 목록이 그대로 남아 있었다**: 코덱스 세션을 보다가
+     * 클로드 세션의 메뉴를 열면 그 사이 코덱스 모델이 서 있었고, claude는 살아 있는
+     * 세션이 있어야 목록을 주므로(깨우는 동안) 그 창이 초 단위로 벌어졌다.
+     */
+    setState({ models: [] })
     void platform.agents
       .models(tool)
       .then((r) => alive && setState({ models: r.models, reason: r.supported ? undefined : r.reason }))

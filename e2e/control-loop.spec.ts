@@ -7197,6 +7197,61 @@ test('업무 만들기: 레일 다이얼로그 → 반장 세션 → 사이드�
 })
 
 /**
+ * 모델 목록은 **도구의 어휘**다 (도그푸딩 2026-09-09: "클로드 세션인데 코덱스 모델이 떠 있다").
+ *
+ * 다른 도구의 목록이 잠깐이라도 남아 있으면 화면이 고를 수 없는 것을 권한다 —
+ * 'sonnet'과 'gpt-5.6-terra'는 같은 자리를 가리키는 두 이름이 아니라 서로의 사전에
+ * 없는 낱말이다. 목록이 오는 사이에는 **비어 있는 게** 맞다.
+ */
+test('세션을 옮기면 옛 도구의 모델 목록이 남지 않는다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', 'claude 세션')
+  const claudeId = await page.evaluate(
+    () => (window as never as { __store: any }).__store.getState().focusedSessionId,
+  )
+
+  // codex 세션을 하나 만들고 그 메뉴를 열어 목록을 채운다
+  await page.getByTestId('project-menu-alpha').click()
+  await page.getByTestId('new-session-alpha').click()
+  await page.getByTestId('tool-option-codex').click()
+  await page.getByTestId('create-session-confirm').click()
+  await expect(page.getByTestId('new-session-dialog')).toBeHidden()
+  await page.getByTestId('settings-open').click()
+  await expect(page.getByTestId('settings-menu').getByTestId('settings-model-gpt-5.6-terra')).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  /*
+   * 목록을 **테스트가 놓아줄 때까지** 붙잡는다. 지연 시간으로 창을 만들면 그 창이
+   * 다른 기다림(이름 바뀌기)에 먹혀서, 고쳐도 안 고쳐도 통과하는 시험이 된다 — 실제로
+   * 처음에 그랬다. 붙잡았다 놓으면 그 창은 시험이 정한다.
+   */
+  await page.evaluate(() => {
+    const w = window as never as { __mock: any; __releaseModels?: () => void }
+    const real = w.__mock.agents.models.bind(w.__mock.agents)
+    w.__mock.agents.models = async (tool: string) => {
+      await new Promise<void>((r) => {
+        w.__releaseModels = r
+      })
+      return real(tool)
+    }
+  })
+
+  await page.evaluate(
+    (id: string) => (window as never as { __store: any }).__store.getState().focusSession(id),
+    claudeId,
+  )
+  // 화면이 그 세션으로 바뀐 뒤에 연다 — 안 그러면 아직 코덱스 세션의 메뉴를 여는 것이다
+  await expect(page.getByTestId('session-name')).toHaveText('claude 세션')
+  await page.getByTestId('settings-open').click()
+  const menu = page.getByTestId('settings-menu')
+  await expect(menu.getByTestId('settings-model-gpt-5.6-terra')).toHaveCount(0)
+
+  // 놓아주면 이 도구의 목록이 선다
+  await page.evaluate(() => (window as never as { __releaseModels?: () => void }).__releaseModels?.())
+  await expect(menu.getByTestId('settings-model-haiku')).toBeVisible()
+})
+
+/**
  * 연결됨은 적지 않고, **끊겼을 때만** 말한다 (사용자 요청 2026-09-09).
  *
  * 정상일 때 자리를 차지하는 상태 표시는 계기판이 아니라 장식이다. 다만 끊김은 조용할 수
