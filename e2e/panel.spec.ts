@@ -92,6 +92,32 @@ test('사용량은 도구마다 도넛 하나 — 화면이 어느 도구인지 
 })
 
 /**
+ * 연결된 에이전트만 도넛을 갖는다 (사용자 요청 2026-09-09).
+ *
+ * 안 쓰는 도구의 빈 고리는 아무것도 말하지 않으면서 계기판의 자리를 쓴다. 판정은
+ * 설치+로그인 — 세션 만들기 창이 쓰는 것과 **같은 판정**이라, 화면 두 곳이 "이 도구를
+ * 쓸 수 있나"에 다르게 답하지 않는다.
+ */
+test('로그인 안 된 도구는 도넛이 없다', async ({ page }) => {
+  await page.goto('/?mock=1')
+  await page.evaluate(() => {
+    const m = (window as never as { __mock: any }).__mock
+    m.detected = [
+      { tool: 'claude', installed: true, loggedIn: true, detail: 'mock 2.1.0' },
+      { tool: 'codex', installed: true, loggedIn: false, detail: 'not logged in' },
+    ]
+  })
+  await expect(page.getByTestId('intro')).toBeVisible()
+  await page.getByTestId('intro-card-claude').click()
+
+  // 상세를 여는 것이 곧 다시 묻는 것이다 (방금 로그아웃했을 수도 있으니 — 세션 창과 같은 규칙)
+  await page.getByTestId('usage-donut-claude').click()
+
+  await expect(page.getByTestId('usage-donut-claude')).toBeVisible()
+  await expect(page.getByTestId('usage-donut-codex')).toHaveCount(0)
+})
+
+/**
  * 모르는 것을 0%로 그리지 않는다.
  *
  * 꽉 찬 회색 고리는 "하나도 안 썼다"로 읽힌다 — 못 읽었다는 사실이 화면에서 사라지는

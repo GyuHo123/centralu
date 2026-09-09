@@ -115,9 +115,14 @@ function Donut({ window: w }: { window: UsageWindow }) {
           />
         </svg>
         <span className={`readout text-[13px] leading-none ${tone}`}>{w.percent}%</span>
-        <span className="text-[10px] text-slate">
+        {/*
+          모델 이름을 **적는다** (사용자 지적 2026-09-09). 예전에는 scope가 있으면 매달린
+          '·'만 찍고 이름은 툴팁에 뒀는데, 그러면 같은 74%짜리 주간 둘이 나란히 서서
+          하나가 무엇의 한도인지 화면에서 안 읽혔다 — "per model이 빠진 것 같다"가 그것이다.
+        */}
+        <span className="max-w-[92px] truncate text-[10px] text-slate" title={w.scope ?? undefined}>
           {w.label}
-          {w.scope && ' ·'}
+          {w.scope ? ` · ${w.scope}` : ''}
         </span>
       </span>
     </Tooltip>

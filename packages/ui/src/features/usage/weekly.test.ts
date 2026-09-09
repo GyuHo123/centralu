@@ -21,10 +21,18 @@ describe('weeklyWindow', () => {
     expect(picked?.id).toBe('secondary')
   })
 
-  it('모델별 주간은 계정 주간을 밀어내지 않는다 — 같은 도넛이 사람마다 다른 뜻이 되면 안 된다', () => {
+  it('주간이 여럿이면 먼저 닿는 벽 — 가장 많이 찬 창을 세운다', () => {
     const picked = weeklyWindow([
-      w({ id: 'weekly_scoped', label: 'Weekly (per model)', scope: 'Opus' }),
-      w({ id: 'weekly_all', label: 'Weekly' }),
+      w({ id: 'weekly_all', label: 'Weekly', percent: 74 }),
+      w({ id: 'weekly_scoped', label: 'Weekly (per model)', scope: 'Opus', percent: 95 }),
+    ])
+    expect(picked?.id).toBe('weekly_scoped')
+  })
+
+  it('계정 주간이 더 찼으면 그쪽 — 규칙은 모델이 아니라 숫자다', () => {
+    const picked = weeklyWindow([
+      w({ id: 'weekly_all', label: 'Weekly', percent: 88 }),
+      w({ id: 'weekly_scoped', label: 'Weekly (per model)', scope: 'Opus', percent: 12 }),
     ])
     expect(picked?.id).toBe('weekly_all')
   })

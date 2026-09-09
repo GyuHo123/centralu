@@ -7197,6 +7197,23 @@ test('업무 만들기: 레일 다이얼로그 → 반장 세션 → 사이드�
 })
 
 /**
+ * 연결됨은 적지 않고, **끊겼을 때만** 말한다 (사용자 요청 2026-09-09).
+ *
+ * 정상일 때 자리를 차지하는 상태 표시는 계기판이 아니라 장식이다. 다만 끊김은 조용할 수
+ * 없다 — 그때는 화면의 나머지가 거짓말이 될 수 있다 (2026-09-07의 오케스트레이터 화면).
+ */
+test('연결됨은 조용하고 끊김은 말한다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await expect(page.getByTestId('connection')).toHaveCount(0)
+
+  await page.evaluate(() => (window as never as { __mock: any }).__mock.setConnectionState('disconnected'))
+  await expect(page.getByTestId('connection')).toContainText('Disconnected')
+
+  await page.evaluate(() => (window as never as { __mock: any }).__mock.setConnectionState('connected'))
+  await expect(page.getByTestId('connection')).toHaveCount(0)
+})
+
+/**
  * 앱을 끄면 그 앱의 세션은 사이드바가 받는다 (사용자 요청 2026-09-09).
  *
  * 규칙은 하나다: 뜻을 준 앱이 집이고, 집이 없으면 사이드바가 받는다. 이게 없으면

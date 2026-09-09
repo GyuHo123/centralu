@@ -523,6 +523,12 @@ export class MockPlatform implements Platform {
   }
   lastInvoke: { appId: string; name: string; args: Record<string, unknown> } | null = null
 
+  /** 도구 감지 결과 — 테스트가 "로그인 안 된 도구"를 만들 수 있게 밖에 둔다 */
+  detected: { tool: 'claude' | 'codex'; installed: boolean; loggedIn: boolean; detail: string }[] = [
+    { tool: 'claude', installed: true, loggedIn: true, detail: 'mock 2.1.0' },
+    { tool: 'codex', installed: true, loggedIn: true, detail: 'mock codex' },
+  ]
+
   /**
    * 테스트가 심는 "남은 프로세스" 목록 — 실물은 ps·lsof로 찾지만 목은 그 자리를 흉내만 낸다
    * (검증 대상은 종료 흐름이지 프로세스 탐지가 아니다. 탐지 규칙은 host 단위 시험이 본다).
@@ -1006,10 +1012,7 @@ export class MockPlatform implements Platform {
       // 실물과 같은 모양: codex만 writer lock이 있다 (UI는 아직 안 읽지만 모양은 실물을 따른다)
       exclusiveWriter: tool === 'codex',
     }),
-    detect: async () => [
-      { tool: 'claude' as const, installed: true, loggedIn: true, detail: 'mock 2.1.0' },
-      { tool: 'codex' as const, installed: true, loggedIn: true, detail: 'mock codex' },
-    ],
+    detect: async () => this.detected,
     subscribe: (handler: (e: NormalizedEvent) => void): Unsubscribe => {
       this.handlers.add(handler)
       return () => this.handlers.delete(handler)

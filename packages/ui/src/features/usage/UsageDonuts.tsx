@@ -26,8 +26,23 @@ export function UsageDonuts() {
   const toggleUsage = useStore((s) => s.toggleUsage)
   const [snap, setSnap] = useState<Partial<Record<ToolName, { usage: UsageSnapshot | null; reason?: string }>>>({})
   const [open, setOpen] = useState<ToolName | null>(null)
+  /**
+   * 도넛이 서는 도구 (사용자 요청 2026-09-09: "연결된 에이전트만 도넛이 뜨는 거야").
+   *
+   * **없는 도구의 한도는 계기판에 자리가 없다** — 안 쓰는 도구의 빈 고리는 아무것도
+   * 말하지 않으면서 눈만 쓴다. 판정은 설치+로그인(detect)이고, 그건 세션 만들기 창이
+   * 쓰는 것과 같은 판정이다: 화면 두 곳이 "이 도구를 쓸 수 있나"에 다르게 답하면 안 된다.
+   *
+   * null은 "아직 안 물어봤다" — 그동안은 아무것도 안 그린다. 첫 답이 오기 전에 도넛을
+   * 세웠다 지우면 바가 깜빡인다.
+   */
+  const [live, setLive] = useState<ToolName[] | null>(null)
 
   const load = useCallback(() => {
+    void platform.agents
+      .detect()
+      .then((tools) => setLive(tools.filter((t) => t.installed && t.loggedIn).map((t) => t.tool)))
+      .catch(() => setLive([]))
     for (const tool of TOOL_NAMES) {
       void platform.agents
         .usage(tool)
@@ -51,9 +66,9 @@ export function UsageDonuts() {
    * 그 도구가 없으면 첫 도넛. 문이 둘이어도 도착하는 곳은 하나다.
    */
   useEffect(() => {
-    if (usageOpen) setOpen((cur) => cur ?? usageTools(useStore.getState())[0] ?? TOOL_NAMES[0] ?? null)
+    if (usageOpen) setOpen((cur) => cur ?? usageTools(useStore.getState())[0] ?? (live ?? [])[0] ?? null)
     else setOpen(null)
-  }, [usageOpen])
+  }, [usageOpen, live])
 
   const show = (tool: ToolName | null) => {
     setOpen(tool)
@@ -75,7 +90,7 @@ export function UsageDonuts() {
 
   return (
     <span className="relative flex items-center gap-1.5" data-testid="usage-donuts">
-      {TOOL_NAMES.map((tool) => (
+      {(live ?? []).map((tool) => (
         <Donut
           key={tool}
           tool={tool}
@@ -140,7 +155,7 @@ function Donut({
         <span className="block">
           <span className="block text-chalk">{TOOL_META[tool].label}</span>
           <span className="readout mt-1 block">
-            {known ? `Weekly ${percent}% used` : 'Weekly usage unknown'}
+            {known ? `${w.label}${w.scope ? ` · ${w.scope}` : ''} — ${percent}% used` : 'Weekly usage unknown'}
           </span>
         </span>
       }
