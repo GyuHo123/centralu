@@ -199,7 +199,6 @@ function Body() {
 function TopBar() {
   const counts = useCounts()
   const toggleInbox = useStore((s) => s.toggleInbox)
-  const connection = useStore((s) => s.connection)
 
   // 왼쪽 위를 창 버튼이 차지하면 그만큼 비운다. 타이틀바를 숨겼기 때문에
   // 이 헤더가 유일한 드래그 손잡이다 —
@@ -303,23 +302,11 @@ function TopBar() {
         */}
         <UpdateLine />
         {/*
-          **연결됨은 적지 않는다** (사용자 요청 2026-09-09).
-          
-          정상일 때 자리를 차지하는 상태 표시는 계기판이 아니라 장식이다 — 이 앱을 쓰는
-          동안 거의 언제나 'Connected'였고, 그 글자가 바뀌는 순간을 사람이 그 자리에서
-          기다리고 있지도 않다. 대신 **끊겼을 때만** 말한다: 그때는 화면의 다른 모든 것이
-          거짓말이 될 수 있으므로 조용할 수 없다 (2026-09-07 오케스트레이터 화면이 정확히
-          그 함정이었다 — 끊긴 채로 멀쩡해 보였다).
-        */}
-        {connection !== 'connected' && (
-          <span className="flex items-center gap-1.5 text-[11px] text-beacon" data-testid="connection">
-            <span className="size-1.5 rounded-full bg-beacon breathe" aria-hidden />
-            {connection === 'connecting' ? 'Connecting' : 'Disconnected'}
-          </span>
-        )}
-        {/*
           사용량은 글자 버튼이 아니라 **도구마다 도넛 하나**다 (사용자 요청 2026-09-09).
           계기판은 물어보기 전에 답이 있어야 하는 자리고, 상세는 그 도넛 아래로 내려온다.
+
+          이 한 자리가 연결 상태도 겸한다: host가 없으면 에이전트에 닿을 방법 자체가 없으므로
+          도넛 대신 'Disconnected'가 선다. 'Connected'는 적지 않는다 — 정상은 조용한 게 맞다.
         */}
         <UsageDonuts />
         {/*

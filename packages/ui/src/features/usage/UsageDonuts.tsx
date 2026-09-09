@@ -24,6 +24,15 @@ export function UsageDonuts() {
   const platform = usePlatform()
   const usageOpen = useStore((s) => s.usageOpen)
   const toggleUsage = useStore((s) => s.toggleUsage)
+  /**
+   * host 연결 (사용자 요청 2026-09-09: "호스트가 안 뜨면 도넛 자리에 Disconnected").
+   *
+   * 에이전트는 host 안에서 산다 — 연결이 없으면 도구를 물어볼 방법 자체가 없다. 그래서
+   * 이 한 자리가 **둘 중 하나**를 말한다: 한도(도넛)이거나, 한도를 물어볼 수 없다는 사실.
+   * 빈 자리로 두면 "도구가 하나도 없다"로 읽히는데, 그건 사실이 아니라 **모르는 것**이다.
+   */
+  const connection = useStore((s) => s.connection)
+  const offline = connection !== 'connected'
   const [snap, setSnap] = useState<Partial<Record<ToolName, { usage: UsageSnapshot | null; reason?: string }>>>({})
   const [open, setOpen] = useState<ToolName | null>(null)
   /**
@@ -39,6 +48,8 @@ export function UsageDonuts() {
   const [live, setLive] = useState<ToolName[] | null>(null)
 
   const load = useCallback(() => {
+    // 끊긴 동안에는 묻지 않는다 — 큐에 쌓였다 30초 뒤에 실패할 뿐이다 (rpc-client의 대기 규칙)
+    if (useStore.getState().connection !== 'connected') return
     void platform.agents
       .detect()
       .then((tools) => setLive(tools.filter((t) => t.installed && t.loggedIn).map((t) => t.tool)))
@@ -59,7 +70,8 @@ export function UsageDonuts() {
     load()
     const t = setInterval(load, 5 * 60_000)
     return () => clearInterval(t)
-  }, [load])
+    // connection: 돌아오는 순간이 다시 물어볼 자리다 (그 사이 로그인했을 수도 있다)
+  }, [load, connection])
 
   /*
    * 팔레트·/usage로 열면 **지금 보고 있는 도구**의 상세가 열린다 (usageTools) — 화면에
@@ -87,6 +99,19 @@ export function UsageDonuts() {
     return () => window.removeEventListener('keydown', onKey, true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+
+  /*
+   * 끊겼으면 도넛 대신 그 사실이 선다. 숨 쉬는 점 하나와 한 단어 — 상단 바에서 가장 밝은
+   * 것이 나를 막고 있는 것이라는 규칙 그대로다.
+   */
+  if (offline) {
+    return (
+      <span className="flex items-center gap-1.5 text-[11px] text-beacon" data-testid="connection">
+        <span className="size-1.5 rounded-full bg-beacon breathe" aria-hidden />
+        {connection === 'connecting' ? 'Connecting' : 'Disconnected'}
+      </span>
+    )
+  }
 
   return (
     <span className="relative flex items-center gap-1.5" data-testid="usage-donuts">

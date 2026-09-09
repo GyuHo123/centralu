@@ -7202,15 +7202,23 @@ test('업무 만들기: 레일 다이얼로그 → 반장 세션 → 사이드�
  * 정상일 때 자리를 차지하는 상태 표시는 계기판이 아니라 장식이다. 다만 끊김은 조용할 수
  * 없다 — 그때는 화면의 나머지가 거짓말이 될 수 있다 (2026-09-07의 오케스트레이터 화면).
  */
-test('연결됨은 조용하고 끊김은 말한다', async ({ page }) => {
+test('연결됨은 조용하고, 끊기면 도넛 자리에 그 사실이 선다', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await expect(page.getByTestId('connection')).toHaveCount(0)
+  await expect(page.getByTestId('usage-donuts')).toBeVisible()
 
   await page.evaluate(() => (window as never as { __mock: any }).__mock.setConnectionState('disconnected'))
+
+  /*
+   * host가 없으면 에이전트에 닿을 방법 자체가 없다 — 도넛을 빈 채로 두면 "도구가 하나도
+   * 없다"로 읽히는데 그건 사실이 아니라 **모르는 것**이다. 같은 자리가 이유를 말한다.
+   */
   await expect(page.getByTestId('connection')).toContainText('Disconnected')
+  await expect(page.getByTestId('usage-donuts')).toHaveCount(0)
 
   await page.evaluate(() => (window as never as { __mock: any }).__mock.setConnectionState('connected'))
   await expect(page.getByTestId('connection')).toHaveCount(0)
+  await expect(page.getByTestId('usage-donuts')).toBeVisible()
 })
 
 /**
