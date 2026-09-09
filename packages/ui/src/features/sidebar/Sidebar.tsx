@@ -103,14 +103,19 @@ function SessionRow({
  * 때마다 목록 전체가 그만큼 밀린다 — 끌고 다니면 딸깍딸깍 튀는 그 느낌이다
  * (도그푸딩 지적). 게다가 손이 노리는 지점이 계속 움직이니 놓기도 어려워진다.
  *
- * inset 그림자는 **박스 크기를 건드리지 않는다.** 같은 선을 그리면서 레이아웃은
- * 가만히 있다. 새 DOM도 필요 없다.
+ * **선은 줄의 안이 아니라 경계에 선다** (도그푸딩 2026-09-10: "같은 자리인데 선이 살짝
+ * 올라갔다 내려간다"). 한 경계는 두 줄이 나눠 갖는다 — 위 줄에게는 '아래쪽', 아래 줄에게는
+ * '위쪽'이다. inset 그림자는 그것을 **각자의 안쪽**에 그려서, 같은 자리를 가리키는 두 표시가
+ * 서로 2~3px 어긋난 자리에 떴다. 손이 경계를 오갈 때마다 선이 그만큼 튀어 보인 이유다.
+ *
+ * 절대 배치한 가짜 요소(after)를 경계 위(-1px)에 놓으면 두 표현이 **같은 픽셀**에 겹친다.
+ * 박스 크기를 안 건드리는 성질은 그대로다 — absolute는 레이아웃에 자리를 요구하지 않는다.
  */
+const DROP_LINE = 'after:pointer-events-none after:absolute after:inset-x-0 after:z-10 after:h-0.5 after:bg-ash after:content-[""]'
+
 function dropLine(edge: 'top' | 'bottom' | null): string {
   if (!edge) return ''
-  return edge === 'top'
-    ? 'shadow-[inset_0_2px_0_0_var(--color-ash)]'
-    : 'shadow-[inset_0_-2px_0_0_var(--color-ash)]'
+  return `${DROP_LINE} ${edge === 'top' ? 'after:-top-px' : 'after:-bottom-px'}`
 }
 
 /** 관찰 레인 — 밀도 높게, 공간은 조금만 (docs/architecture.md 설계 원칙 1) */
@@ -483,7 +488,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
 
   return (
     <section
-      className={`border-b border-edge/70 py-2.5 ${dropLine(drop.edge)}`}
+      className={`relative border-b border-edge/70 py-2.5 ${dropLine(drop.edge)}`}
       data-testid={`project-${project.name}`}
       {...drop.handlers}
     >

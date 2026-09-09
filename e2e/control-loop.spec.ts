@@ -4188,6 +4188,66 @@ test('프로젝트 표식은 호버하면 무엇인지 알려준다', async ({ p
 })
 
 /** 사이드바 순서는 사람이 정한다 — 끌어서 옮기고, 다시 켜도 그대로여야 한다 */
+/**
+ * 놓일 자리 선은 **경계에 선다** (도그푸딩 2026-09-10: "같은 자리인데 선이 살짝 올라갔다
+ * 내려간다").
+ *
+ * 한 경계는 두 줄이 나눠 갖는다 — 위 줄에겐 '아래쪽', 아래 줄에겐 '위쪽'. 그 둘이 각자의
+ * 안쪽에 그려지면 같은 뜻인데 몇 px 어긋난 자리에 뜬다. 여기서 재는 것은 그 두 표현이
+ * **같은 픽셀**을 가리키느냐다.
+ */
+test('앞 줄의 아래 선과 뒤 줄의 위 선은 같은 자리에 뜬다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', 'first')
+  await newSession(page, 'alpha', 'second')
+  const ids = await page.evaluate(() =>
+    Object.keys((window as never as { __store: any }).__store.getState().sessions),
+  )
+
+  /** 그 줄에 dragover를 흘리고, 그때 생기는 선의 화면 y를 잰다 */
+  const lineY = async (id: string, half: 'top' | 'bottom') =>
+    page.evaluate(
+      async ({ sel, half }: { sel: string; half: 'top' | 'bottom' }) => {
+        // 선을 그리는 것은 줄(li)이다 — testid는 그 안의 버튼에 있다
+        const el = (document.querySelector(sel) as HTMLElement).closest('li') as HTMLElement
+        const r = el.getBoundingClientRect()
+        const dt = new DataTransfer()
+        dt.setData('application/x-cc-session', 'dragged')
+        el.dispatchEvent(
+          new DragEvent('dragover', {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: dt,
+            clientY: half === 'top' ? r.top + 2 : r.bottom - 2,
+          }),
+        )
+        // 선은 React 상태로 붙는다 — 한 프레임 뒤에 재야 실제로 그려진 자리를 본다
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+        const cs = getComputedStyle(el, '::after')
+        if (cs.content !== 'none') {
+          const h = parseFloat(cs.height) || 0
+          // 위쪽 선이면 top이 숫자로, 아래쪽 선이면 bottom이 숫자로 온다
+          return cs.top !== 'auto' && cs.top !== ''
+            ? r.top + parseFloat(cs.top)
+            : r.bottom - parseFloat(cs.bottom) - h
+        }
+        /*
+         * 선을 어떻게 그리든 **자리**를 잰다 — 그림자로 그리던 시절도 같은 잣대로 재야
+         * "고치면 통과, 되돌리면 실패"가 성립한다 (구현이 아니라 사실을 보는 시험).
+         */
+        const inset = /(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px\s+\d/.exec(getComputedStyle(el).boxShadow)
+        if (!inset) return Number.NaN
+        const dy = parseFloat(inset[2]!)
+        return dy > 0 ? r.top : r.bottom + dy
+      },
+      { sel: `[data-testid="session-row-${id}"]`, half },
+    )
+
+  const below = await lineY(ids[0]!, 'bottom')
+  const above = await lineY(ids[1]!, 'top')
+  expect(Math.abs(below - above)).toBeLessThanOrEqual(1)
+})
+
 test('세션을 끌어서 순서를 바꾼다', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await newSession(page, 'alpha', 'first')
