@@ -2,6 +2,7 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import { createServer, type Server } from 'node:http'
 import {
   PROTOCOL_VERSION,
+  ProtocolErrorCode,
   type NormalizedEvent,
   type ProtocolError,
   parseClientFrame,
@@ -158,9 +159,9 @@ export class HostServer {
         const result = await this.opts.onRpc(frame.data.method, frame.data.params)
         ws.send(JSON.stringify({ kind: 'res', id: frame.data.id, ok: true, result }))
       } catch (err) {
-        const e = err as Error & { code?: ProtocolError['code'] }
+        const e = err as Error & { code?: unknown }
         this.sendError(ws, frame.data.id, {
-          code: e.code ?? 'internal',
+          code: errorCode(e.code),
           message: e.message ?? 'Unknown error',
           retryable: false,
         })
@@ -175,4 +176,22 @@ export class HostServer {
     if (ws.readyState !== ws.OPEN) return
     ws.send(JSON.stringify({ kind: 'res', id: id ?? '0', ok: false, error }))
   }
+}
+
+
+/**
+ * 프로토콜이 아는 코드만 나간다 (도그푸딩 2026-09-10).
+ *
+ * 여기 던져지는 실패의 대부분은 **Node의 실패**다 — `fs.stat`은 `code: 'ENOENT'`를,
+ * `spawn`은 `'EACCES'`를 달고 온다. 그 글자를 그대로 봉투에 실으면 프로토콜 enum에 없는
+ * 값이라 **클라이언트가 프레임을 통째로 버린다**: 실패가 실패로 도착하는 게 아니라
+ * 아예 도착하지 않고, 그 호출을 기다리던 화면은 30초 타임아웃까지 '불러오는 중'에
+ * 멈춰 있었다 (파일 링크가 빈 화면으로 보인 이유가 이것이다).
+ *
+ * 그래서 모르는 코드는 `internal`로 갈아 끼운다. **설명은 message가 그대로 나른다** —
+ * 사람이 읽는 문장에서 'ENOENT'는 사라지지 않는다.
+ */
+function errorCode(raw: unknown): ProtocolError['code'] {
+  const known = ProtocolErrorCode.safeParse(raw)
+  return known.success ? known.data : 'internal'
 }

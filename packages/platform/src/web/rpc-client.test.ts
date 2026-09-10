@@ -65,6 +65,49 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+/**
+ * 읽을 수 없는 응답도 응답이다 (도그푸딩 2026-09-10).
+ *
+ * host가 프로토콜에 없는 에러 코드를 실어 보내자 프레임이 검사에서 떨어져 조용히
+ * 버려졌고, 부른 쪽은 30초 타임아웃까지 답을 기다렸다 — 화면은 그동안 '불러오는 중'.
+ */
+describe('RpcClient 읽을 수 없는 응답 (도그푸딩)', () => {
+  it('검사에 떨어진 실패 응답도 그 호출을 끝낸다 — 설명을 그대로 들고', async () => {
+    const rpc = makeClient()
+    rpc.connect()
+    const ws = FakeWebSocket.last
+    ws.open()
+
+    const call = rpc.call('fs.readFile', { projectId: 'p', path: 'item.yml' })
+    ws.receive({
+      kind: 'res',
+      id: lastRpcId(ws),
+      ok: false,
+      // 'ENOENT'는 ProtocolErrorCode에 없다 — 프레임 전체가 검사에서 떨어진다
+      error: { code: 'ENOENT', message: 'ENOENT: no such file or directory', retryable: false },
+    })
+
+    await expect(call).rejects.toThrow('ENOENT: no such file or directory')
+    rpc.close()
+  })
+
+  it('기다리는 호출이 아닌 이상한 프레임은 여전히 무시한다', async () => {
+    const rpc = makeClient()
+    rpc.connect()
+    const ws = FakeWebSocket.last
+    ws.open()
+
+    const call = rpc.call('sessions.list', {})
+    ws.receive({ kind: 'res', id: 'nobody-waits-for-this', ok: false, error: { code: 'ENOENT', message: 'x' } })
+    ws.receive({ kind: 'wat', hello: 1 })
+    // 우리 호출은 멀쩡히 살아 있다 — 그리고 진짜 답이 오면 그때 끝난다
+    ws.receive({ kind: 'res', id: lastRpcId(ws), ok: true, result: { sessions: [] } })
+
+    await expect(call).resolves.toMatchObject({ sessions: [] })
+    rpc.close()
+  })
+})
+
 describe('RpcClient 끊김 시 in-flight 거절 (U1)', () => {
   it('보내고 답을 못 받은 RPC는 연결이 끊기면 retryable 에러로 거절된다', async () => {
     const rpc = makeClient()

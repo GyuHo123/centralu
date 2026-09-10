@@ -162,7 +162,7 @@ export class RpcClient {
       return
     }
     const parsed = parseServerFrame(json)
-    if (!parsed.success) return // 모르는 프레임은 무시 (전방 호환)
+    if (!parsed.success) return this.salvage(json) // 모르는 프레임은 무시 (전방 호환)
     const frame = parsed.data
 
     if ('kind' in frame && frame.kind === 'hello_ok') {
@@ -189,6 +189,31 @@ export class RpcClient {
       if (frame.ok) p.resolve(frame.result)
       else p.reject(toError(frame.error))
     }
+  }
+
+  /**
+   * 읽을 수 없는 프레임이 **기다리던 응답**이면 그래도 끝을 낸다 (도그푸딩 2026-09-10).
+   *
+   * 모르는 프레임을 무시하는 규칙은 전방 호환을 위한 것이고 거기까진 맞다. 그런데 그
+   * 그물에 host의 **실패 응답**이 걸린 적이 있다: 봉투가 프로토콜에 없는 에러 코드
+   * (`ENOENT`)를 달고 와 검사에서 떨어졌고, 프레임은 조용히 버려졌다. 부른 쪽에서 보면
+   * 실패가 온 것이 아니라 **아무것도 안 온 것**이라, 그 화면은 30초 타임아웃까지
+   * '불러오는 중'으로 서 있었다 (파일 링크가 빈 화면이 된 이유).
+   *
+   * host는 이제 아는 코드만 보낸다. 그래도 이 그물을 남긴다 — 버전이 어긋난 host,
+   * 프록시가 건드린 봉투처럼 **읽을 수 없는 응답은 앞으로도 온다.** 그때 화면이
+   * 멈추는 것보다 "못 읽었다"고 지금 말하는 편이 언제나 낫다.
+   *
+   * 성공 응답을 살려 쓰지는 않는다 — 검사에 떨어진 값을 결과인 척 넘기면 그 거짓말은
+   * 화면 어딘가에서 다른 모습으로 터진다. 끝내되, 사실대로 끝낸다.
+   */
+  private salvage(json: unknown): void {
+    const f = json as { kind?: unknown; id?: unknown; error?: { message?: unknown } }
+    if (f?.kind !== 'res' || typeof f.id !== 'string') return
+    const p = this.take(f.id)
+    if (!p) return
+    const message = typeof f.error?.message === 'string' ? f.error.message : 'Malformed response from the host'
+    p.reject(Object.assign(new Error(message), { code: 'internal', retryable: false }))
   }
 
   /** pending에서 하나를 꺼낸다 — 타이머·큐 정리까지가 '꺼내기'다 (안 그러면 유령 타이머가 남는다) */

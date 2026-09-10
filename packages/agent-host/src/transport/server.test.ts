@@ -103,6 +103,27 @@ describe('RPC 왕복', () => {
     })
     c.ws.close()
   })
+
+  /**
+   * 여기 오는 실패의 대부분은 Node의 실패다 — `fs.stat`은 `ENOENT`를 달고 온다.
+   * 그 글자를 그대로 실으면 봉투가 프로토콜 밖의 값을 갖게 되고, 클라이언트는 프레임을
+   * 통째로 버린다: 실패가 **도착하지 않는다** (도그푸딩 2026-09-10 — 파일 링크가 빈 화면).
+   */
+  it('프로토콜이 모르는 에러 코드는 internal로 나가고, 설명은 그대로 실린다', async () => {
+    const { port } = await start(async () => {
+      throw Object.assign(new Error("ENOENT: no such file or directory, stat '/p/item.yml'"), { code: 'ENOENT' })
+    })
+    const c = connect(port)
+    await c.open()
+    c.send({ kind: 'hello', token: TOKEN, protocolVersion: PROTOCOL_VERSION })
+    c.send({ kind: 'rpc', id: 'r1', method: 'fs.readFile', params: {} })
+    await c.wait(() => c.frames.some((f) => f.kind === 'res'))
+    expect(c.frames.find((f) => f.kind === 'res')).toMatchObject({
+      ok: false,
+      error: { code: 'internal', message: "ENOENT: no such file or directory, stat '/p/item.yml'" },
+    })
+    c.ws.close()
+  })
 })
 
 describe('재연결 복원 (docs/protocol.md §1)', () => {
