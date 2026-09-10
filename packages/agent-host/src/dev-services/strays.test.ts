@@ -49,6 +49,41 @@ describe('pickStrays', () => {
   it('cwd를 못 읽은 프로세스는 지어내지 않는다', () => {
     expect(pickStrays(rows, new Map(), roots, 900)).toEqual([])
   })
+
+  it('고아가 낳은 자식은 함께 둔다 — 한 화면에서 그 나무를 다 고를 수 있어야 한다', () => {
+    // 200은 고아(100)의 자식이다. 사슬이 후보만 지나 init에 닿으므로 주인이 없다
+    expect(pickStrays(rows, cwds, roots, 900).map((s) => s.pid)).toContain(200)
+  })
+
+  /**
+   * 남의 앱이 **지금 쓰고 있는** 프로세스 (사용자 지적 2026-09-10).
+   *
+   * VS Code의 확장들이 그대로 걸렸다: 워크스페이스가 우리 프로젝트라 cwd가 맞고, 파이프로
+   * 떠서 tty도 없다. 실측하면 이들의 부모는 살아 있는 확장 호스트(cwd `/`)다 — 고아가
+   * 아니다. 규칙 1~3만으로는 구별이 안 돼 종료할 때 Claude 확장이 SIGTERM으로 죽었다.
+   */
+  it('살아 있는 남의 앱이 들고 있는 프로세스는 목록에 없다 (VS Code 확장)', () => {
+    const vscode = parsePsRows(
+      [
+        '  700     1 ??       Code Helper (Plugin)', // 확장 호스트 — 살아 있고, 우리 폴더 밖(cwd /)
+        '  701   700 ??       claude --output-format stream-json', // 그 확장이 띄운 것
+        '  702   700 ??       node languageServer.js',
+        '  800     1 ??       node dev-server.js', // 진짜 고아 — 이건 남는다
+      ].join('\n'),
+    )
+    const cwd = new Map([
+      [700, '/'],
+      [701, '/work/proj'],
+      [702, '/work/proj'],
+      [800, '/work/proj'],
+    ])
+    expect(pickStrays(vscode, cwd, roots, 900).map((s) => s.pid)).toEqual([800])
+  })
+
+  it('부모를 우리 계정에서 못 찾으면 남의 것으로 본다 — 모를 때는 쏘지 않는다', () => {
+    const rowsUnknownParent = parsePsRows('  400  399 ??       node something.js')
+    expect(pickStrays(rowsUnknownParent, new Map([[400, '/work/proj']]), roots, 900)).toEqual([])
+  })
 })
 
 describe('insideAny', () => {

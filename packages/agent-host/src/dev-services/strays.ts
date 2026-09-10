@@ -18,7 +18,7 @@ const exec = promisify(execFile)
  * 그래서 **죽이는 대신 먼저 보여준다.** 무엇을 죽일지는 사람이 안다 — 같은 폴더에서
  * 사람이 직접 띄운 서버를 앱이 말없이 죽이면, 고아를 없애려다 남의 일을 끊는다.
  *
- * 고르는 규칙 셋 (셋 다 만족해야 목록에 든다):
+ * 고르는 규칙 넷 (넷 다 만족해야 목록에 든다):
  *
  *  1. **cwd가 우리 폴더 안이다** — 프로젝트 디렉토리이거나 워크트리 디렉토리.
  *  2. **제어 터미널이 없다** (tty가 `??`). 이게 사람이 자기 터미널에서 띄운 것과 가르는
@@ -26,6 +26,14 @@ const exec = promisify(execFile)
  *     사람의 셸과 그 셸에서 돌리는 것들이 목록에 섞이면 이 기능은 못 쓴다.
  *  3. **우리 자손이 아니다** — host의 자손은 종료 절차가 이미 트리째 정리한다. 여기
  *     싣는 것은 그 정리가 닿지 않는 것들뿐이다.
+ *  4. **살아 있는 주인이 없다** (사용자 지적 2026-09-10). 부모 사슬을 타고 올라가 init(1)에
+ *     닿아야 한다. VS Code의 Claude 확장이 이 규칙 없이 목록에 들었다 — 워크스페이스가
+ *     우리 프로젝트 폴더라 cwd가 맞고, 파이프로 떠서 tty도 없다. 규칙 1~3만으로는
+ *     **남의 앱이 지금 쓰고 있는 프로세스와 주인 없는 고아가 구별되지 않는다.**
+ *     실제로 종료할 때 그 확장이 SIGTERM(143)을 맞고 죽었다.
+ *
+ *     사슬 중간이 전부 후보(같은 폴더·터미널 없음)면 그건 고아가 낳은 자식들이라 함께
+ *     둔다 — `npm run dev`(고아)가 띄운 node까지 한 화면에서 고를 수 있어야 한다.
  */
 
 export type StrayProcess = {
@@ -82,7 +90,7 @@ export function insideAny(cwd: string, roots: readonly string[]): string | null 
   return null
 }
 
-/** 규칙 셋을 적용해 목록을 만든다 (순수 — 시험은 여기까지만 본다) */
+/** 규칙 넷을 적용해 목록을 만든다 (순수 — 시험은 여기까지만 본다) */
 export function pickStrays(
   rows: readonly PsRow[],
   cwdOf: ReadonlyMap<number, string>,
@@ -102,13 +110,41 @@ export function pickStrays(
     }
   }
 
-  const out: StrayProcess[] = []
+  // 규칙 1~3을 통과한 것들. 규칙 4(주인 없음)는 이 집합을 알아야 판정할 수 있다
+  const candidates = new Map<number, string>()
   for (const r of rows) {
     if (r.pid <= 1 || ours.has(r.pid)) continue
     if (!noTty(r.tty)) continue
     const cwd = cwdOf.get(r.pid)
     if (!cwd || !insideAny(cwd, roots)) continue
-    out.push({ pid: r.pid, command: r.command, cwd })
+    candidates.set(r.pid, cwd)
+  }
+
+  const byPid = new Map(rows.map((r) => [r.pid, r]))
+  /**
+   * 이 프로세스를 **아직 들고 있는 앱이 있는가**를 부모 사슬로 묻는다.
+   *
+   * init(1)까지 후보만 지나 올라가면 주인이 없다 — 우리가 치워도 되는 고아다.
+   * 중간에 후보가 아닌 살아 있는 프로세스가 있으면 그건 그 앱의 것이다 (VS Code의
+   * 확장 호스트가 정확히 그 자리에 있다). 사슬이 우리 계정 밖으로 나가 부모를 못 찾는
+   * 경우도 남의 것으로 본다 — 모를 때 쏘지 않는 쪽이 이 기능의 규칙이다.
+   */
+  const unowned = (pid: number): boolean => {
+    const seen = new Set<number>()
+    let cur = byPid.get(pid)
+    while (cur && !seen.has(cur.pid)) {
+      seen.add(cur.pid)
+      if (cur.ppid <= 1) return true
+      if (!candidates.has(cur.ppid)) return false
+      cur = byPid.get(cur.ppid)
+    }
+    return false
+  }
+
+  const out: StrayProcess[] = []
+  for (const [pid, cwd] of candidates) {
+    if (!unowned(pid)) continue
+    out.push({ pid, command: byPid.get(pid)!.command, cwd })
   }
   return out.sort((a, b) => a.pid - b.pid)
 }
