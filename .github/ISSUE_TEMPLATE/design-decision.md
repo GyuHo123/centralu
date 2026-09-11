@@ -1,6 +1,6 @@
 ---
 name: Design decision
-about: A fork in the road, or a feature whose shape is not obvious yet
+about: Two ways to build something, and we should pick before the code exists
 title: ''
 labels: ''
 ---
@@ -30,10 +30,9 @@ What it costs:
 <!--
   Two is usually enough. If there are more, they are often the same two with a knob.
 
-  A new feature belongs here too, whenever the interesting part is *which shape* it
-  takes. If there is genuinely only one shape worth considering, delete this section
-  and say what the thing should do instead — an invented alternative is worse than
-  no alternative.
+  If there are no options yet — a thing you wish existed, with no shape attached —
+  that is the Idea form, not this one. Come here when there is something to weigh.
+  An invented alternative is worse than no alternative.
 -->
 
 ## What follows from it
