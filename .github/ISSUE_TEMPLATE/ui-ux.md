@@ -1,6 +1,6 @@
 ---
-name: Design and usability
-about: It works, and it still reads wrong or is awkward to use
+name: UI / UX
+about: It works, and it still reads wrong or costs more moves than it should
 title: ''
 labels: ''
 ---
