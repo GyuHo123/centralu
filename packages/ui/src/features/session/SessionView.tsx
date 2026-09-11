@@ -354,16 +354,30 @@ export function SessionPane({
                * 칸은 rounded-lg로 잘리는데 카드 아래가 각지면 그 곡선에 잘려 테두리가
                * 뾰족하게 끊긴다. 같은 곡선을 그리면 잘릴 것이 없다.
                */
-              `absolute inset-x-0 bottom-0 z-20 rounded-t-xl rounded-b-lg border px-1 pt-1 shadow-[0_-12px_28px_-12px_rgb(0_0_0/0.9)] transition-[translate,background-color,border-color] duration-300 ease-out motion-reduce:transition-none ${
+              `absolute inset-x-0 bottom-0 z-20 rounded-t-xl rounded-b-[7px] border bg-void px-1 pt-1 transition-[translate,background-color,border-color,box-shadow] duration-300 ease-out motion-reduce:transition-none ${
                 composerUp
-                  ? 'translate-y-0 border-edge bg-pit'
-                  : /*
-                     * 내려가 있을 때는 **더 밝게** 선다 (사용자 지적 2026-09-10: "잘 안 보이는데").
-                     * pit(#0c0c0c)은 칸 바닥(void #090909)과 3의 차이라 카드가 아니라 그림자였다.
-                     * 쉬는 동안만 panel+graphite로 뜬 표면이 되고, 떠오르면 원래 색으로 돌아간다 —
-                     * 밝은 띠는 "여기 뭔가 있다"는 신호일 뿐, 펼쳐진 입력창의 배경이어선 안 된다.
+                  ? /*
+                     * 그림자는 **떠 있을 때만** 진다 (사용자 지적 2026-09-10).
+                     *
+                     * 쉬는 카드에도 짙은 그림자를 드리웠더니 칸 아랫단에 얼룩이 생겼고,
+                     * 그 얼룩 때문에 칸의 테두리가 죽어 보였다. 그림자의 일은 하나뿐이다:
+                     * **덮고 있는 글과 카드를 떼어 놓는 것.** 아무것도 안 덮고 있을 때
+                     * 그림자는 정보가 아니라 때다.
                      */
-                    'translate-y-[calc(100%_-_26px)] border-graphite bg-panel'
+                    'translate-y-0 border-edge shadow-[0_-10px_24px_-14px_rgb(0_0_0/0.75)]'
+                  : /*
+                     * **바탕은 칸 바닥과 같은 색이고, 신호는 테두리가 낸다.**
+                     *
+                     * 두 번 틀렸다. 처음엔 pit(#0c0c0c)이라 안 보였고("잘 안 보이는데"),
+                     * 다음엔 panel로 밝혔더니 칸 밑이 뚫린 것처럼 보였다. 세션 칸 안에서는
+                     * panel이 #1a1a1a인데 그리드 바닥(deck)이 #1c1c1c다 — 칸 아랫단이 **칸
+                     * 사이 틈과 같은 색**이 되어, 바닥에 구멍이 난 것으로 읽힌 것이다.
+                     *
+                     * 그래서 채움은 바닥(void = 칸 안에서 #121212) 그대로 두고, 쉬는 동안만
+                     * 테두리를 graphite(#2a2a2a)로 올린다. 밝은 곡선 하나 + 위로 드리운
+                     * 그림자가 "여기 카드가 있다"를 말하고, 칸의 바닥은 계속 칸의 바닥이다.
+                     */
+                    'translate-y-[calc(100%_-_26px)] border-graphite'
               }`
             : undefined
         }
@@ -713,7 +727,17 @@ const Composer = memo(function Composer({
         </ul>
       )}
       <div
-        className={`relative flex items-end gap-2 rounded border bg-panel px-3 py-2 transition-colors focus-within:border-graphite ${
+        /*
+         * 입력칸은 **선으로** 있다 — 채우지 않는다 (사용자 지적 2026-09-10: "배경색이 밝아서").
+         *
+         * panel로 채우고 있었는데, 세션 칸 안에서 그 값은 #1a1a1a다 (index.css의 칸 안 재정의).
+         * 칸 바닥이 #121212이므로 가만히 있는 입력칸이 대화보다 밝았다 — 이 화면에서 밝기는
+         * 긴급도를 뜻하는데, 아무 일도 없는 빈 칸이 가장 밝은 면이었던 셈이다.
+         *
+         * 테두리 한 줄이면 자리는 충분히 말해진다. 포커스가 오면 그 줄이 graphite로 밝아지고,
+         * 파일을 끌어오면 ash로 한 번 더 밝아진다 — **밝아지는 것은 지금 일어나는 일뿐이다.**
+         */
+        className={`relative flex items-end gap-2 rounded border px-3 py-2 transition-colors focus-within:border-graphite ${
           dragging ? 'border-ash' : 'border-edge'
         }`}
         onDragEnter={(e) => {
