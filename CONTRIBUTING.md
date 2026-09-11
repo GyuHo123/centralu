@@ -12,6 +12,15 @@ after the code is written that it went the wrong way costs us both.
 When reporting a bug, attach `~/.centralu/host.log`. The startup banner has the build
 commit in it, so which build you were on is never in question.
 
+There are templates for both kinds of issue — a bug, and a decision that needs settling
+before code exists. Most issues here turn out to be the second kind. Neither has to fit:
+the blank option stays open, because a half-formed observation is still worth writing down.
+
+The pull request template has one field that is easy to skip and worth filling in anyway:
+**Not exercised.** Say which surfaces your change touches that you did not actually run —
+the packaged `.app`, another platform, a live model session. A reviewer reads that first,
+because it is the only part of a PR that says where to go looking themselves.
+
 ## Getting it running
 
 ```bash
