@@ -354,7 +354,7 @@ export function SessionPane({
                * 칸은 rounded-lg로 잘리는데 카드 아래가 각지면 그 곡선에 잘려 테두리가
                * 뾰족하게 끊긴다. 같은 곡선을 그리면 잘릴 것이 없다.
                */
-              `absolute inset-x-0 bottom-0 z-20 rounded-t-xl rounded-b-[7px] border bg-void px-1 pt-1 transition-[translate,background-color,border-color,box-shadow] duration-300 ease-out motion-reduce:transition-none ${
+              `absolute inset-x-0 bottom-0 z-20 rounded-t-xl rounded-b-[7px] border border-edge bg-void px-1 pt-1 transition-[translate,box-shadow] duration-300 ease-out motion-reduce:transition-none ${
                 composerUp
                   ? /*
                      * 그림자는 **떠 있을 때만** 진다 (사용자 지적 2026-09-10).
@@ -364,20 +364,22 @@ export function SessionPane({
                      * **덮고 있는 글과 카드를 떼어 놓는 것.** 아무것도 안 덮고 있을 때
                      * 그림자는 정보가 아니라 때다.
                      */
-                    'translate-y-0 border-edge shadow-[0_-10px_24px_-14px_rgb(0_0_0/0.75)]'
+                    'translate-y-0 shadow-[0_-10px_24px_-14px_rgb(0_0_0/0.75)]'
                   : /*
-                     * **바탕은 칸 바닥과 같은 색이고, 신호는 테두리가 낸다.**
+                     * **바탕은 칸 바닥과 같은 색이고, 신호는 곡선이 낸다.**
                      *
                      * 두 번 틀렸다. 처음엔 pit(#0c0c0c)이라 안 보였고("잘 안 보이는데"),
                      * 다음엔 panel로 밝혔더니 칸 밑이 뚫린 것처럼 보였다. 세션 칸 안에서는
                      * panel이 #1a1a1a인데 그리드 바닥(deck)이 #1c1c1c다 — 칸 아랫단이 **칸
                      * 사이 틈과 같은 색**이 되어, 바닥에 구멍이 난 것으로 읽힌 것이다.
                      *
-                     * 그래서 채움은 바닥(void = 칸 안에서 #121212) 그대로 두고, 쉬는 동안만
-                     * 테두리를 graphite(#2a2a2a)로 올린다. 밝은 곡선 하나 + 위로 드리운
-                     * 그림자가 "여기 카드가 있다"를 말하고, 칸의 바닥은 계속 칸의 바닥이다.
+                     * 세 번째로 틀린 건 테두리였다. 쉬는 동안만 graphite(#2a2a2a)로 올렸더니
+                     * 이번엔 **칸의 테두리(edge)보다 밝아서** 그릇보다 안에 든 것이 먼저
+                     * 눈에 들어왔다 (사용자 지적 2026-09-11). 이제 둘은 맞바뀌었다: 칸이
+                     * graphite, 카드는 두 상태 모두 edge다. 카드가 거기 있다는 말은 밝기가
+                     * 아니라 **모양**이 한다 — 칸의 각진 아랫단 위에 얹힌 둥근 머리.
                      */
-                    'translate-y-[calc(100%_-_26px)] border-graphite'
+                    'translate-y-[calc(100%_-_26px)]'
               }`
             : undefined
         }

@@ -235,7 +235,13 @@ export function GridView() {
                 표시 자체가 필요 없다는 판단이 왔다 — 어디에 타이핑 중인지는 커서와
                 입력창의 포커스 윤곽이 이미 말한다. 응답 중(cc-orbit-ring)만 남는다.
               */
-              className={`relative flex min-h-0 flex-col overflow-hidden rounded-lg border border-edge bg-void transition-opacity ${
+              /*
+                칸의 테두리가 칸 안의 어떤 선보다 밝다 (사용자 지적 2026-09-11).
+                전에는 칸이 edge, 접힌 입력 카드가 graphite라 **안에 든 것이 그릇보다**
+                밝았고, 눈이 칸의 경계가 아니라 카드의 곡선에 먼저 갔다. 둘을 맞바꾼다 —
+                칸을 graphite로 올리고 카드를 edge로 내린다.
+              */
+              className={`relative flex min-h-0 flex-col overflow-hidden rounded-lg border border-graphite bg-void transition-opacity ${
                 sessions[id]?.state === 'working' ? 'cc-orbit-ring' : ''
               } ${dragging === id ? 'opacity-40' : ''}`}
               data-focused={focusedSessionId === id || undefined}
