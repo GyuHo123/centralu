@@ -1,6 +1,6 @@
 ---
 name: Design decision
-about: A fork in the road that should be settled before the code is written
+about: A fork in the road, or a feature whose shape is not obvious yet
 title: ''
 labels: ''
 ---
@@ -27,7 +27,14 @@ What it costs:
 What it buys:
 What it costs:
 
-<!-- Two is usually enough. If there are more, they are often the same two with a knob. -->
+<!--
+  Two is usually enough. If there are more, they are often the same two with a knob.
+
+  A new feature belongs here too, whenever the interesting part is *which shape* it
+  takes. If there is genuinely only one shape worth considering, delete this section
+  and say what the thing should do instead — an invented alternative is worse than
+  no alternative.
+-->
 
 ## What follows from it
 
