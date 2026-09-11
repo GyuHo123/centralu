@@ -5,38 +5,15 @@ import type { ApprovalDetail, ApprovalScope } from '@cc/protocol'
  * 정보가 부족한 요청만 "확인 필요"로 표시한다.
  */
 
-export type BannerPolicy = {
-  /** 도구 종류별 배너 제자리 승인 허용 여부 (설정에서 조정 가능) */
-  allowInlineCommand: boolean
-  allowInlineFileEdit: boolean
-  /** 이보다 긴 명령은 배너에서 잘리므로 점프 유도 */
-  maxCommandLength: number
-}
-
-export const DEFAULT_BANNER_POLICY: BannerPolicy = {
-  allowInlineCommand: true,
-  allowInlineFileEdit: false, // diff를 봐야 판단 가능
-  maxCommandLength: 120,
-}
-
-export type BannerDecision =
-  | { mode: 'inline' }
-  | { mode: 'needs_review'; reason: 'diff_required' | 'too_long' | 'multi_file' | 'unknown_kind' }
-
-export function bannerDecision(detail: ApprovalDetail, policy = DEFAULT_BANNER_POLICY): BannerDecision {
-  switch (detail.kind) {
-    case 'command':
-      if (!policy.allowInlineCommand) return { mode: 'needs_review', reason: 'unknown_kind' }
-      if (detail.command.length > policy.maxCommandLength) return { mode: 'needs_review', reason: 'too_long' }
-      return { mode: 'inline' }
-    case 'file_edit':
-      if (detail.multi) return { mode: 'needs_review', reason: 'multi_file' }
-      if (!policy.allowInlineFileEdit) return { mode: 'needs_review', reason: 'diff_required' }
-      return { mode: 'inline' }
-    case 'other':
-      return { mode: 'needs_review', reason: 'unknown_kind' }
-  }
-}
+/**
+ * 승인 정책 (FR-3). "막지 말고 보이게 하라".
+ *
+ * 한때 여기에 **배너 정책**이 있었다 — 비포커스 세션의 승인을 창 맨 위 띠에서 바로
+ * 허용하되, 정보가 부족한 요청(파일 수정·여러 파일·너무 긴 명령)은 "확인 필요"로
+ * 돌려보내는 규칙. 띠 자체를 걷어내면서(사용자 요청 2026-09-10 — 떴다 사라질 때마다
+ * 화면 전체가 밀렸다) 그 규칙이 답할 질문도 같이 사라졌다. 승인은 이제 **그 세션의
+ * 카드에서** 답한다: 인박스가 그 자리로 데려다준다.
+ */
 
 /*
  * 도구 카드의 접힘 정책은 여기 없다.

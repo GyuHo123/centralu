@@ -16,7 +16,6 @@ import { SessionView } from '../features/session/SessionView.jsx'
 import { GridView } from '../features/grid/GridView.jsx'
 import { OrchestratorView } from '../features/orchestrator/OrchestratorView.jsx'
 import { Inbox } from '../features/inbox/Inbox.jsx'
-import { ApprovalBanner } from '../features/approval/ApprovalBanner.jsx'
 import { Intro } from '../features/onboarding/Intro.jsx'
 import { CommandPalette } from '../features/palette/CommandPalette.jsx'
 import { Settings } from '../features/settings/Settings.jsx'
@@ -85,7 +84,6 @@ export function App({ platform }: { platform: Platform }) {
         {/* h-screen(100vh)이 아니라 h-full — vh는 zoom을 모르기 때문 (index.css의 --text-zoom 주석) */}
         <div className="relative flex h-full flex-col bg-void text-chalk">
           <TopBar />
-          <ApprovalBanner />
           <Body />
           <CommandPalette />
           <Settings />

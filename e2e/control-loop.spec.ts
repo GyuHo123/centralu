@@ -397,24 +397,30 @@ test('승인: 항상 허용은 범위를 알려준다 (T5-4)', async ({ page }) 
   await expect(page.getByTestId('toast')).toContainText('npm test --watch')
 })
 
-test('배너: 명령은 제자리 승인, 파일 수정은 확인 필요 (T5-4, FR-3)', async ({ page }) => {
+/**
+ * 다른 세션의 승인은 **그 세션의 카드에서** 답한다 (사용자 요청 2026-09-10).
+ *
+ * 창 맨 위에 띠가 있었다 — 비포커스 세션의 요청을 거기서 바로 허용하는 자리. 뜨고
+ * 사라질 때마다 **화면 전체가 밀렸고**(레이아웃 시프트), 읽던 줄과 누르려던 버튼이
+ * 같이 움직였다. 띠를 걷어낸 지금, 길은 인박스 하나다: 숫자가 알리고, 누르면 그 세션에
+ * 내려앉고, 카드에서 답한다.
+ */
+test('다른 세션의 승인은 인박스를 거쳐 그 세션의 카드에서 답한다', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha', '/tmp/beta'] })
   await newSession(page, 'alpha', 'A작업')
   await newSession(page, 'beta', 'B작업') // 포커스는 beta
 
-  // alpha(비포커스)에 명령 승인 → 배너에서 바로 허용 가능
   await injectApproval(page, 0, { kind: 'command', command: 'ls -la', cwd: '/tmp/alpha' })
-  await expect(page.getByTestId('approval-banner')).toBeVisible()
-  await expect(page.getByTestId('banner-allow')).toBeVisible()
-  await page.getByTestId('banner-allow').click()
-  await expect(page.getByTestId('approval-banner')).toBeHidden()
 
-  // 파일 수정은 diff를 봐야 하므로 "확인 필요"
-  await injectApproval(page, 0, { kind: 'file_edit', path: 'src/a.ts', diffPreview: '+1', multi: false })
-  await expect(page.getByTestId('banner-review')).toBeVisible()
-  await expect(page.getByTestId('banner-allow')).toBeHidden()
-  await page.getByTestId('banner-review').click()
-  await expect(page.getByTestId('approval-card')).toBeVisible() // 점프해서 카드로
+  // 화면 맨 위에 끼어드는 띠는 없다 — 대신 계기판의 숫자가 늘어난다
+  await expect(page.getByTestId('approval-banner')).toHaveCount(0)
+  await page.getByTestId('counter').click()
+  await page.locator('[data-testid^="inbox-item-"]').first().click()
+
+  await expect(page.getByTestId('approval-card')).toBeVisible()
+  await expect(page.getByTestId('approval-detail')).toContainText('ls -la')
+  await page.getByTestId('approve-allow').click()
+  await expect(page.getByTestId('approval-card')).toBeHidden()
 })
 
 /**

@@ -62,16 +62,6 @@ export function useIsProjectSelected(projectId: string): boolean {
   return useStore((s) => s.view === 'focus' && s.focusedProjectId === projectId && !s.focusedSessionId)
 }
 
-/** 비포커스 세션의 승인 요청 = 전역 배너 대상 (FR-3) */
-export function useBannerApproval() {
-  const sessions = useStore((s) => s.sessions)
-  const focusedId = useStore((s) => s.focusedSessionId)
-  return useMemo(() => {
-    const first = Object.values(sessions).find((x) => x.pendingApproval && x.id !== focusedId)
-    return first ? { session: first, pending: first.pendingApproval! } : null
-  }, [sessions, focusedId])
-}
-
 export function useConflicts() {
   const sessions = useStore((s) => s.sessions)
   return useMemo(() => detectFileConflicts(Object.values(sessions)), [sessions])

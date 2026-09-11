@@ -381,7 +381,11 @@ export function SessionPane({
             : undefined
         }
       >
-        <Composer sessionId={session.id} onMenuOpenChange={fold ? setComposerMenu : undefined} />
+        <Composer
+          sessionId={session.id}
+          framed={!fold}
+          onMenuOpenChange={fold ? setComposerMenu : undefined}
+        />
       </div>
 
       {/* 자주 쓰는 명령어 창 (#60) — 칸 안에 뜬다. 그리드 칸이면 그 칸 크기의 창이다 */}
@@ -411,10 +415,19 @@ export function SessionPane({
 const Composer = memo(function Composer({
   sessionId,
   onMenuOpenChange,
+  framed = true,
 }: {
   sessionId: string
   /** 아래 줄의 메뉴가 열렸나 — 접힌 입력창이 그동안 안 내려가야 한다 (fold) */
   onMenuOpenChange?: (open: boolean) => void
+  /**
+   * 자기 윗선을 그을 것인가.
+   *
+   * 대화 바로 아래에 붙어 있을 때는 그 선이 **대화와 입력창의 경계**다. 하지만 접힌
+   * 카드 안에서는 카드의 둥근 테두리가 이미 경계고, 그 바로 아래에 직선이 하나 더 그이면
+   * 모서리가 두 번 끝나는 것처럼 보인다 (사용자 지적 2026-09-10).
+   */
+  framed?: boolean
 }) {
   /*
    * 세션에서 **여기 정말로 필요한 것만** 집는다.
@@ -644,7 +657,7 @@ const Composer = memo(function Composer({
 
   return (
     <form
-      className="border-t border-edge px-4 py-3"
+      className={`px-4 py-3 ${framed ? 'border-t border-edge' : ''}`}
       onSubmit={(e) => {
         e.preventDefault()
         const t = text.trim()
