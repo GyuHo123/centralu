@@ -24,8 +24,24 @@ pnpm host --port 5175 --token dev-token
 pnpm dev                      # http://127.0.0.1:5174
 ```
 
-`http://127.0.0.1:5174/?mock=1` runs the UI against a mock platform with no host at all,
-which is what you want when you are only touching the interface.
+### Looking at the UI without a host
+
+Two query strings, and `demo` implies `mock`:
+
+| URL | What you get |
+|---|---|
+| `?mock=1` | The mock platform, **empty**. No projects, no sessions; nothing answers. This is the door E2E drives. |
+| `?demo` | The same mock with a scene already in it: two projects, four sessions in different states (working, waiting on approval, asking a question, done), a conversation with tool cards and a plan, git changes and history, weekly usage. Send a message and a scripted reply streams back. |
+| `?demo=grid` | The scene, opened in the grid with four panels — one of them working, so the orbit ring is turning. |
+| `?demo=empty` | Replies, but no scene. For building a first-run screen without deleting a seeded one. |
+
+The scene is re-seeded on every load, so an edit that reloads the page does not cost you
+the setup. Ids are stable across reloads (`mock-session-1`, …), which is why the layout
+you arrange by hand survives one.
+
+Nothing in the scene is special-cased in the UI: it is built through the same ports the
+app calls and the same events the host sends, so a screen that looks right here is not
+being propped up by the demo.
 
 For the real app rather than the browser:
 

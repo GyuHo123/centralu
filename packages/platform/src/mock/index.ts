@@ -121,6 +121,17 @@ export class MockPlatform implements Platform {
           s.pendingApproval = { requestId: event.requestId, detail: event.detail }
         } else if (event.type === 'approval_resolved') {
           if (s.pendingApproval?.requestId === event.requestId) s.pendingApproval = null
+        } else if (event.type === 'question_request') {
+          /*
+           * 실물과 같은 규칙 (manager.trackLiveFacts): 살아 있는 질문은 **세션에 남는다**.
+           * 이벤트로만 흘리면 목록을 다시 받는 모든 경로(재연결·새로고침)에서 카드가
+           * 사라진다 — 실물에서는 남는데 목에서만 사라지면, 그 차이는 화면에서만 드러난다.
+           */
+          s.state = 'waiting_input'
+          s.waitingSince ??= this.now()
+          s.pendingQuestions = [...s.pendingQuestions, { requestId: event.requestId, questions: event.questions }]
+        } else if (event.type === 'question_resolved') {
+          s.pendingQuestions = s.pendingQuestions.filter((q) => q.requestId !== event.requestId)
         } else if (event.type === 'turn_complete') {
           s.state = 'waiting_input'
           s.waitingSince ??= this.now()
