@@ -218,7 +218,12 @@ function Donut({
          * 열려 있는 동안에도 **다른 도넛을 바로 누를 수 있어야 한다** — 바깥 클릭 막이
          * 도넛까지 덮으면 도구를 바꾸는 데 두 번 눌러야 한다. 그래서 막보다 위에 선다.
          */
-        className={`relative z-40 flex items-center rounded p-0.5 transition-colors hover:bg-graphite/50 ${
+        /*
+         * 하이라이트도 **동그랗다** (사용자 지적 2026-09-10). 고리를 가리키는 자리에
+         * 네모가 켜지면 손이 닿은 것이 도넛인지 그 뒤의 칸인지가 어긋나 보인다 —
+         * 밝아지는 모양은 그 버튼의 모양이어야 한다.
+         */
+        className={`relative z-40 flex items-center rounded-full p-0.5 transition-colors hover:bg-graphite/50 ${
           active ? 'bg-graphite/50' : ''
         }`}
       >
