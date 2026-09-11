@@ -137,7 +137,7 @@ export function UsageDonuts() {
   }
 
   return (
-    <span className="relative flex items-center gap-1.5" data-testid="usage-donuts">
+    <span className="relative flex items-center gap-0.5" data-testid="usage-donuts">
       {(live ?? []).map((tool) => (
         <Donut
           key={tool}
