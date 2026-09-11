@@ -164,14 +164,19 @@ export function SessionPane({
   /**
    * 접힌 입력창이 떠 있나 (fold일 때만 뜻이 있다).
    *
-   * 방아쇠 셋을 **OR로** 묶는다: 아래쪽에 손이 왔거나(hover), 입력칸에 포커스가 있거나,
-   * 그 줄의 메뉴(모델·권한)가 열려 있거나. 마우스가 떠나도 포커스·메뉴가 살아 있으면
-   * 내려가지 않는다 — 쓰는 도중에 발밑이 꺼지면 안 된다.
+   * 방아쇠 넷을 **OR로** 묶는다: 아래쪽에 손이 왔거나(hover), **떠오른 카드 위에 손이
+   * 있거나**, 입력칸에 포커스가 있거나, 그 줄의 메뉴(모델·권한)가 열려 있거나. 마우스가
+   * 떠나도 포커스·메뉴가 살아 있으면 내려가지 않는다 — 쓰는 도중에 발밑이 꺼지면 안 된다.
+   *
+   * 카드 위 hover가 따로 있어야 하는 이유 (사용자 지적 2026-09-10): 띠(아래 COMPOSER_REACH)는
+   * **접혀 있을 때 떠오르게 하는** 자리다. 떠오른 카드는 그 띠보다 위로 올라오므로, 입력칸을
+   * 누르러 손을 올리는 순간 띠를 벗어나 카드가 다시 내려갔다 — **누를 수가 없었다.**
    */
   const [nearComposer, setNearComposer] = useState(false)
+  const [overComposer, setOverComposer] = useState(false)
   const [composerFocused, setComposerFocused] = useState(false)
   const [composerMenu, setComposerMenu] = useState(false)
-  const composerUp = !fold || nearComposer || composerFocused || composerMenu
+  const composerUp = !fold || nearComposer || overComposer || composerFocused || composerMenu
 
   const loadHistory = useStore((s) => s.loadHistory)
   const loaded = useStore((s) => !!s.chat[sessionId])
@@ -344,7 +349,12 @@ export function SessionPane({
       <div
         className={
           fold
-            ? `absolute inset-x-0 bottom-0 z-20 rounded-t-xl border px-1 pt-1 shadow-[0_-12px_28px_-12px_rgb(0_0_0/0.9)] transition-[transform,background-color,border-color] duration-200 motion-reduce:transition-none ${
+            ? /*
+               * 아래 모서리도 둥글다 — 칸과 **같은 반지름**으로 (사용자 지적 2026-09-10).
+               * 칸은 rounded-lg로 잘리는데 카드 아래가 각지면 그 곡선에 잘려 테두리가
+               * 뾰족하게 끊긴다. 같은 곡선을 그리면 잘릴 것이 없다.
+               */
+              `absolute inset-x-0 bottom-0 z-20 rounded-t-xl rounded-b-lg border px-1 pt-1 shadow-[0_-12px_28px_-12px_rgb(0_0_0/0.9)] transition-[translate,background-color,border-color] duration-300 ease-out motion-reduce:transition-none ${
                 composerUp
                   ? 'translate-y-0 border-edge bg-pit'
                   : /*
@@ -359,6 +369,8 @@ export function SessionPane({
         }
         data-testid="composer-shell"
         data-up={fold ? composerUp || undefined : undefined}
+        onMouseEnter={fold ? () => setOverComposer(true) : undefined}
+        onMouseLeave={fold ? () => setOverComposer(false) : undefined}
         onFocusCapture={fold ? () => setComposerFocused(true) : undefined}
         onBlurCapture={
           fold

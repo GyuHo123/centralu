@@ -7,6 +7,24 @@ import { expect, test, type Page } from '@playwright/test'
  * 여기는 **여러 개가 동시에 있을 때 화면이 무엇을 고르는가**를 본다 (#26, #21).
  */
 
+/**
+ * 움직임이 멈춘 뒤의 자리. 떠오르는 카드·내려오는 메뉴는 전환 중에 재면 **도중의 자리**를
+ * 사실로 적게 된다 — 같은 값이 두 번 나올 때까지 기다린다.
+ */
+async function settled(loc: ReturnType<Page['getByTestId']>): Promise<{ x: number; y: number; width: number; height: number }> {
+  let last: { x: number; y: number; width: number; height: number } | null = null
+  for (let i = 0; i < 40; i++) {
+    const box = (await loc.boundingBox())!
+    if (last && Math.round(last.y) === Math.round(box.y) && Math.round(last.height) === Math.round(box.height)) return box
+    last = box
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  return last!
+}
+
+/** 접힌 입력창을 띄우는 띠의 높이 (SessionView의 COMPOSER_REACH와 같은 값) */
+const COMPOSER_REACH = 54
+
 async function setup(page: Page, path = '/tmp/alpha') {
   await page.goto('/?mock=1')
   await expect(page.getByTestId('intro')).toBeVisible()
@@ -102,6 +120,96 @@ test('그리드에서 입력창은 접혀 있다가 아래에 손이 오면 떠�
   await panel.getByTestId('prompt-input').click()
   await page.mouse.move(box.x + box.width / 2, box.y + 80)
   await expect(shell).toHaveAttribute('data-up', 'true')
+})
+
+/**
+ * 떠오른 카드 위에 손이 있으면 내려가지 않는다 (사용자 지적 2026-09-10).
+ *
+ * 떠오르게 하는 띠는 칸 **아래쪽**에 있다. 카드는 그 띠보다 위로 올라오므로, 입력칸을
+ * 누르러 손을 올리는 순간 띠를 벗어나 카드가 도로 내려갔다 — 누를 수가 없었다.
+ */
+test('떠오른 입력창 위에 손이 있으면 내려가지 않는다 — 그래서 누를 수 있다', async ({ page }) => {
+  await setup(page)
+  const a = await newSession(page, 'alpha', 'claude', '하나')
+  const b = await newSession(page, 'alpha', 'claude', '둘')
+  await openGrid(page, [a, b])
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+
+  const panel = page.getByTestId(`grid-panel-${a}`)
+  const shell = panel.getByTestId('composer-shell')
+  const box = (await panel.boundingBox())!
+
+  // 칸 아래쪽에 손을 올려 띄운다
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 20)
+  await expect(shell).toHaveAttribute('data-up', 'true')
+
+  // 떠오른 카드의 윗부분(입력칸 줄)으로 손을 옮긴다 — 여기는 이미 띠 밖이다.
+  // 카드는 이어서 떠오르므로(300ms) **멈춘 뒤에** 잰다 — 도중의 자리는 아직 사실이 아니다
+  const up = await settled(shell)
+  expect(up.y + 12).toBeLessThan(box.y + box.height - COMPOSER_REACH)
+  await page.mouse.move(up.x + up.width / 2, up.y + 12)
+  await expect(shell).toHaveAttribute('data-up', 'true')
+
+  // 그리고 눌린다
+  await panel.getByTestId('prompt-input').click()
+  await expect(panel.getByTestId('prompt-input')).toBeFocused()
+})
+
+/**
+ * 떠오르는 동안 **중간 자리들이 있어야 한다** (사용자 요청 2026-09-10: "부드럽게 올라오게").
+ *
+ * 처음엔 `transition-[transform,…]`이라 적었는데 한 프레임 만에 튀어 올랐다 — Tailwind v4의
+ * `translate-y-*`는 `transform`이 아니라 **`translate` 속성**에 값을 싣는다. 전환이 걸린
+ * 속성과 실제로 바뀌는 속성이 달라 아무것도 이어지지 않은 것이다. 그래서 여기서 재는 것은
+ * "어떤 속성에 걸었나"가 아니라 **눈에 보이는 사실**이다: 도중에 여러 자리를 지나는가.
+ */
+test('입력창은 튀어 오르지 않고 이어서 떠오른다', async ({ page }) => {
+  await setup(page)
+  const a = await newSession(page, 'alpha', 'claude', '하나')
+  await openGrid(page, [a])
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  const panel = page.getByTestId(`grid-panel-${a}`)
+  await expect(panel.getByTestId('composer-shell')).not.toHaveAttribute('data-up', 'true')
+
+  // 매 프레임 카드의 자리를 적는 기록기를 먼저 걸어 둔다
+  await page.evaluate(() => {
+    const shell = document.querySelector('[data-testid="composer-shell"]')!
+    const seen: number[] = []
+    ;(window as never as { __tops: number[] }).__tops = seen
+    const tick = () => {
+      seen.push(Math.round(shell.getBoundingClientRect().top))
+      if (seen.length < 60) requestAnimationFrame(tick)
+    }
+    tick()
+  })
+
+  const box = (await panel.boundingBox())!
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 20)
+  await page.waitForTimeout(700)
+
+  const tops = await page.evaluate(() => (window as never as { __tops: number[] }).__tops)
+  // 한 프레임에 튀면 자리는 둘뿐이다 (접힌 자리, 떠오른 자리)
+  expect(new Set(tops).size).toBeGreaterThan(5)
+})
+
+/**
+ * 응답 중인 칸을 두르는 무지개 링은 **칸의 테두리**다. 칸 안에 무엇이 떠 있든 끊기면
+ * 안 되는데, 접힌 입력창이 아랫변을 덮고 있었다 (사용자 지적 2026-09-10).
+ */
+test('접힌 입력창은 응답 중 링을 덮지 않는다 — 링이 위에 선다', async ({ page }) => {
+  await setup(page)
+  const a = await newSession(page, 'alpha', 'claude', '하나')
+  await openGrid(page, [a])
+  const panel = page.getByTestId(`grid-panel-${a}`)
+  await expect(panel.locator('.cc-orbit-ring-layer')).toBeVisible()
+
+  // 같은 쌓임 맥락의 두 층이다 — 링이 더 위에 있어야 아랫변이 살아남는다
+  const z = await panel.evaluate((el) => {
+    const ring = el.querySelector('.cc-orbit-ring-layer')!
+    const shell = el.querySelector('[data-testid="composer-shell"]')!
+    return [getComputedStyle(ring).zIndex, getComputedStyle(shell).zIndex].map(Number)
+  })
+  expect(z[0]!).toBeGreaterThan(z[1]!)
 })
 
 /**

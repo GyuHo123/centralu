@@ -4211,19 +4211,29 @@ test('앞 줄의 아래 선과 뒤 줄의 위 선은 같은 자리에 뜬다', a
         // 선을 그리는 것은 줄(li)이다 — testid는 그 안의 버튼에 있다
         const el = (document.querySelector(sel) as HTMLElement).closest('li') as HTMLElement
         const r = el.getBoundingClientRect()
-        const dt = new DataTransfer()
-        dt.setData('application/x-cc-session', 'dragged')
-        el.dispatchEvent(
-          new DragEvent('dragover', {
-            bubbles: true,
-            cancelable: true,
-            dataTransfer: dt,
-            clientY: half === 'top' ? r.top + 2 : r.bottom - 2,
-          }),
-        )
-        // 선은 React 상태로 붙는다 — 한 프레임 뒤에 재야 실제로 그려진 자리를 본다
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
-        const cs = getComputedStyle(el, '::after')
+        const over = () => {
+          const dt = new DataTransfer()
+          dt.setData('application/x-cc-session', 'dragged')
+          el.dispatchEvent(
+            new DragEvent('dragover', {
+              bubbles: true,
+              cancelable: true,
+              dataTransfer: dt,
+              clientY: half === 'top' ? r.top + 2 : r.bottom - 2,
+            }),
+          )
+        }
+        /*
+         * 선은 React 상태로 붙는다 — **그려질 때까지 기다린다.** 프레임 수를 고정으로 세면
+         * 기계가 바쁠 때 아직 없는 선을 재고 NaN이 된다 (병렬 실행에서 실제로 그랬다).
+         * 진짜 드래그도 dragover를 계속 흘리므로 다시 흘리는 것이 그 상황 그대로다.
+         */
+        let cs = getComputedStyle(el, '::after')
+        for (let i = 0; i < 30 && cs.content === 'none'; i++) {
+          over()
+          await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
+          cs = getComputedStyle(el, '::after')
+        }
         if (cs.content !== 'none') {
           const h = parseFloat(cs.height) || 0
           // 위쪽 선이면 top이 숫자로, 아래쪽 선이면 bottom이 숫자로 온다
