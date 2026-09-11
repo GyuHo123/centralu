@@ -11,6 +11,9 @@ labels: ''
 
   If it survives being read, it graduates into a Design decision issue — that is
   where the shapes get weighed. Do not try to do that work here.
+
+  If the thing already exists on screen and is only awkward, that is the UI / UX
+  form. The test: if you could take a screenshot of it, it is not this one.
 -->
 
 ## What you wish it did

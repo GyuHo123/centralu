@@ -9,6 +9,9 @@ labels: ''
   This is not the bug form. Nothing here is broken — it looks wrong, or it costs
   more moves than it should. Both are worth opening, and both are judged the same
   way: by looking and by using, not by a passing test.
+
+  It is also not the Idea form. This one is for changing something that is already
+  on screen. If there is nothing to point at yet, open an Idea instead.
 -->
 
 ## Where
