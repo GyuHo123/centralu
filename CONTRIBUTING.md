@@ -115,10 +115,12 @@ inherits PATH from your terminal, so it will never reproduce that class of bug.
 
 **Sending a pull request is taken as agreement to what follows.**
 
-For the contribution you send, you grant the project owner:
+For the contribution you send, you grant the project owner, and anyone who later
+succeeds to the ownership of this project:
 
 1. A **perpetual, worldwide, royalty-free, irrevocable, non-exclusive right** to use,
-   reproduce, modify, distribute and make derivative works of that contribution
+   reproduce, modify, distribute, **sublicense**, and make derivative works of that
+   contribution, and to **transfer these rights** to a successor of the project
 2. The right to **distribute that contribution under a different licence** (relicensing)
 3. A patent licence to any relevant patents you hold
 
