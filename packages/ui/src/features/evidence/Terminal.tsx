@@ -6,6 +6,7 @@ import type { CommandRunInfo, TerminalInfo } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { CloseIcon, PlusIcon } from '../../components/icons.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
+import { registerTerminalHttpLinks } from '../../components/terminalLinks.js'
 import { useStore } from '../../store/store.js'
 import { TabActions } from './tabActions.jsx'
 
@@ -181,6 +182,7 @@ function CommandLog({ projectId, command, runId }: { projectId: string; command:
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+    const links = registerTerminalHttpLinks(term)
 
     const lastDims = { cols: 0, rows: 0 }
     const syncSize = () => {
@@ -236,6 +238,7 @@ function CommandLog({ projectId, command, runId }: { projectId: string; command:
       ro.disconnect()
       offOutput()
       offExit()
+      links.dispose()
       term.dispose()
     }
   }, [platform, projectId, command, runId])
@@ -294,6 +297,7 @@ function TerminalView({ info, onClose }: { info: TerminalInfo; onClose: (termina
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+    const links = registerTerminalHttpLinks(term)
     termRef.current = term
 
     const safeFit = () => {
@@ -346,6 +350,7 @@ function TerminalView({ info, onClose }: { info: TerminalInfo; onClose: (termina
       onData.dispose()
       offOutput()
       offExit()
+      links.dispose()
       term.dispose()
       termRef.current = null
     }

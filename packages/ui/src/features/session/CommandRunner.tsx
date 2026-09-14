@@ -6,6 +6,7 @@ import type { SavedCommand } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { CloseIcon } from '../../components/icons.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
+import { registerTerminalHttpLinks } from '../../components/terminalLinks.js'
 import { useStore } from '../../store/store.js'
 
 const NO_COMMANDS: SavedCommand[] = []
@@ -330,6 +331,7 @@ function LogView({ projectId, command, runId }: { projectId: string; command: st
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+    const links = registerTerminalHttpLinks(term)
 
     const lastDims = { cols: 0, rows: 0 }
     const syncSize = () => {
@@ -385,6 +387,7 @@ function LogView({ projectId, command, runId }: { projectId: string; command: st
       ro.disconnect()
       offOutput()
       offExit()
+      links.dispose()
       term.dispose()
     }
   }, [platform, projectId, command, runId])
