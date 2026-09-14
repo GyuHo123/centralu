@@ -174,7 +174,7 @@ function CommandLog({ projectId, command, runId }: { projectId: string; command:
     const term = new Xterm({
       fontSize: 11,
       fontFamily: "ui-monospace, 'SF Mono', Menlo, monospace",
-      theme: { background: '#121212', foreground: '#e9e9e9', cursor: '#121212', selectionBackground: '#2a2a2a' },
+      theme: { background: '#1d1d1d', foreground: '#e9e9e9', cursor: '#1d1d1d', selectionBackground: '#353535' },
       disableStdin: true,
       scrollback: 5000,
       allowProposedApi: true,
@@ -289,7 +289,7 @@ function TerminalView({ info, onClose }: { info: TerminalInfo; onClose: (termina
       fontFamily: "ui-monospace, 'SF Mono', Menlo, monospace",
       // 완전 무채색 규칙은 우리 화면의 것이고, 셸 출력의 색까지 뺏지는 않는다.
       // 다만 바탕과 커서는 앱에 맞춘다.
-      theme: { background: '#0c0c0c', foreground: '#e9e9e9', cursor: '#e9e9e9', selectionBackground: '#2a2a2a' },
+      theme: { background: '#171717', foreground: '#e9e9e9', cursor: '#e9e9e9', selectionBackground: '#353535' },
       cursorBlink: true,
       scrollback: 5000,
       allowProposedApi: true,

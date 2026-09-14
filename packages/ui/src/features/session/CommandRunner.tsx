@@ -323,7 +323,7 @@ function LogView({ projectId, command, runId }: { projectId: string; command: st
     const term = new Xterm({
       fontSize: 11,
       fontFamily: "ui-monospace, 'SF Mono', Menlo, monospace",
-      theme: { background: '#121212', foreground: '#e9e9e9', cursor: '#121212', selectionBackground: '#2a2a2a' },
+      theme: { background: '#1d1d1d', foreground: '#e9e9e9', cursor: '#1d1d1d', selectionBackground: '#353535' },
       disableStdin: true,
       scrollback: 5000,
       allowProposedApi: true,
