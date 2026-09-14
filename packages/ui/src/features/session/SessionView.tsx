@@ -6,9 +6,9 @@ import { EMPTY_DRAFT, useStore, type ChatAttachment, type ChatItem, type Draft }
 import { useFocusedSession } from '../../store/selectors.js'
 import { ApprovalCard } from '../approval/ApprovalCard.jsx'
 import { QuestionCard } from '../approval/QuestionCard.jsx'
-import { ChevronIcon, CloseIcon, PlusIcon, RestartIcon, SendIcon } from '../../components/icons.jsx'
+import { ChevronIcon, CloseIcon, CrownIcon, PlusIcon, RestartIcon, SendIcon } from '../../components/icons.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
-import { Kbd, StateDot } from '../../components/primitives.jsx'
+import { Kbd } from '../../components/primitives.jsx'
 import { Modal } from '../../components/Modal.jsx'
 import { DragRegion } from '../../components/DragRegion.jsx'
 import { Markdown } from './Markdown.jsx'
@@ -228,7 +228,16 @@ export function SessionPane({
   const HEADER = 'flex h-10 items-center gap-2.5 border-b border-edge px-4'
   const header = (
     <>
-      <StateDot state={session.state} />
+      {/*
+        상태 점은 사이드바의 도구 표식과 그리드의 응답 중 테두리가 이미 말한다. 작은
+        점 하나는 잘 보이지도 않으면서 같은 사실을 세 번째로 말하므로 머리글에서는 뺀다.
+        오케스트레이터만 상태가 아닌 **역할**을 말하는 왕관을 제목 왼쪽에 둔다.
+      */}
+      {session.kind === 'orchestrator' && (
+        <span className="flex shrink-0 text-ash" data-testid="session-header-crown">
+          <CrownIcon size={14} />
+        </span>
+      )}
       <h1 className="truncate text-[13px] font-medium text-chalk" data-testid="session-name">
         {session.name}
       </h1>

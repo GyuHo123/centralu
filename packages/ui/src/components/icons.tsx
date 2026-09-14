@@ -26,6 +26,26 @@ export function DotsIcon({ size = 14 }: { size?: number }) {
   )
 }
 
+/**
+ * 왕관 — 다른 세션을 부리는 오케스트레이터의 자리 표식.
+ *
+ * 상태가 아니라 역할을 말하므로, 응답 중일 때 도는 테두리와 한 자리를 다투지 않는다.
+ * 사이드바와 세션 머리글이 서로 다른 그림을 쓰면 같은 역할이 두 얼굴을 갖게 되므로
+ * 이 한 아이콘을 공유한다.
+ */
+export function CrownIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden className="shrink-0">
+      <path
+        d="M2.6 13.5 L1.8 4.6 L5.9 7.4 L8 2.6 L10.1 7.4 L14.2 4.6 L13.4 13.5 Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export function CloseIcon({ size = 13 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden>

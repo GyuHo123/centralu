@@ -934,6 +934,8 @@ test('명령어 창: 오케스트레이터에는 없다 — 프로젝트가 없�
   await setup(page)
   await newSession(page, 'alpha', 'claude', '작업')
   await expect(page.getByTestId('run-open')).toBeVisible()
+  // 상태 점은 헤더에서 걷고, 응답 중이라는 사실은 그리드 테두리·사이드바가 맡는다.
+  await expect(page.getByTestId('dot-idle')).toHaveCount(0)
 
   await page.evaluate(async () => {
     const st = (window as never as { __store: any }).__store.getState()
@@ -941,6 +943,7 @@ test('명령어 창: 오케스트레이터에는 없다 — 프로젝트가 없�
     await st.askOrchestrator('hello') // 첫 질문이 세션을 만든다
   })
   await expect(page.getByTestId('session-name')).toContainText('Orchestrator')
+  await expect(page.getByTestId('session-header-crown')).toBeVisible()
   // 열어도 아무것도 들어갈 수 없는 메뉴는 빈 메뉴보다 없는 편이 정직하다
   await expect(page.getByTestId('run-open')).toBeHidden()
 })

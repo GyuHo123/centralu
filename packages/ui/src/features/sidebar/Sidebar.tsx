@@ -10,7 +10,7 @@ import { DeleteProjectDialog } from '../project/DeleteProjectDialog.jsx'
 import { useIsProjectSelected, useSelectedSessionId, useSessionsOf, useToolMeta, useTools } from '../../store/selectors.js'
 import { Tooltip, stateLabel } from '../../components/primitives.jsx'
 import { ResizeHandle } from '../../components/ResizeHandle.jsx'
-import { DotsIcon, PlusIcon } from '../../components/icons.jsx'
+import { CrownIcon, DotsIcon, PlusIcon } from '../../components/icons.jsx'
 import { Modal } from '../../components/Modal.jsx'
 import { useOrbitSync } from '../../components/orbit.js'
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, useTextZoom } from '../../store/store.js'
@@ -275,7 +275,7 @@ function OrchestratorButton() {
             : 'Evolving — one conversation that directs your sessions, and it keeps gaining new abilities. Expect it to change.'
         }
       >
-        <OrchestratorIcon />
+        <CrownIcon />
         <span className="truncate font-medium tracking-tight">Orchestrator</span>
         <span className="shrink-0 text-[10px] text-slate" data-testid="orchestrator-experimental">
           Evolving
@@ -330,26 +330,6 @@ function HomelessSessions() {
         </button>
       ))}
     </div>
-  )
-}
-
-/**
- * 왕관 — 다른 세션을 부리는 자리의 표식 (사양서 FR-11의 원래 그림).
- * 갈래길 모양을 썼었는데, 오케스트레이터 배지(글자 'orch')와 서로 다르게
- * 생겨서 같은 역할이 두 얼굴을 가졌다 — 왕관 하나로 통일한다 (2026-08-26 사용자 결정).
- * 채색은 안 한다: 긴급함은 밝기의 몫이고, 이건 종류의 표식이다.
- */
-function OrchestratorIcon({ size = 13 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden className="shrink-0">
-      {/* 그리드 아이콘처럼 뷰박스를 거의 채운다 — 같은 13px인데 도형이 절반만 쓰면 작아 보인다 */}
-      <path
-        d="M2.6 13.5 L1.8 4.6 L5.9 7.4 L8 2.6 L10.1 7.4 L14.2 4.6 L13.4 13.5 Z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-    </svg>
   )
 }
 
