@@ -21,6 +21,7 @@
 | [agent-host.ko.md](agent-host.ko.md) | Node 사이드카의 내부: AgentAdapter, 그리고 새 툴을 추가하는 방법 | protocol |
 | [state-management.ko.md](state-management.ko.md) | 프런트엔드 상태: 이벤트 → store → selector, 영속화와 복원 | architecture, protocol |
 | [releasing.ko.md](releasing.ko.md) | 버전이 사용자에게 도달하는 방법: npm 패키지 구성, CI, 배포 절차 | — |
+| [commit-conventions.ko.md](commit-conventions.ko.md) | Conventional Commit 형식, 허용 타입, 커밋 경계 | — |
 
 ## 측정한 것의 기록
 

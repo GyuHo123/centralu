@@ -26,6 +26,7 @@ Current state: **M2 done, dogfooding** — [what M2 actually produced](plans/m2-
 | [agent-host.md](agent-host.md) | Inside the Node sidecar: AgentAdapter, and how to add a new tool | protocol |
 | [state-management.md](state-management.md) | Front-end state: event → store → selector, persistence and restore | architecture, protocol |
 | [releasing.md](releasing.md) | How a version reaches users: npm package layout, CI, publish procedure | — |
+| [commit-conventions.md](commit-conventions.md) | Conventional Commit format, allowed types, and commit boundaries | — |
 
 ## Record of what was measured
 
