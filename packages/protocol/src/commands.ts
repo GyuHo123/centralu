@@ -716,7 +716,14 @@ export const RpcMethods = {
   },
   'fs.readFile': {
     params: z.object({ projectId: z.string(), path: z.string() }),
-    result: z.object({ text: z.string(), truncated: z.boolean(), binary: z.boolean(), bytes: z.number() }),
+    result: z.object({
+      text: z.string(),
+      truncated: z.boolean(),
+      binary: z.boolean(),
+      bytes: z.number(),
+      image: z.object({ mime: z.string(), data: z.string() }).optional(),
+      previewError: z.string().optional(),
+    }),
   },
   /**
    * Move a file or folder into another folder of the same project (#19).

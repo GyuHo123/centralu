@@ -237,7 +237,15 @@ export interface FsPort {
 export type AlertKind = 'approval' | 'error' | 'done' | 'all_done'
 
 export type FsEntry = { name: string; path: string; isDir: boolean; ignored: boolean }
-export type FsFile = { text: string; truncated: boolean; binary: boolean; bytes: number }
+export type FsFile = {
+  text: string
+  truncated: boolean
+  binary: boolean
+  bytes: number
+  /** Raster image payload for the read-only viewer. Arbitrary binary files omit this. */
+  image?: { mime: string; data: string }
+  previewError?: string
+}
 
 export interface SystemPort {
   notify(title: string, body: string): Promise<void>

@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { baseName, importFile, listDir, moveEntry, resolveExisting, safeJoin } from './fs.js'
+import { baseName, importFile, listDir, moveEntry, readTextFile, resolveExisting, safeJoin } from './fs.js'
 
 /**
  * 파일을 **바꾸는** 쪽의 검사 (#18, #19).
@@ -122,6 +122,46 @@ describe('listDir — 저장소가 아닌 프로젝트', () => {
     expect(entries).toHaveLength(names.length)
     // 저장소가 아니니 무시되는 것도 없다 — 못 물어봤다고 전부 무시로 칠하면 트리가 빈다
     expect(entries.every((e) => !e.ignored)).toBe(true)
+  })
+})
+
+describe('readTextFile — 이미지 미리보기', () => {
+  it('지원하는 래스터 이미지는 텍스트가 아니라 MIME·base64로 돌려준다', async () => {
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    writeFileSync(join(root, 'logo.png'), bytes)
+
+    await expect(readTextFile(root, 'logo.png')).resolves.toEqual({
+      text: '',
+      truncated: false,
+      binary: true,
+      bytes: 4,
+      image: { mime: 'image/png', data: bytes.toString('base64') },
+    })
+  })
+
+  it('SVG는 그림 미리보기와 텍스트 읽기를 함께 돌려준다', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'
+    writeFileSync(join(root, 'logo.svg'), svg)
+
+    await expect(readTextFile(root, 'logo.svg')).resolves.toEqual({
+      text: svg,
+      truncated: false,
+      binary: false,
+      bytes: Buffer.byteLength(svg),
+      image: { mime: 'image/svg+xml', data: Buffer.from(svg).toString('base64') },
+    })
+  })
+
+  it('프로젝트 이미지는 상한을 넘기면 바이트를 전송하지 않고 이유를 말한다', async () => {
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(join(root, 'large.png'), Buffer.alloc(10_000_001))
+
+    await expect(readTextFile(root, 'large.png')).resolves.toMatchObject({
+      text: '',
+      binary: true,
+      bytes: 10_000_001,
+      previewError: expect.stringMatching(/too large/i),
+    })
   })
 })
 

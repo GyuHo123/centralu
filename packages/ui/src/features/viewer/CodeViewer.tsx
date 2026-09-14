@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
+import type { FsFile } from '@cc/platform/ports'
 import { useStore } from '../../store/store.js'
 import { useShortcut } from '../../app/shortcut.js'
 import { Kbd } from '../../components/primitives.jsx'
@@ -24,7 +25,7 @@ export function CodeViewer({ projectId }: { projectId: string }) {
   // 훅은 아래 `if (!path)` 이른 return보다 먼저 — 분기 뒤에 두면 렌더마다 훅 수가 달라진다
   const sc = useShortcut()
   const jump = useViewerJump()
-  const [file, setFile] = useState<{ text: string; truncated: boolean; binary: boolean; bytes: number } | null>(null)
+  const [file, setFile] = useState<FsFile | null>(null)
   /**
    * Why the failure gets a place on screen and not only a toast.
    *
@@ -48,6 +49,8 @@ export function CodeViewer({ projectId }: { projectId: string }) {
   /** The row a `path:123` click asked for — highlighted, because landing mid-file is disorienting */
   const [landedIndex, setLandedIndex] = useState(-1)
   const [query, setQuery] = useState('')
+  /** SVG는 소스이면서 그림이라, 어느 쪽을 볼지 사람이 고른다. */
+  const [svgPreview, setSvgPreview] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
   const rowsRef = useRef<HTMLDivElement>(null)
   /** ⌘A was pressed and no new selection has started since — copy owes the whole file */
@@ -61,6 +64,7 @@ export function CodeViewer({ projectId }: { projectId: string }) {
     setError(null)
     setCandidates([])
     setLandedIndex(-1)
+    setSvgPreview(true)
     if (!path) return
     // 파일·프로젝트를 옮기는 사이 늦게 온 응답이 **다른 파일의 내용**으로 그려지면 안 된다
     let alive = true
@@ -104,6 +108,9 @@ export function CodeViewer({ projectId }: { projectId: string }) {
     }
   }, [platform, projectId, path, setToast])
 
+  const image = file?.image && isViewerImage(file.image) ? file.image : null
+  const isSvg = image?.mime === 'image/svg+xml'
+  const showingImage = !!image && (!isSvg || svgPreview)
   const lines = useMemo(() => (file?.text ?? '').split('\n'), [file])
   const matches = useMemo(() => {
     if (!query.trim()) return new Set<number>()
@@ -177,7 +184,7 @@ export function CodeViewer({ projectId }: { projectId: string }) {
    * else's copy and is left alone.
    */
   useEffect(() => {
-    if (!file) return
+    if (!file || showingImage) return
     const onCopy = (e: ClipboardEvent) => {
       const root = scrollRef.current
       if (!root) return
@@ -203,7 +210,7 @@ export function CodeViewer({ projectId }: { projectId: string }) {
       document.removeEventListener('copy', onCopy)
       document.removeEventListener('mousedown', onMouseDown)
     }
-  }, [file, lines])
+  }, [file, showingImage, lines])
 
   /**
    * ⌘A has to land somewhere. The code area is not a text field, so it takes focus once the
@@ -211,11 +218,11 @@ export function CodeViewer({ projectId }: { projectId: string }) {
    * Once per opened path, so it never steals the search box back mid-typing.
    */
   useEffect(() => {
-    if (!file || focusedFor.current === path) return
+    if (!file || showingImage || focusedFor.current === path) return
     focusedFor.current = path
     wholeFile.current = false
     scrollRef.current?.focus()
-  }, [file, path])
+  }, [file, path, showingImage])
 
   /**
    * Paint the selection over every row that exists right now.
@@ -252,16 +259,44 @@ export function CodeViewer({ projectId }: { projectId: string }) {
         <span className="readout truncate text-[11px] text-ash" data-testid="viewer-path">
           {path}
         </span>
-        <input
-          className="ml-2 w-40 rounded border border-edge bg-panel px-2 py-0.5 text-[11px] text-chalk placeholder:text-slate focus:border-graphite focus:outline-none"
-          placeholder="Search in file"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          data-testid="viewer-search"
-        />
-        {query && (
-          <span className="readout text-[10px] text-slate" data-testid="viewer-match-count">
-            {matches.size} lines
+        {!showingImage && (
+          <>
+            <input
+              className="ml-2 w-40 rounded border border-edge bg-panel px-2 py-0.5 text-[11px] text-chalk placeholder:text-slate focus:border-graphite focus:outline-none"
+              placeholder="Search in file"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              data-testid="viewer-search"
+            />
+            {query && (
+              <span className="readout text-[10px] text-slate" data-testid="viewer-match-count">
+                {matches.size} lines
+              </span>
+            )}
+          </>
+        )}
+        {isSvg && (
+          <span className="ml-2 flex overflow-hidden rounded border border-edge text-[10px]" data-testid="viewer-svg-mode">
+            <button
+              type="button"
+              className={`px-2 py-0.5 transition-colors ${
+                !svgPreview ? 'bg-graphite text-chalk' : 'text-slate hover:text-chalk'
+              }`}
+              onClick={() => setSvgPreview(false)}
+              data-testid="viewer-svg-text"
+            >
+              Text
+            </button>
+            <button
+              type="button"
+              className={`border-l border-edge px-2 py-0.5 transition-colors ${
+                svgPreview ? 'bg-graphite text-chalk' : 'text-slate hover:text-chalk'
+              }`}
+              onClick={() => setSvgPreview(true)}
+              data-testid="viewer-svg-preview"
+            >
+              Preview
+            </button>
           </span>
         )}
         <button
@@ -306,9 +341,22 @@ export function CodeViewer({ projectId }: { projectId: string }) {
         </div>
       ) : file === null ? (
         <p className="p-3 text-[12px] text-slate">Loading…</p>
+      ) : showingImage && image ? (
+        <div
+          className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 overflow-auto bg-void p-4"
+          data-testid="viewer-image"
+        >
+          <img
+            src={`data:${image.mime};base64,${image.data}`}
+            alt={`Preview of ${path}`}
+            className="max-h-full max-w-full object-contain"
+            data-testid="viewer-image-content"
+          />
+          <p className="readout shrink-0 text-[10px] text-slate">{(file.bytes / 1024).toFixed(0)}KB</p>
+        </div>
       ) : file.binary ? (
         <p className="p-3 text-[12px] text-slate" data-testid="viewer-binary">
-          Binary file ({(file.bytes / 1024).toFixed(0)}KB)
+          {file.previewError ?? `Binary file (${(file.bytes / 1024).toFixed(0)}KB)`}
         </p>
       ) : (
         <div
@@ -350,4 +398,9 @@ export function CodeViewer({ projectId }: { projectId: string }) {
       )}
     </section>
   )
+}
+
+/** The host is the primary gate; this keeps a malformed adapter response from becoming a data URL. */
+function isViewerImage(image: NonNullable<FsFile['image']>): boolean {
+  return ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/svg+xml'].includes(image.mime)
 }

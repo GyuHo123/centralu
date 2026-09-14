@@ -1461,6 +1461,62 @@ test('뷰어: 바이너리 파일은 안내만 한다 (C-3 비정상 경로)', a
   await expect(page.getByTestId('viewer-binary')).toContainText('Binary')
 })
 
+test('뷰어: 지원하는 이미지는 원본 바이트로 미리 본다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await page.evaluate(() => {
+    const m = (window as any).__mock
+    m.fsState.entries[''] = [{ name: 'logo.png', path: 'logo.png', isDir: false, ignored: false }]
+    m.fs.readFile = async () => ({
+      text: '',
+      truncated: false,
+      binary: true,
+      bytes: 68,
+      image: {
+        mime: 'image/png',
+        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlFpEAAAAAASUVORK5CYII=',
+      },
+    })
+  })
+  await newSession(page, 'alpha', '작업')
+  await page.getByTestId('evidence-tab-files').click()
+  await page.getByTestId('file-logo.png').click()
+  await expect(page.getByTestId('viewer-image')).toBeVisible()
+  const image = page.getByTestId('viewer-image-content')
+  await expect(image).toHaveAttribute(
+    'src',
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlFpEAAAAAASUVORK5CYII=',
+  )
+  await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(1)
+  await expect(page.getByTestId('viewer-search')).toHaveCount(0)
+})
+
+test('뷰어: SVG는 그림과 원문을 전환한다', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'
+  await page.evaluate((text: string) => {
+    const m = (window as any).__mock
+    m.fsState.entries[''] = [{ name: 'logo.svg', path: 'logo.svg', isDir: false, ignored: false }]
+    m.fs.readFile = async () => ({
+      text,
+      truncated: false,
+      binary: false,
+      bytes: text.length,
+      image: { mime: 'image/svg+xml', data: btoa(text) },
+    })
+  }, svg)
+  await newSession(page, 'alpha', '작업')
+  await page.getByTestId('evidence-tab-files').click()
+  await page.getByTestId('file-logo.svg').click()
+
+  await expect(page.getByTestId('viewer-image')).toBeVisible()
+  await page.getByTestId('viewer-svg-text').click()
+  await expect(page.getByTestId('viewer-image')).toHaveCount(0)
+  await expect(page.getByTestId('code-viewer')).toContainText(svg)
+  await expect(page.getByTestId('viewer-search')).toBeVisible()
+  await page.getByTestId('viewer-svg-preview').click()
+  await expect(page.getByTestId('viewer-image')).toBeVisible()
+})
+
 test('첨부: 파일을 붙이면 목록에 뜨고 전송에 실린다 (D, FR-13)', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await newSession(page, 'alpha', '작업')

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
-import { basename, relative, resolve, sep } from 'node:path'
+import { basename, extname, relative, resolve, sep } from 'node:path'
 import { wireBaseName, wireJoin } from '@cc/protocol'
 
 /**
@@ -18,9 +18,35 @@ import { wireBaseName, wireJoin } from '@cc/protocol'
  */
 
 export type FsEntry = { name: string; path: string; isDir: boolean; ignored: boolean }
-export type FsFile = { text: string; truncated: boolean; binary: boolean; bytes: number }
+export type FsImage = { mime: string; data: string }
+export type FsFile = {
+  text: string
+  truncated: boolean
+  binary: boolean
+  bytes: number
+  /** Raster image bytes for the read-only viewer. Never present for arbitrary binary files. */
+  image?: FsImage
+  /** Why an otherwise recognized image cannot be previewed (for example, its size). */
+  previewError?: string
+}
 
 const MAX_TEXT = 2_000_000 // 2MB 넘으면 잘라 보여준다 (뷰어는 어차피 가상 스크롤)
+const MAX_IMAGE_PREVIEW = 10_000_000 // 10MB — base64와 WebSocket 복사까지 감당할 상한
+
+/** 뷰어가 `img`로 안전하게 표시할 래스터 형식. SVG는 텍스트 뷰어에 남긴다. */
+const IMAGE_MIMES: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  svg: 'image/svg+xml',
+}
+
+function imageMime(path: string): string | undefined {
+  return IMAGE_MIMES[extname(path).slice(1).toLowerCase()]
+}
 
 /** 프로젝트 루트를 벗어나는 경로를 막는다 */
 export function safeJoin(root: string, rel: string): string {
@@ -216,7 +242,37 @@ export async function readTextFile(root: string, rel: string): Promise<FsFile> {
   const info = await stat(file)
   if (info.isDirectory()) throw Object.assign(new Error('Path is a directory'), { code: 'internal' })
 
+  const mime = imageMime(rel)
+  if (mime && mime !== 'image/svg+xml' && info.size > MAX_IMAGE_PREVIEW) {
+    return {
+      text: '',
+      truncated: false,
+      binary: true,
+      bytes: info.size,
+      previewError: `Image is too large to preview (${(info.size / 1_000_000).toFixed(1)}MB; limit is ${MAX_IMAGE_PREVIEW / 1_000_000}MB)`,
+    }
+  }
+
   const buf = await readFile(file)
+  if (mime) {
+    /*
+     * SVG는 이미지이면서 소스이기도 하다. raster처럼 text를 버리면 기존의 코드 읽기
+     * 길을 잃고, text로만 두면 그림을 확인할 수 없다. 둘 다 돌려 뷰어가 Text/Preview를
+     * 고르게 한다. `<img>`로만 그리므로 SVG를 앱 DOM에 주입하거나 실행하지 않는다.
+     */
+    if (mime === 'image/svg+xml') {
+      const truncated = buf.length > MAX_TEXT
+      return {
+        text: (truncated ? buf.subarray(0, MAX_TEXT) : buf).toString('utf8'),
+        truncated,
+        binary: false,
+        bytes: info.size,
+        image: { mime, data: buf.toString('base64') },
+      }
+    }
+    return { text: '', truncated: false, binary: true, bytes: info.size, image: { mime, data: buf.toString('base64') } }
+  }
+
   // 널 바이트가 있으면 바이너리로 본다 (git과 같은 휴리스틱)
   const head = buf.subarray(0, 8000)
   if (head.includes(0)) return { text: '', truncated: false, binary: true, bytes: info.size }
