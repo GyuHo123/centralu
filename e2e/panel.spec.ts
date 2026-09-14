@@ -945,6 +945,33 @@ test('명령어 창: 오케스트레이터에는 없다 — 프로젝트가 없�
   await expect(page.getByTestId('run-open')).toBeHidden()
 })
 
+/**
+ * 오케스트레이터도 살아 있는 세션이 된 뒤에는 Grid의 한 칸으로 볼 수 있다.
+ *
+ * 전에는 GridView가 그 ID를 그릴 수는 있어도, 사이드바에 끌 손잡이가 없었고 칸을
+ * 누르는 순간 focusSession이 전용 화면으로 빼앗아 갔다. 이 검사는 두 규칙 모두를
+ * 묶는다: 첫 대화 뒤에만 끌 수 있고, Grid 안에서 고르면 Grid에 남는다.
+ */
+test('오케스트레이터 세션도 그리드에 올려 나란히 본다', async ({ page }) => {
+  await setup(page)
+  await page.evaluate(async () => {
+    const st = (window as never as { __store: any }).__store.getState()
+    await st.openOrchestrator()
+    await st.askOrchestrator('그리드에서 같이 보자')
+  })
+
+  const id: string = await page.evaluate(() => (window as never as { __store: any }).__store.getState().orchestratorId)
+  await expect(page.getByTestId('orchestrator-button')).toHaveAttribute('draggable', 'true')
+
+  await page.dragAndDrop('[data-testid="orchestrator-button"]', '[data-testid="grid-button"]')
+  await expect(page.getByTestId(`grid-panel-${id}`)).toBeVisible()
+
+  await page.evaluate((sessionId: string) => {
+    ;(window as never as { __store: any }).__store.getState().focusSession(sessionId, { preferGrid: true })
+  }, id)
+  expect(await page.evaluate(() => (window as never as { __store: any }).__store.getState().view)).toBe('grid')
+})
+
 test('명령 별칭: 이름이 앞서고 명령이 받친다 — 목록·실행 줄·터미널 패널 모두 (2026-09-06)', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', '작업')

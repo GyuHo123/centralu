@@ -1838,15 +1838,23 @@ export const useStore = create<AppState>((set, get) => ({
      * (인박스·알림 카드·팔레트·승인 배너·단축키…). 그중 하나만 오케스트레이터를
      * 만나도 같은 증상이 나므로, 판단은 부르는 쪽이 아니라 여기 한 곳에 있어야 한다.
      */
-    const orchestrator = !!id && (id === get().orchestratorId || get().sessions[id]?.kind === 'orchestrator')
     // 이미 그리드에 올라와 있는 세션이면 그리드가 목적지다 (위 preferGrid 주석)
     const onGrid = !!id && !!opts?.preferGrid && get().gridPanels.includes(id)
+    const orchestrator = !!id && (id === get().orchestratorId || get().sessions[id]?.kind === 'orchestrator')
     // 세션을 바꾸면 덮어둔 것은 걷는다 — 새 세션의 대화가 먼저 보여야 한다
     set({
       focusedSessionId: id,
       overlay: null,
       ...(id
-        ? { view: orchestrator ? ('orchestrator' as const) : onGrid ? ('grid' as const) : ('focus' as const) }
+        ? {
+            /*
+             * 오케스트레이터도 Grid에 올라갈 수 있다. 그 칸의 입력창·알림을 눌렀을 때
+             * 전용 화면으로 빼앗기면 "나란히 보기"가 바로 깨진다. preferGrid는 오직
+             * GridView가 준 명시적 의도이므로, 그때만 전용 화면보다 앞선다. 사이드바·
+             * 팔레트처럼 보통으로 고른 경우는 여전히 오케스트레이터 전용 화면으로 간다.
+             */
+            view: onGrid ? ('grid' as const) : orchestrator ? ('orchestrator' as const) : ('focus' as const),
+          }
         : {}),
       ...(projectId ? { focusedProjectId: projectId } : {}),
     })

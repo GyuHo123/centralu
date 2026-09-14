@@ -242,6 +242,7 @@ export function Sidebar() {
 function OrchestratorButton() {
   const view = useStore((s) => s.view)
   const open = useStore((s) => s.openOrchestrator)
+  const id = useStore((s) => s.orchestratorId)
   const active = view === 'orchestrator'
 
   return (
@@ -254,9 +255,25 @@ function OrchestratorButton() {
         }`}
         // 그리드와 같은 규칙: 토글이 아니라 선택이다. 나가려면 다른 것을 고른다
         onClick={() => void open()}
+        /*
+          오케스트레이터도 하나의 세션이다. 첫 대화 전에는 아직 세션 자체가 없으므로
+          끌어서 만들지는 않는다 — 화면을 여는 것만으로 프로세스를 만들지 않는 #63 규칙을
+          여기서도 지킨다. 한 번 대화가 생긴 뒤에는 다른 세션 줄처럼 Grid로 끌어다 놓을 수
+          있다. GridView가 ID를 받는 쪽은 원래 공통이라, 이곳이 빠져 있던 유일한 입구였다.
+        */
+        draggable={!!id}
+        onDragStart={(e) => {
+          if (!id) return
+          e.dataTransfer.setData(SESSION_MIME, id)
+          e.dataTransfer.effectAllowed = 'move'
+        }}
         aria-pressed={active}
         data-testid="orchestrator-button"
-        title="Evolving — one conversation that directs your sessions, and it keeps gaining new abilities. Expect it to change."
+        title={
+          id
+            ? 'Evolving — one conversation that directs your sessions. Drag it to Grid to watch it beside other sessions.'
+            : 'Evolving — one conversation that directs your sessions, and it keeps gaining new abilities. Expect it to change.'
+        }
       >
         <OrchestratorIcon />
         <span className="truncate font-medium tracking-tight">Orchestrator</span>
