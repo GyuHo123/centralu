@@ -1152,6 +1152,10 @@ function ChatStream({
    * 이미 잰 모든 줄의 위치를 갖고 있으므로 그걸 쓴다.
    */
   const [stickyIndex, setStickyIndex] = useState<number | null>(null)
+  /** 실제 카드의 사각형 — 다음 사용자 말과 겹치는지를 DOM 좌표로 재기 위해 든다. */
+  const stickyRef = useRef<HTMLDivElement>(null)
+  /** 스크롤 핸들러는 먼저 돌고 카드는 그 뒤 렌더된다. 최신 DOM에서 재는 함수를 뒤에 꽂는다. */
+  const scheduleStickyOverlap = useRef<() => void>(() => {})
 
   const syncSticky = useCallback(() => {
     const el = scrollRef.current
@@ -1214,6 +1218,7 @@ function ChatStream({
      */
     if (!stillLanding.current) anchor.current = anchorAt(el.scrollTop, virtualizer.measurementsCache, chat)
     syncSticky()
+    scheduleStickyOverlap.current()
   }
 
   /*
@@ -1469,7 +1474,78 @@ function ChatStream({
 
   // 접힘이 기본 — 다른 턴으로 넘어가면 펼침 상태를 끌고 가지 않는다
   const [stickyOpen, setStickyOpen] = useState(false)
-  useEffect(() => setStickyOpen(false), [stickyIndex])
+  const [stickyObscured, setStickyObscured] = useState(false)
+  /** 다음 사용자 말에서 돌아올 때는 기존의 아래→위 진입이 아니라 위→아래로 되돌아온다. */
+  const [stickyReturning, setStickyReturning] = useState(false)
+  const wasStickyObscured = useRef(false)
+  useEffect(() => {
+    setStickyOpen(false)
+    setStickyObscured(false)
+    setStickyReturning(false)
+    wasStickyObscured.current = false
+  }, [stickyIndex])
+
+  /*
+   * 다음 사용자 메시지가 고정 배너 아래로 들어오면 둘 중 하나는 사라져야 한다.
+   *
+   * 원래는 "완전히 지나간 가장 최근 사용자 말"만 고정했고, 그 다음 사용자 말이
+   * 배너와 만나도 배너를 계속 그렸다. 그래서 다음 턴의 원문이 카드 밑에서 잘려,
+   * 질문을 읽으려는 바로 그 순간에 못 읽는 상태가 됐다. 가상 목록의 measurement만
+   * 쓰면 카드의 실제 줄바꿈 높이·열린 상태를 놓치므로, 화면에 렌더된 다음 사용자
+   * 행의 사각형과 배너의 사각형을 직접 비교한다.
+   *
+   * `requestAnimationFrame`은 scroll 이벤트가 만든 stickyIndex 렌더 뒤에 잰다는
+   * 보증이다. 이벤트 순간에는 아직 옛 배너가 DOM에 남아 있어 그 사각형으로 판정하면
+   * 한 프레임 늦게 바뀌거나 반대로 숨는 일이 생긴다.
+   */
+  const overlapFrame = useRef(0)
+  const syncStickyOverlap = useCallback(() => {
+    const stream = scrollRef.current
+    const banner = stickyRef.current
+    if (!stream || !banner || stickyIndex === null || stickyText === null) {
+      setStickyObscured(false)
+      return
+    }
+    const bannerRect = banner.getBoundingClientRect()
+    const nextUser = [...stream.querySelectorAll<HTMLElement>('[data-index]')].find((row) => {
+      const index = Number(row.dataset.index)
+      return index > stickyIndex && chat[index]?.kind === 'user'
+    })
+    if (!nextUser) {
+      setStickyObscured(false)
+      return
+    }
+    const nextRect = nextUser.getBoundingClientRect()
+    // 4px 먼저 비킨다 — 경계가 맞닿은 한 프레임도 "글자가 카드 밑에 있다"로 읽히기 때문이다.
+    const covered = nextRect.top < bannerRect.bottom + 4 && nextRect.bottom > bannerRect.top
+    setStickyObscured(covered)
+  }, [chat, scrollRef, stickyIndex, stickyText])
+
+  useLayoutEffect(() => {
+    const schedule = () => {
+      cancelAnimationFrame(overlapFrame.current)
+      overlapFrame.current = requestAnimationFrame(syncStickyOverlap)
+    }
+    scheduleStickyOverlap.current = schedule
+    schedule()
+    return () => {
+      cancelAnimationFrame(overlapFrame.current)
+      scheduleStickyOverlap.current = () => {}
+    }
+  }, [syncStickyOverlap])
+
+  useLayoutEffect(() => {
+    if (stickyObscured) {
+      wasStickyObscured.current = true
+      setStickyReturning(false)
+      return
+    }
+    // 숨은 상태에서만 되돌아오는 방향을 바꾼다. 첫 진입은 원래 cc-hang의 아래→위다.
+    if (wasStickyObscured.current) {
+      wasStickyObscured.current = false
+      setStickyReturning(true)
+    }
+  }, [stickyObscured])
 
   /*
    * 바닥에 붙어 있으면 계속 따라간다.
@@ -1566,7 +1642,12 @@ function ChatStream({
           디자인 안에 삼키고, 배너는 매달린 띠가 아니라 떠 있는 카드가 된다
           (그래서 아래 버튼은 말풍선과 같은 네 모서리 둥글림과 온전한 테두리를 입는다).
         */
-        <div className="sticky -top-[10px] z-10 -mx-4 mb-1 flex justify-end px-4" data-testid="sticky-user">
+        <div
+          className={`sticky -top-[10px] z-10 -mx-4 mb-1 flex justify-end px-4 ${
+            stickyObscured ? 'pointer-events-none' : ''
+          }`}
+          data-testid="sticky-user"
+        >
           {/*
             말풍선과 **같은 옷, 같은 자리, 같은 폭**을 갖는다. 이 줄은 위로 사라진
             사용자 메시지의 연장이라, 하나라도 다르면 다른 종류의 것으로 읽힌다.
@@ -1587,7 +1668,13 @@ function ChatStream({
             누르면 펼쳐진다 — 한 줄로 부족한 질문을 위로 되돌아가지 않고 다시 읽는 용도.
             아주 긴 질문이 화면을 다 덮지 않게 높이만 자르고 안에서 스크롤한다.
           */}
-          <div className="cc-hang relative w-fit max-w-[75%]">
+          <div
+            ref={stickyRef}
+            className={`relative w-fit max-w-[75%] ${
+              stickyObscured ? 'cc-hang-out-up pointer-events-none' : stickyReturning ? 'cc-hang-in-down' : 'cc-hang'
+            }`}
+            data-obscured={stickyObscured ? 'true' : undefined}
+          >
             {/*
               **불투명이다** (도그푸딩 세 번째 지적 끝의 결론). 반투명+블러는 "가린 게
               아니라 덮었다"를 말하려는 것이었는데, 실측으로 기하학적 틈이 0인데도

@@ -4008,6 +4008,8 @@ test('스크롤하면 지금 보고 있는 턴의 내 메시지가 위에 붙는
   // +80: 배너가 흐름에 자리를 차지하며 리스트를 제 키만큼 밀어내는 것을 넉넉히 덮는다
   await stream.evaluate((el, y) => (el.scrollTop = y + 80), q1End)
   await expect(page.getByTestId('sticky-user')).toContainText('첫 번째 질문')
+  // 다음 사용자 질문이 배너 자리로 올라오면, 그 질문을 덮기 전에 배너가 위로 물러난다.
+  await expect(page.getByTestId('sticky-user').locator('[data-obscured="true"]')).toHaveClass(/cc-hang-out-up/)
   // 원본 줄은 화면 가장자리(오버스캔)에 아직 렌더되어 있다 — 렌더는 되지만 보이지 않아야 한다
   await expect
     .poll(() =>
@@ -4023,9 +4025,15 @@ test('스크롤하면 지금 보고 있는 턴의 내 메시지가 위에 붙는
     누르면 펼쳐진다 — 전문은 접힌 줄 위에 **겹쳐서** 나온다. 흐름에서 키를 키우면
     아래 가상 스크롤 좌표가 통째로 밀리기 때문에, 접힌 줄의 자리는 그대로여야 한다.
   */
+  // 다음 사용자 메시지와 만나는 자리에서는 배너가 비키는 것이 새 규칙이다. 펼침은
+  // 충돌이 없는 마지막 사용자 메시지 자리에서 검증한다.
+  await stream.evaluate((el) => (el.scrollTop = el.scrollHeight))
+  await expect(page.getByTestId('sticky-user')).not.toHaveAttribute('data-obscured', 'true')
   const collapsed = page.getByTestId('sticky-user').getByRole('button').first()
   const collapsedBox = (await collapsed.boundingBox())!
-  await collapsed.click()
+  // 가상 목록은 스크롤 직후 행을 재배치한다. 이 검사는 클릭 표적의 hit-test가 아니라
+  // 펼침 상태 전환 자체를 보므로, 재배치 중 스크롤을 다시 일으키지 않는 DOM click을 쓴다.
+  await collapsed.evaluate((el: HTMLButtonElement) => el.click())
   const expanded = page.getByTestId('sticky-user-expanded')
   await expect(expanded).toBeVisible()
   // 여러 줄이 펼쳐졌고(접힌 한 줄보다 확실히 크다), 접힌 줄의 자리는 안 변했다

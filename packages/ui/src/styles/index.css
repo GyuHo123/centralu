@@ -351,10 +351,44 @@
   animation: cc-hang 180ms ease-out;
 }
 
+/* 다음 사용자 메시지가 다가오면 위로 비킨다 — 말풍선 위로 남아 가리면 안 된다. */
+@keyframes cc-hang-out-up {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+.cc-hang-out-up {
+  animation: cc-hang-out-up 140ms ease-in forwards;
+}
+
+/* 위로 되돌아 다음 메시지와의 충돌이 풀리면, 천장에서 아래로 내려와 다시 붙는다. */
+@keyframes cc-hang-in-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.cc-hang-in-down {
+  animation: cc-hang-in-down 180ms ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .cc-hang {
+  .cc-hang,
+  .cc-hang-out-up,
+  .cc-hang-in-down {
     animation: none;
   }
+  /* 애니메이션을 끈 경우에도 충돌하는 배너는 즉시 물러난다. */
+  .cc-hang-out-up { opacity: 0; }
 }
 
 /*
