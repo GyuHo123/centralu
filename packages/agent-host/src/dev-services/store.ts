@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import type { ProjectInfo, SavedCommand, SessionInfo, StoredMessage, ToolDefaults } from '@cc/protocol'
+import type { GridPanel, ProjectInfo, SavedCommand, SessionInfo, StoredMessage, ToolDefaults } from '@cc/protocol'
 import { sessionLiveDefaults } from '@cc/protocol'
 
 /**
@@ -1255,6 +1255,58 @@ export class Store {
           `)
         },
       },
+      {
+        to: 42,
+        breaksOlderReaders: false,
+        /**
+         * The grid holds apps as well as sessions (#288) — in a table of its own, `grid_layout`.
+         *
+         *   panel_key   the panel's identity as one string — `session:<id>` or `app:<project id | _user>/<app id>` —
+         *               and the primary key, so a panel is placed once. Not (kind, session_id, project_id, app_id):
+         *               SQLite's PRIMARY KEY treats NULLs as distinct (v36's note), and a user-folder app has no
+         *               project, so the same app could be placed twice
+         *   kind        'session' or 'app'
+         *   session_id  a session panel's session, NULL for an app. A foreign key with CASCADE, so a session deleted
+         *               for good takes its panel with it, as `grid_panels` does
+         *   project_id  an app's project, NULL for a user-folder app (and for a session)
+         *   app_id      an app's id
+         *
+         * **Expand only (#292's rule).** `grid_panels` stays exactly as v9 made it, one row per session id, because a
+         * v41 host still reads and writes it: rebuilding it with this key made that host's `grid.set` fail (its insert
+         * names neither `panel_key` nor `kind`, both NOT NULL). So the session rows are copied here once, when this
+         * table is created, and from then on this build reads and writes only `grid_layout`. An older host keeps using
+         * `grid_panels`, so the two builds' grids can differ after either of them changes it — a layout, not a record,
+         * and each build's own list stays whole. Dropping `grid_panels` is a later step, one release on, marked
+         * breaking.
+         *
+         * Only rows whose session still exists are copied: one left behind by a build that wrote with the foreign key
+         * unenforced would fail this table's key, and listGridView never showed it anyway (it joins `sessions`).
+         * Idempotent: an existing `grid_layout` is left alone, so the copy runs once.
+         */
+        run: () => {
+          const has = (name: string) =>
+            this.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`).get(name) !== undefined
+          if (has('grid_layout')) return
+          this.db.transaction(() => {
+            this.db.exec(`
+              CREATE TABLE grid_layout (
+                panel_key  TEXT PRIMARY KEY,
+                kind       TEXT NOT NULL CHECK (kind IN ('session', 'app')),
+                session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+                project_id TEXT,
+                app_id     TEXT,
+                position   INTEGER NOT NULL
+              )
+            `)
+            if (!has('grid_panels')) return
+            this.db.exec(`
+              INSERT OR IGNORE INTO grid_layout (panel_key, kind, session_id, position)
+              SELECT 'session:' || session_id, 'session', session_id, position
+                FROM grid_panels WHERE session_id IN (SELECT id FROM sessions)
+            `)
+          })()
+        },
+      },
     ]
   }
 
@@ -1776,19 +1828,31 @@ export class Store {
     this.db.transaction(() => orderedIds.forEach((id, i) => stmt.run(i, id)))()
   }
 
-  /** The grid layout — in the order the panels were placed */
-  listGridView(): string[] {
-    // `trashSession` takes the panel away; the join keeps a panel written by an older build out of the grid too
-    return (
-      this.db
-        .prepare(
-          `SELECT g.session_id FROM grid_panels g JOIN sessions s ON s.id = g.session_id
-           WHERE s.deleted_at IS NULL ORDER BY g.position`,
-        )
-        .all() as {
-        session_id: string
-      }[]
-    ).map((r) => r.session_id)
+  /**
+   * The grid layout — sessions and apps, in the order the panels were placed (#288).
+   *
+   * A session panel shows only while its session is live: `trashSession` takes the panel away, and the join keeps a
+   * panel written by an older build out of the grid too. An app panel shows while its project is registered (a
+   * user-folder app has none); `deleteProject` takes its panels away, and the join covers a row it missed. Whether the
+   * app itself still exists is not asked here — the app list is read from folders, it can lag behind, and the screen
+   * leaves out an app it cannot find without the list losing its place.
+   */
+  listGridView(): GridPanel[] {
+    const rows = this.db
+      .prepare(
+        `SELECT g.kind, g.session_id, g.project_id, g.app_id FROM grid_layout g
+           LEFT JOIN sessions s ON g.kind = 'session' AND s.id = g.session_id
+           LEFT JOIN projects p ON g.kind = 'app' AND p.id = g.project_id
+          WHERE (g.kind = 'session' AND s.id IS NOT NULL AND s.deleted_at IS NULL)
+             OR (g.kind = 'app' AND g.app_id IS NOT NULL AND (g.project_id IS NULL OR p.id IS NOT NULL))
+          ORDER BY g.position`,
+      )
+      .all() as { kind: string; session_id: string | null; project_id: string | null; app_id: string | null }[]
+    return rows.map((r) =>
+      r.kind === 'session'
+        ? { kind: 'session' as const, sessionId: r.session_id! }
+        : { kind: 'app' as const, projectId: r.project_id, appId: r.app_id! },
+    )
   }
 
   /**
@@ -1796,14 +1860,20 @@ export class Store {
    *
    * Adding, removing and reordering all arrive as this one call, so deleting and reinserting
    * is the simplest approach. The list is short (a screen a person looks at), and being one
-   * transaction means no intermediate state is ever visible.
+   * transaction means no intermediate state is ever visible. A panel named twice keeps its first
+   * place (`panel_key` is the primary key).
    */
-  setGridView(sessionIds: readonly string[]): void {
-    const del = this.db.prepare(`DELETE FROM grid_panels`)
-    const ins = this.db.prepare(`INSERT INTO grid_panels (session_id, position) VALUES (?, ?)`)
+  setGridView(panels: readonly GridPanel[]): void {
+    const del = this.db.prepare(`DELETE FROM grid_layout`)
+    const ins = this.db.prepare(
+      `INSERT OR IGNORE INTO grid_layout (panel_key, kind, session_id, project_id, app_id, position) VALUES (?, ?, ?, ?, ?, ?)`,
+    )
     this.db.transaction(() => {
       del.run()
-      sessionIds.forEach((id, i) => ins.run(id, i))
+      panels.forEach((p, i) => {
+        if (p.kind === 'session') ins.run(`session:${p.sessionId}`, 'session', p.sessionId, null, null, i)
+        else ins.run(`app:${p.projectId ?? '_user'}/${p.appId}`, 'app', null, p.projectId, p.appId, i)
+      })
     })()
   }
 
@@ -2012,7 +2082,9 @@ export class Store {
         .prepare(`UPDATE sessions SET deleted_at = ?, trash = ?, project_id = NULL WHERE id = ? AND deleted_at IS NULL`)
         .run(Date.now(), JSON.stringify(record), sessionId).changes
       if (moved === 0) return false
+      // Both lists: this build's, and the one an older host still reads (v42)
       this.db.prepare(`DELETE FROM grid_panels WHERE session_id = ?`).run(sessionId)
+      this.db.prepare(`DELETE FROM grid_layout WHERE session_id = ?`).run(sessionId)
       return true
     })
     if (!move()) return false
@@ -2205,7 +2277,10 @@ export class Store {
           .prepare(`UPDATE sessions SET deleted_at = ?, trash = ?, project_id = NULL WHERE id = ? AND deleted_at IS NULL`)
           .run(Date.now(), JSON.stringify(record), id)
         this.db.prepare(`DELETE FROM grid_panels WHERE session_id = ?`).run(id)
+        this.db.prepare(`DELETE FROM grid_layout WHERE session_id = ?`).run(id)
       }
+      // The project's apps leave the grid with it: layout, like a session's panel
+      this.db.prepare(`DELETE FROM grid_layout WHERE kind = 'app' AND project_id = ?`).run(projectId)
       this.db
         .prepare(
           `/* includes the trash: a rule of a session in the trash stays with it */

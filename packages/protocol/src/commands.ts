@@ -20,6 +20,7 @@ import {
   AppVersions,
   UsageSnapshot,
   GitFileStatus,
+  GridPanel,
   ModelOption,
   PermissionPreset,
   Question,
@@ -987,13 +988,6 @@ export const RpcMethods = {
     result: z.array(SessionInfo),
   },
   /**
-   * The sessions placed on the grid (order included).
-   *
-   * Since this is an auto-flow grid, layout and order are the same single thing. So **adding,
-   * removing and reordering are all expressed by this one operation** — "make the list look
-   * like this."
-   */
-  /**
    * The app's single orchestrator. **Calling this creates one if it does not exist.**
    * Creating it ahead of time would leave a session nobody uses holding onto a tool process.
    */
@@ -1515,10 +1509,32 @@ export const RpcMethods = {
       structuredContent: z.record(z.string(), z.unknown()).optional(),
     }),
   },
-  'grid.get': { params: z.object({}), result: z.array(z.string()) },
+  /**
+   * The panels placed on the grid, in order — sessions and apps (`GridPanel`, #288).
+   *
+   * Since this is an auto-flow grid, layout and order are the same single thing. So **adding,
+   * removing and reordering are all expressed by this one operation** — "make the list look
+   * like this." The answer is the list as stored: a session the host does not know, a duplicate,
+   * or an app of a project that is not registered is left out. An app is not checked against the
+   * app list, which can lag behind its folder; the screen leaves out one it cannot find.
+   *
+   * **Expanded, not replaced (protocol.md §4).** Before #288 both methods spoke in bare session
+   * ids: `grid.get` answered them, `grid.set` took `{ sessionIds }`. A build that knows panels asks
+   * for them (`tagged: true`, `panels`) and gets panels back; a request without them gets the old
+   * shape, the sessions only. A newer UI also sends `sessionIds` next to `panels`, so an older host,
+   * which strips the field it does not know, still saves the sessions. So a UI and a host one build
+   * apart keep working either way, and `PROTOCOL_VERSION` stays where it is. The old fields go one
+   * release later.
+   */
+  'grid.get': {
+    params: z.object({ tagged: z.literal(true).optional() }),
+    result: z.union([z.array(GridPanel), z.array(z.string())]),
+  },
   'grid.set': {
-    params: z.object({ sessionIds: z.array(z.string()) }),
-    result: z.array(z.string()),
+    params: z
+      .object({ panels: z.array(GridPanel).max(256).optional(), sessionIds: z.array(z.string()).max(256).optional() })
+      .refine((p) => p.panels !== undefined || p.sessionIds !== undefined, 'panels or sessionIds is required'),
+    result: z.union([z.array(GridPanel), z.array(z.string())]),
   },
   'projects.list': { params: z.object({}), result: z.array(ProjectInfo) },
   'projects.gitStatus': { params: z.object({ projectId: ProjectId }), result: ProjectInfo },
