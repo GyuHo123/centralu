@@ -313,8 +313,10 @@ export class HostServer {
 
   /** Broadcasts an event — assigns a seq, keeps it in the ring buffer, and pushes it to connected clients */
   broadcast(event: NormalizedEvent): void {
-    const entry = this.log.append(event)
-    const frame = JSON.stringify({ kind: 'event', seq: entry.seq, event })
+    // Serialised once: its size charges the replay buffer, and the frame is built around it
+    const body = JSON.stringify(event)
+    const entry = this.log.append(event, body.length)
+    const frame = `{"kind":"event","seq":${entry.seq},"event":${body}}`
     for (const ws of this.clients) this.sendTo(ws, frame)
   }
 
