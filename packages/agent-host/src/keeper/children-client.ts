@@ -249,6 +249,8 @@ export class KeeperChildren extends EventEmitter {
   /** Forgets an exited child. A running one is refused: signal it first. */
   async release(id: string): Promise<void> {
     await this.request('release', { id })
+    // The exit was read before the release; keeping it would add an entry per child for the host's life (#392)
+    this.exits.delete(id)
   }
 
   /** The exit already reported for this child, if any. */
