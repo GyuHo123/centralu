@@ -24,6 +24,7 @@ import type { AdapterCapabilities, ApprovalDecision, GridPanel, NormalizedEvent,
 import { NormalizedEvent as NormalizedEventSchema, sessionLiveDefaults } from '@cc/protocol'
 import type { AgentAdapter, CreateSessionOpts, EventSink, HistoryMessage, OrchestratorTools, SessionHandle } from '../adapters/contract.js'
 import { Store } from '../dev-services/store.js'
+import { plantedRepo } from '../dev-services/planted-repo.test-helpers.js'
 import { SessionManager } from './manager.js'
 import { normalizeNotification } from '../adapters/codex/normalize.js'
 import { createRpcHandler } from '../rpc.js'
@@ -211,6 +212,41 @@ describe('projects', () => {
     expect(one.id).toBe(p.id)
     expect(one.path).toBe(p.path)
     await expect(rpc('projects.gitStatus', { projectId: 'nope' })).rejects.toThrow(/Project not found/)
+  })
+
+  /*
+   * #407: adding a folder is enough for the host to read it, so every read a project's screens make
+   * must run none of the repository's programs until the person trusts it. The reads themselves are
+   * covered one by one in git-untrusted.test.ts; this is the wiring — each door passes the
+   * project's trust, read fresh, rather than a default.
+   */
+  it('runs none of the repository’s programs before project trust, through every door that reads it', async () => {
+    const planted = plantedRepo()
+    try {
+      const project = (await rpc('projects.add', { path: planted.dir })) as { id: string }
+      const projectId = project.id
+      await rpc('projects.list', {})
+      await rpc('projects.gitStatus', { projectId })
+      await rpc('git.status', { projectId })
+      await rpc('git.diff', { projectId, path: 'a.txt' })
+      await rpc('git.diff', { projectId, path: 'new.txt' })
+      await rpc('git.log', { projectId })
+      await rpc('git.commitDetail', { projectId, sha: planted.signed })
+      await rpc('git.ignoredEntries', { projectId })
+      await rpc('git.checkout', { projectId, branch: 'main', dryRun: true })
+      await rpc('fs.listDir', { projectId, path: '' })
+      await rpc('files.search', { projectId, query: 'new' })
+      await expect(
+        rpc('agents.createSession', { projectId, cwd: planted.dir, tool: 'claude', worktree: true }),
+      ).rejects.toThrow(/trusted project/)
+      expect(planted.ran()).toEqual([])
+
+      await rpc('projects.setTrusted', { projectId, trusted: true })
+      await rpc('projects.gitStatus', { projectId })
+      expect(planted.ran()).toContain('fsmonitor')
+    } finally {
+      rmSync(planted.root, { recursive: true, force: true, maxRetries: 5 })
+    }
   })
 
   /*
@@ -2514,6 +2550,8 @@ describe('worktree sessions', () => {
     wtMgr.prLookup = async () => null
     wtRpc = createRpcHandler(wtMgr, adapters)
     project = (await wtRpc('projects.add', { path: repo })) as { id: string; path: string }
+    // A worktree is only made in a trusted project (#407)
+    await wtRpc('projects.setTrusted', { projectId: project.id, trusted: true })
   })
 
   /*
@@ -3052,6 +3090,27 @@ describe('worktree sessions', () => {
       expect(r.isError).toBe(true)
       expect(r.text).toContain('uncommitted changes')
       // Nothing was deleted — a refusal is not a partial execution.
+      expect(wtMgr.listSessions().some((x) => x.id === s.id)).toBe(true)
+      expect(existsSync(s.worktree!.path)).toBe(true)
+    })
+
+    it('does not delete when the only uncommitted work is inside a submodule', async () => {
+      const moduleRepo = join(root, 'module-source')
+      execFileSync('git', ['init', '-q', '-b', 'main', moduleRepo], { cwd: root })
+      writeFileSync(join(moduleRepo, 'module.txt'), 'committed\n')
+      g(moduleRepo, ['add', '.'])
+      g(moduleRepo, ['commit', '-qm', 'module init'])
+      g(repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', moduleRepo, 'nested'])
+      g(repo, ['commit', '-qm', 'add submodule'])
+
+      const { s, managerId } = await makeChild('feat/dirty-submodule')
+      g(s.worktree!.path, ['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init'])
+      writeFileSync(join(s.worktree!.path, 'nested', 'module.txt'), 'uncommitted\n')
+
+      const r = await wtMgr.runOrchestratorTool(managerId, 'delete_worktree_session', { sessionId: s.id })
+
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain('uncommitted changes')
       expect(wtMgr.listSessions().some((x) => x.id === s.id)).toBe(true)
       expect(existsSync(s.worktree!.path)).toBe(true)
     })
