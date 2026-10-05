@@ -1,3 +1,4 @@
+import { frameDragEndInPage } from '../engine.js'
 import type {
   AppPermission,
   AppUsage,
@@ -214,6 +215,8 @@ export class MockPlatform implements Platform {
     // Same reason: settles on the Mac name as the answer — guessing the machine e2e runs on
     // would make what gets written on screen vary from test to test.
     fileManagerName: 'Finder',
+    // E2E drives this mock in Chromium and in WebKit, and the engine running it is the real one
+    frameDragEndInPage: frameDragEndInPage(),
   }
 
   /** The channel through which tests inject events */
