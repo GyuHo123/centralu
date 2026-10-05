@@ -187,7 +187,8 @@ describe('the WAL', () => {
     const s = new Store(file)
     const db = (s as unknown as { db: Database.Database }).db
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1)
-    expect(db.pragma('synchronous', { simple: true })).toBe(1)
+    // FULL (2): NORMAL can lose the last commits on power loss, and those are conversations
+    expect(db.pragma('synchronous', { simple: true })).toBe(2)
     expect(db.pragma('busy_timeout', { simple: true })).toBe(5000)
     expect(db.pragma('journal_size_limit', { simple: true })).toBe(64 * 1024 * 1024)
     s.close()

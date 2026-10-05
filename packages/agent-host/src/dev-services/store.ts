@@ -149,12 +149,13 @@ export class Store {
       this.db.pragma('journal_mode = WAL')
       /*
        * Set here rather than left to how better-sqlite3 happens to be built (#396). CASCADE on project and session
-       * deletion depends on `foreign_keys`, which plain SQLite (and rusqlite, the planned replacement) leaves off;
-       * `synchronous = NORMAL` is the WAL setting that loses at most the last commits on power loss, never the file;
+       * deletion depends on `foreign_keys`, which plain SQLite (and rusqlite, the planned replacement) leaves off.
+       * `synchronous = FULL` is what better-sqlite3's build already gave in WAL mode, kept on purpose: NORMAL can lose
+       * the last commits on power loss or an OS crash, and those are conversations, the data the store must not lose.
        * `busy_timeout` is the library's default made visible.
        */
       this.db.pragma('foreign_keys = ON')
-      this.db.pragma('synchronous = NORMAL')
+      this.db.pragma('synchronous = FULL')
       this.db.pragma('busy_timeout = 5000')
       /*
        * A checkpoint that resets the WAL also cuts the file back to this. Without a limit the WAL keeps the size of the
