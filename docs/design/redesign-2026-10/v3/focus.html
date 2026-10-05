@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session</title>
+<link rel="stylesheet" href="session.css">
+<script>
+  const h = location.hash
+  if (h.includes('dark')) document.documentElement.dataset.theme = 'dark'
+  for (const k of ['inbox', 'palette', 'ev']) if (h.includes(k)) document.documentElement.classList.add('show-' + k)
+</script>
+</head>
+<body>
+  <header class="cbar">
+    <div class="brand"><span class="logo">C</span>Centralu</div>
+    <div class="find"><i class="ph ph-magnifying-glass"></i>Go to a session, file, command or setting<kbd>⌘K</kbd></div>
+    <div class="cright">
+      <span class="waitpill"><i class="ph-fill ph-hand"></i>3 waiting <kbd>⌘I</kbd></span>
+      <span class="usage"><span class="ring" style="--v:41%"></span>Claude 41%</span>
+      <span class="usage"><span class="ring" style="--v:18%"></span>Codex 18%</span>
+      <span class="cicon"><i class="ph ph-gear-six"></i></span>
+    </div>
+  </header>
+
+  <div class="frame">
+    <aside class="nav">
+      <div class="nav-top">
+        <span class="ni"><i class="ph ph-crown-simple"></i>Orchestrator<span class="sub">evolving</span></span>
+        <span class="ni"><i class="ph ph-squares-four"></i>Grid<span class="k">3</span></span>
+      </div>
+      <div class="nav-scroll">
+        <div class="sec act"><i class="ph-fill ph-hand"></i>Waiting on you<span class="r">3</span></div>
+        <div class="row need sel"><span class="tm">X</span><span class="n">Orphaned process cleanup</span><span class="t">2m</span><span class="s">Approve: kill -TERM 40321</span></div>
+        <div class="row need"><span class="tm">C</span><span class="n">Hero copy options</span><span class="t">6m</span><span class="s">Question: which hero line</span></div>
+        <div class="row fail"><span class="tm">C</span><span class="n">결제 웹훅 재시도</span><span class="t">11m</span><span class="s">Stopped: 2 of 31 tests fail</span></div>
+
+        <div class="sec">Projects<span class="r"><i class="ph ph-arrows-down-up"></i><i class="ph ph-plus"></i></span></div>
+        <div class="proj"><i class="ph ph-caret-down"></i>centralu<span class="c">4</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Composer polish</span><span class="st"><span class="g work"></span>4m</span><span class="s">Editing SessionView.tsx</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Keeper review (manager)</span><span class="st"><span class="g idle"></span>idle</span></div>
+        <div class="row child"><span class="tm">X</span><span class="n">fix/orphans</span><span class="st"><span class="g need"></span>approve</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Release notes, beta.11</span><span class="st"><span class="g done"></span>done</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>landing-site<span class="c">2</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>payments-api<span class="c">2</span></div>
+
+        <div class="sec">Your apps<span class="r"><i class="ph ph-download-simple"></i><i class="ph ph-plus"></i></span></div>
+        <div class="app-row"><i class="ph ph-kanban"></i>project-board<span class="st">running</span></div>
+        <div class="app-row"><i class="ph ph-chart-line"></i>usage-report<span class="st">stopped</span></div>
+      </div>
+      <div class="nav-foot"><span class="ni"><i class="ph ph-folder-plus"></i>Add project</span></div>
+    </aside>
+
+    <section class="main">
+      <header class="sh">
+        <span class="tm">X</span><h1>Orphaned process cleanup</h1>
+        <span class="chip"><i class="ph ph-git-branch"></i>fix/orphans</span>
+        <span class="sp"></span>
+        <span class="state"><i class="ph-fill ph-hand"></i>Waiting on you</span>
+        <span class="acts">
+          <span class="ib lab"><i class="ph ph-play"></i>Run</span>
+          <span class="ib" title="Restart"><i class="ph ph-arrow-clockwise"></i></span>
+          <span class="ib" title="Continue in a new session"><i class="ph ph-git-fork"></i></span>
+          <span class="ib" title="Session settings"><i class="ph ph-sliders-horizontal"></i></span>
+          <span class="ib" title="Rename, move to trash"><i class="ph ph-dots-three"></i></span>
+        </span>
+      </header>
+
+      <div class="stream">
+        <div class="pin"><i class="ph ph-arrow-bend-down-right"></i>Answering <b>Run a script that finds only the orphaned processes and stops them.</b></div>
+        <div class="col">
+          <div class="mark">Earlier messages were compacted</div>
+          <div class="you">Run a script that finds only the orphaned processes and stops them. Show me the list before you kill anything.</div>
+
+          <div class="work">
+            <div class="work-h"><i class="ph ph-caret-down"></i><b>Worked</b> read 2 files, ran 2 commands, edited 1<span class="sp"></span><span style="color:var(--ink3)">41s</span></div>
+            <div class="call"><i class="ph ph-file-text"></i><span class="v">Read</span><span class="p">scripts/strays.ts</span><span class="r">218 lines</span><i class="ph ph-caret-right"></i></div>
+            <div class="call"><i class="ph ph-terminal"></i><span class="v">Ran</span><span class="p">ps -eo pid,ppid,pgid,comm</span><span class="r">0.4s</span><i class="ph ph-caret-down"></i></div>
+            <div class="card">
+              <div><span class="dim">  PID  PPID  PGID COMMAND</span></div>
+              <div>40321     1 40321 node vite</div>
+              <div>40388 40321 40321 esbuild</div>
+              <div class="more"><span>42 more lines</span><span>Show all</span><span>Copy</span></div>
+            </div>
+            <div class="call"><i class="ph ph-pencil-simple"></i><span class="v">Edited</span><span class="p">scripts/strays.ts</span><span class="r"><span class="add">+14</span> <span class="del">−3</span></span><i class="ph ph-caret-right"></i></div>
+          </div>
+
+          <div class="agent"><span class="ic"><i class="ph ph-robot"></i></span><b>Explore agent</b><span class="o">6 steps<i class="ph ph-caret-right"></i></span><span class="d">Checked which processes the keeper holds</span></div>
+
+          <div class="view">
+            <div class="view-h"><i class="ph ph-kanban"></i><b>project-board</b><span style="color:var(--ink3)">opened by add_card</span><span class="sp"></span><span class="ib"><i class="ph ph-arrows-out-simple"></i></span><span class="ib"><i class="ph ph-x"></i></span></div>
+            <div class="board">
+              <div class="colm"><h4>To do 3</h4><span class="tk">Kill orphaned vite</span><span class="tk">Document strays.ts</span></div>
+              <div class="colm"><h4>Doing 1</h4><span class="tk">Find orphans</span></div>
+              <div class="colm"><h4>Done 4</h4><span class="tk">Keeper handoff test</span></div>
+            </div>
+          </div>
+
+          <div class="say">Two processes have no living parent and no keeper hold: <code>40321</code>, a <code>vite</code> dev server started 3 days ago, and <code>40388</code>, its esbuild child. I will stop the dev server first; its child exits with it.</div>
+
+          <div class="plan">
+            <h3>Plan, 2 of 3</h3>
+            <div class="step done"><i class="ph ph-check-circle"></i>List processes without a parent or a keeper hold</div>
+            <div class="step now"><i class="ph-fill ph-arrow-circle-right"></i>Stop the orphaned dev server</div>
+            <div class="step"><i class="ph ph-circle"></i>Run strays.ts again and confirm nothing is left</div>
+          </div>
+          <div class="live"><span class="spin"></span>Waiting for your answer<span class="sp"></span><span class="bg"><i class="ph ph-terminal-window"></i>1 background: pnpm dev</span><span class="btn sm">Stop</span></div>
+        </div>
+      </div>
+
+      <div class="dock">
+        <div class="decide">
+          <div class="dh"><i class="ph-fill ph-hand"></i>Codex wants to run a command<span class="w">2 min</span></div>
+          <div class="cmd">kill -TERM 40321<span class="d">in ~/code/centralu</span></div>
+          <div class="row-b">
+            <span class="btn sm p">Allow <kbd>Y</kbd></span>
+            <span class="btn sm">Deny <kbd>N</kbd></span>
+            <span class="btn sm q">Always allow <kbd>A</kbd></span>
+            <span class="btn sm q">For the whole project <kbd>⌥A</kbd></span>
+            <span class="sp"></span>
+            <span class="h">Next waiting <kbd>⌘⇧A</kbd></span>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="in">Reply, / for commands, @ for files</div>
+          <div class="bar">
+            <span class="ib"><i class="ph ph-paperclip"></i></span>
+            <span class="chip"><i class="ph ph-cpu"></i>gpt-5-codex, high effort</span>
+            <span class="chip"><i class="ph ph-shield-check"></i>Normal</span>
+            <span class="sp"></span>
+            <span class="meter">Context <i></i>37%</span>
+            <span class="send"><i class="ph ph-arrow-up"></i></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="ev">
+      <div class="ev-h"><i class="ph ph-git-branch"></i>fix/orphans<span class="m">↑1</span><span class="r"><i class="ph ph-arrows-out"></i><i class="ph ph-sidebar-simple"></i></span></div>
+      <div class="tabs"><span class="tab sel">Changes <span class="c">3</span></span><span class="tab">History</span><span class="tab">Files</span><span class="tab">Terminal <span class="c">1</span></span></div>
+      <div class="ev-body">
+        <div class="grp-h">Staged<span class="r">Unstage all</span></div>
+        <div class="f sel"><span class="box on"></span><span class="k add">M</span><span class="p">scripts/strays.ts</span><span class="n"><span class="add">+14</span> <span class="del">−3</span></span></div>
+        <div class="grp-h">Changes<span class="r">Stage all</span></div>
+        <div class="f"><span class="box"></span><span class="k add">A</span><span class="p">scripts/strays.test.ts</span><span class="n add">+41</span></div>
+        <div class="f"><span class="box"></span><span class="k del">D</span><span class="p">docs/old-notes.md</span><span class="n del">−22</span></div>
+        <div class="hunk">
+          <div class="hh">scripts/strays.ts  @@ 41,7 +41,18 @@</div>
+          <div class="c">  const procs = await listProcesses()</div>
+          <div class="r">- return procs.filter(p =&gt; p.ppid === 1)</div>
+          <div class="a">+ const held = await keeperHolds()</div>
+          <div class="a">+ return procs.filter(p =&gt;</div>
+          <div class="a">+   p.ppid === 1 &amp;&amp; !held.has(p.pgid))</div>
+          <div class="c">}</div>
+        </div>
+        <div class="note"><span>Expand</span><span>Open in IDE</span><span>Show all</span></div>
+      </div>
+      <div class="commit">
+        <div class="in">Commit message</div>
+        <div class="row-b"><span class="btn sm ink">Commit 1 file</span><span class="btn sm">Push ↑1</span></div>
+      </div>
+    </aside>
+
+    <!-- below 1100px the evidence panel folds to this rail; a tab opens the panel over the main lane -->
+    <aside class="n-evrail">
+      <span class="n-eb" title="Pin the panel open"><i class="ph ph-sidebar-simple"></i></span>
+      <span class="n-eb sel" title="Changes"><i class="ph ph-git-diff"></i><span class="n-c">3</span></span>
+      <span class="n-eb" title="History"><i class="ph ph-clock-counter-clockwise"></i></span>
+      <span class="n-eb" title="Files"><i class="ph ph-folder-simple"></i></span>
+      <span class="n-eb" title="Terminal"><i class="ph ph-terminal-window"></i><span class="n-dot"></span></span>
+      <span class="n-eb n-br" title="fix/orphans"><i class="ph ph-git-branch"></i></span>
+    </aside>
+  </div>
+
+  <!-- the inbox, opened from "3 waiting" or ⌘I: each card can be answered where it is -->
+  <div class="layer inbox"><div class="pop">
+    <div class="ih"><i class="ph-fill ph-hand"></i>Waiting on you, 3<span class="h"><span><kbd>↑</kbd> <kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd></span></span></div>
+    <div class="it sel"><span class="tm">X</span><span class="n">Orphaned process cleanup</span><span class="w">centralu, 2m</span>
+      <span class="k">Wants to run a command</span>
+      <div class="body">
+        <div class="cmd">kill -TERM 40321<span class="d">in ~/code/centralu</span></div>
+        <div class="row-b"><span class="btn sm p">Allow <kbd>Y</kbd></span><span class="btn sm">Deny <kbd>N</kbd></span><span class="btn sm q">Always <kbd>A</kbd></span><span class="sp"></span><span class="btn sm q">Open <kbd>↵</kbd></span></div>
+      </div>
+    </div>
+    <div class="it"><span class="tm">C</span><span class="n">Hero copy options</span><span class="w">landing-site, 6m</span>
+      <span class="k">Asks: Which hero line should we ship?</span>
+      <div class="body"><div class="opts">
+        <span class="o1"><kbd>1</kbd>Stop watching. Start steering.<span>Leads with what changes</span></span>
+        <span class="o1"><kbd>2</kbd>Many agents, one window.<span>Says what it is</span></span>
+        <span class="o1"><kbd>3</kbd>Every session, one glance away.<span>Leads with the overview</span></span>
+      </div></div>
+    </div>
+    <div class="it fail"><span class="tm">C</span><span class="n">결제 웹훅 재시도</span><span class="w">payments-api, 11m</span>
+      <span class="k">Stopped with an error: 2 of 31 tests fail</span>
+    </div>
+    <div class="if"><span>Next waiting from anywhere <kbd>⌘⇧A</kbd></span><span class="sp"></span><span>Sound on</span><span>Notification settings</span></div>
+  </div></div>
+
+  <!-- the palette, ⌘K -->
+  <div class="layer palette"><div class="pop">
+    <div class="pin-in"><i class="ph ph-magnifying-glass"></i>orph<span class="caret"></span><span class="scope"><span class="chip">All</span></span></div>
+    <div class="pg"><h5>Sessions</h5>
+      <div class="pr sel"><span class="tm">X</span><span><mark>Orph</mark>aned process cleanup</span><span class="r"><span class="g need"></span>approve<kbd>↵</kbd></span><span class="d">centralu, fix/orphans</span></div>
+    </div>
+    <div class="pg"><h5>Messages</h5>
+      <div class="pr"><i class="ph ph-chat-text"></i><span>"…finds only the <mark>orph</mark>aned processes and stops them"</span><span class="r">14m</span><span class="d">You, in Orphaned process cleanup</span></div>
+      <div class="pr"><i class="ph ph-chat-text"></i><span>"Two processes have no living parent… <mark>orph</mark>an"</span><span class="r">3m</span><span class="d">Codex, in Orphaned process cleanup</span></div>
+    </div>
+    <div class="pg"><h5>Files</h5>
+      <div class="pr"><i class="ph ph-file-ts"></i><span class="mono" style="font-size:12.5px">scripts/<mark>orph</mark>ans.test.ts</span><span class="r">centralu</span><span class="d">Opens in the code viewer</span></div>
+    </div>
+    <div class="pg"><h5>Actions</h5>
+      <div class="pr"><i class="ph ph-hand"></i><span>Jump to next waiting</span><span class="r"><kbd>⌘⇧A</kbd></span></div>
+      <div class="pr"><i class="ph ph-git-diff"></i><span>Open Git</span><span class="r"></span></div>
+      <div class="pr"><i class="ph ph-sidebar-simple"></i><span>Evidence panel</span><span class="r"><kbd>⌘B</kbd></span></div>
+    </div>
+    <div class="pf"><span><kbd>↑</kbd> <kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>
+  </div></div>
+</body>
+</html>

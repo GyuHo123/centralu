@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Grid</title>
+<link rel="stylesheet" href="session.css">
+<script>if (location.hash.includes('dark')) document.documentElement.dataset.theme = 'dark'</script>
+<style>
+
+  /* a panel: a whole session or app, framed */
+  .g-panel { position: relative; display: grid; grid-template-rows: 40px 1fr auto; min-width: 0; min-height: 0; background: var(--raise); border-radius: 12px; box-shadow: 0 0 0 1px var(--line); overflow: hidden; }
+  .g-panel.app { grid-template-rows: 40px 1fr; }
+  .g-ph { display: flex; align-items: center; gap: 8px; padding: 0 8px 0 6px; border-bottom: 1px solid var(--line); background: var(--paper); min-width: 0; }
+  .g-ph .grip { color: var(--ink4); font-size: 15px; cursor: grab; }
+  .g-ph b { font-size: 13px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .g-ph .sp { flex: 1; }
+  .g-ph .ib { width: 26px; height: 26px; }
+  .g-ph .ib .ph { font-size: 15px; }
+  .g-st { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--ink3); white-space: nowrap; }
+  .g-st.need { color: var(--act); font-weight: 650; }
+  .g-st .ph-fill { font-size: 13px; }
+  .g-badge { font-size: 10.5px; font-weight: 600; color: var(--ink2); background: var(--sel); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+
+  /* waiting on you: the band and the outline are the one cobalt thing on the panel */
+  .g-panel.need { box-shadow: 0 0 0 1.5px var(--act); }
+  .g-panel.need::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--act); z-index: 1; }
+  /* working: a quiet arc running round the frame (static here) */
+  .g-panel.work { box-shadow: none; border: 1px solid transparent; background: linear-gradient(var(--raise), var(--raise)) padding-box, conic-gradient(from 210deg, var(--line) 0 62%, var(--ink3) 80%, var(--line) 96%) border-box; }
+
+  .g-tail { overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; gap: 10px; padding: 12px 14px 10px; min-height: 0; }
+  .g-tail .say { font-size: 13px; line-height: 1.6; }
+  .g-tail .work { font-size: 12px; }
+  .g-line { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink3); }
+  .g-line .ph { font-size: 14px; }
+  .g-line b { color: var(--ink2); font-weight: 600; }
+  .g-line .p { font: 11.5px var(--mono); color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .g-line .sp { flex: 1; }
+  .g-tail .you { font-size: 13px; padding: 8px 12px; }
+
+  .g-ask { margin: 0 10px 8px; border-radius: 10px; background: var(--act-soft); padding: 9px 10px; display: grid; gap: 7px; }
+  .g-ask .t { font-size: 12px; font-weight: 650; color: var(--act); display: flex; gap: 6px; align-items: center; }
+  .g-ask .cmd { font-size: 12.5px; padding: 7px 10px; }
+  .g-ask .row-b .btn.sm { height: 26px; padding: 0 9px; font-size: 12px; }
+
+  /* folded composer: peeks 16px, rises on hover or focus */
+  .g-fold { height: 16px; margin: 0 10px; border-radius: 10px 10px 0 0; background: var(--paper); box-shadow: 0 0 0 1px var(--line2); display: flex; justify-content: center; align-items: flex-start; padding-top: 5px; }
+  .g-fold i { width: 28px; height: 3px; border-radius: 2px; background: var(--line2); }
+
+  .g-live { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink2); }
+  .g-live .sp { flex: 1; }
+
+  .g-main { display: grid; grid-template-rows: 46px 1fr; min-width: 0; min-height: 0; }
+  .g-bar { display: flex; align-items: center; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--paper); }
+  .g-bar h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; }
+  .g-bar .m { font-size: 12px; color: var(--ink3); }
+  .g-bar .sp { flex: 1; }
+  .g-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 10px; min-height: 0; }
+  .g-a { grid-column: 1; grid-row: 1; }
+  .g-b { grid-column: 2; grid-row: 1; }
+  .g-app { grid-column: 1 / 3; grid-row: 2; }
+  .g-drop { grid-column: 3; grid-row: 1 / 3; border-radius: 12px; border: 1.5px dashed var(--line2); display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--ink3); font-size: 12.5px; text-align: center; padding: 20px; }
+  .g-drop .ph { font-size: 26px; color: var(--ink4); }
+  .g-drop b { color: var(--ink2); font-weight: 600; font-size: 13px; }
+
+  .g-panel.app .board { padding: 10px; height: 100%; }
+  .g-panel.app .colm { align-content: start; }
+  .g-size { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px; border-radius: 7px; box-shadow: 0 0 0 1px var(--line2); font: 600 11px var(--mono); color: var(--ink2); background: var(--raise); }
+  .g-size .ph { font-size: 13px; }
+  .g-pick { position: absolute; top: 36px; right: 70px; z-index: 3; width: 150px; padding: 10px; border-radius: 12px; background: var(--raise); box-shadow: 0 0 0 1px var(--line2), 0 18px 40px -18px rgb(14 16 19 / 0.4); display: grid; gap: 8px; }
+  .g-pick h6 { font-size: 11.5px; font-weight: 650; color: var(--ink3); display: flex; }
+  .g-pick h6 span { margin-left: auto; font-family: var(--mono); color: var(--ink); }
+  .g-cells { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  .g-cells i { aspect-ratio: 1; border-radius: 5px; background: var(--sel); }
+  .g-cells i.on { background: var(--ink); }
+  .g-cells i.no { background: none; box-shadow: inset 0 0 0 1px var(--line); }
+  .g-pick .g-def { font-size: 12px; color: var(--ink2); padding-top: 6px; border-top: 1px solid var(--line); }
+  .g-pick .g-note { font-size: 11px; color: var(--ink3); }
+  .g-upd { font-size: 11px; color: var(--ink3); }
+
+</style>
+</head>
+<body>
+  <header class="cbar">
+    <div class="brand"><span class="logo">C</span>Centralu</div>
+    <div class="find"><i class="ph ph-magnifying-glass"></i>Go to a session, file, command or setting<kbd>⌘K</kbd></div>
+    <div class="cright">
+      <span class="waitpill"><i class="ph-fill ph-hand"></i>3 waiting <kbd>⌘I</kbd></span>
+      <span class="usage"><span class="ring" style="--v:41%"></span>Claude 41%</span>
+      <span class="usage"><span class="ring" style="--v:18%"></span>Codex 18%</span>
+      <span class="cicon"><i class="ph ph-gear-six"></i></span>
+    </div>
+  </header>
+
+  <div class="frame no-ev">
+    <aside class="nav">
+      <div class="nav-top">
+        <span class="ni"><i class="ph ph-crown-simple"></i>Orchestrator<span class="sub">evolving</span></span>
+        <span class="ni sel"><i class="ph ph-squares-four"></i>Grid<span class="k">3</span></span>
+      </div>
+      <div class="nav-scroll">
+        <div class="sec act"><i class="ph-fill ph-hand"></i>Waiting on you<span class="r">3</span></div>
+        <div class="row need"><span class="tm">X</span><span class="n">Orphaned process cleanup</span><span class="t">2m</span><span class="s">Approve: kill -TERM 40321</span></div>
+        <div class="row need"><span class="tm">C</span><span class="n">Hero copy options</span><span class="t">6m</span><span class="s">Question: which hero line</span></div>
+        <div class="row fail"><span class="tm">C</span><span class="n">결제 웹훅 재시도</span><span class="t">11m</span><span class="s">Stopped: 2 of 31 tests fail</span></div>
+
+        <div class="sec">Projects<span class="r"><i class="ph ph-arrows-down-up"></i><i class="ph ph-plus"></i></span></div>
+        <div class="proj"><i class="ph ph-caret-down"></i>centralu<span class="c">4</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Composer polish</span><span class="st"><span class="g work"></span>4m</span><span class="s">Editing SessionView.tsx</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Keeper review (manager)</span><span class="st"><span class="g idle"></span>idle</span></div>
+        <div class="row child"><span class="tm">X</span><span class="n">fix/orphans</span><span class="st"><span class="g need"></span>approve</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Release notes, beta.11</span><span class="st"><span class="g done"></span>done</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>landing-site<span class="c">2</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>payments-api<span class="c">2</span></div>
+
+        <div class="sec">Your apps<span class="r"><i class="ph ph-download-simple"></i><i class="ph ph-plus"></i></span></div>
+        <div class="app-row"><i class="ph ph-kanban"></i>project-board<span class="st">running</span></div>
+        <div class="app-row"><i class="ph ph-chart-line"></i>usage-report<span class="st">stopped</span></div>
+      </div>
+      <div class="nav-foot"><span class="ni"><i class="ph ph-folder-plus"></i>Add project</span></div>
+    </aside>
+
+    <section class="g-main">
+      <header class="g-bar">
+        <h1>Grid</h1><span class="m">2 sessions, 1 app. Removing a panel leaves its session running.</span>
+        <span class="sp"></span>
+        <span class="m">Sessions take 1 × 1, apps can be larger</span>
+      </header>
+
+      <div class="g-grid">
+        <!-- waiting on you: answered here without leaving the grid -->
+        <div class="g-panel need g-a">
+          <div class="g-ph"><i class="ph ph-dots-six-vertical grip"></i><span class="tm">X</span><b>Orphaned process cleanup</b><span class="g-badge">fix/orphans</span><span class="sp"></span>
+            <span class="g-st need"><i class="ph-fill ph-hand"></i>2m</span>
+            <span class="ib" title="Saved commands"><i class="ph ph-play"></i></span>
+            <span class="ib" title="Remove from grid"><i class="ph ph-x"></i></span></div>
+          <div class="g-tail">
+            <div class="you">Find only the orphaned processes and stop them. Show me the list first.</div>
+            <div class="g-line"><i class="ph ph-caret-right"></i><b>Worked</b>read 2 files, ran 2 commands<span class="sp"></span>41s</div>
+            <div class="say">Two processes have no living parent and no keeper hold: <code>40321</code> (vite) and its esbuild child. I will stop the dev server first.</div>
+          </div>
+          <div>
+            <div class="g-ask">
+              <span class="t"><i class="ph-fill ph-hand"></i>Wants to run a command</span>
+              <div class="cmd">kill -TERM 40321</div>
+              <div class="row-b"><span class="btn sm p">Allow <kbd>Y</kbd></span><span class="btn sm">Deny <kbd>N</kbd></span><span class="btn sm q">Always <kbd>A</kbd></span></div>
+            </div>
+            <div class="g-fold"><i></i></div>
+          </div>
+        </div>
+
+        <!-- working: the arc on the frame -->
+        <div class="g-panel work g-b">
+          <div class="g-ph"><i class="ph ph-dots-six-vertical grip"></i><span class="tm">C</span><b>Composer polish</b><span class="g-badge">1 bg</span><span class="sp"></span>
+            <span class="g-st"><span class="spin"></span>4m</span>
+            <span class="ib" title="Saved commands"><i class="ph ph-play"></i></span>
+            <span class="ib" title="Remove from grid"><i class="ph ph-x"></i></span></div>
+          <div class="g-tail">
+            <div class="g-line"><i class="ph ph-check-circle"></i><b>Plan, 2 of 3</b>Fold composer in panels<span class="sp"></span>12m</div>
+            <div class="you">Fold the composer in grid panels, and keep the draft when it folds.</div>
+            <div class="g-line"><i class="ph ph-file-text"></i>Read<span class="p">features/session/Composer.tsx</span></div>
+            <div class="g-line"><i class="ph ph-pencil-simple"></i>Edited<span class="p">features/session/SessionView.tsx</span><span class="sp"></span><span class="add">+38</span>&nbsp;<span class="del">−12</span></div>
+            <div class="g-line"><i class="ph ph-terminal"></i>Running<span class="p">pnpm exec vitest run Composer</span></div>
+            <div class="g-live"><span class="spin"></span>Thinking, ~2k tokens<span class="sp"></span><span class="btn sm">Stop</span></div>
+          </div>
+          <div class="g-fold"><i></i></div>
+        </div>
+
+        <div class="g-drop"><i class="ph ph-plus-square"></i><b>Drop a session or app here</b><span>Drag a row from the navigator,<br>or onto the Grid button from anywhere.</span></div>
+
+        <!-- an app panel, 2 by 1 -->
+        <div class="g-panel app g-app">
+          <div class="g-ph"><i class="ph ph-dots-six-vertical grip"></i><i class="ph ph-kanban" style="font-size:15px;color:var(--ink2)"></i><b>project-board</b>
+            <span class="g-st"><span class="g done" style="background:var(--add)"></span>running</span><span class="g-upd">Updated just now</span><span class="sp"></span>
+            <span class="g-size" title="Size"><i class="ph ph-grid-four"></i>2×1</span>
+            <span class="btn sm q" style="height:26px">Open</span>
+            <span class="ib" title="Remove from grid"><i class="ph ph-x"></i></span></div>
+          <div class="board">
+            <div class="colm"><h4>To do 3</h4><span class="tk">Kill orphaned vite</span><span class="tk">Document strays.ts</span><span class="tk">Composer fold in grid</span></div>
+            <div class="colm"><h4>Doing 2</h4><span class="tk">Find orphans</span><span class="tk">Composer polish</span></div>
+            <div class="colm"><h4>Done 4</h4><span class="tk">Keeper handoff test</span><span class="tk">Release notes, beta.11</span></div>
+          </div>
+          <div class="g-pick">
+            <h6>Panel size<span>2 × 1</span></h6>
+            <div class="g-cells"><i class="on"></i><i class="on"></i><i></i><i class="no"></i><i></i><i></i><i></i><i class="no"></i><i class="no"></i><i class="no"></i><i class="no"></i><i class="no"></i><i class="no"></i><i class="no"></i><i class="no"></i><i class="no"></i></div>
+            <span class="g-note">Outlined sizes do not fit this window.</span>
+            <span class="g-def">Use the default (1 × 1)</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

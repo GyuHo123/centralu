@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settings</title>
+<link rel="stylesheet" href="session.css">
+<script>
+  const h = location.hash
+  if (h.includes('dark')) document.documentElement.dataset.theme = 'dark'
+  document.documentElement.classList.add(h.includes('appearance') ? 's-show-appearance' : h.includes('shortcuts') ? 's-show-shortcuts' : 's-show-permissions')
+</script>
+<style>
+  .cicon.s-on { color: var(--ink); background: var(--sel); border-radius: 7px; padding: 4px; margin: -4px; }
+  .s-main { display: grid; grid-template-columns: 236px 1fr; min-width: 0; min-height: 0; background: var(--bg); }
+  .s-list { border-right: 1px solid var(--line); padding: 16px 10px; display: grid; align-content: start; gap: 2px; background: var(--paper); }
+  .s-list h2 { font-size: 15px; font-weight: 750; letter-spacing: -0.02em; padding: 0 8px 10px; display: flex; align-items: center; gap: 8px; }
+  .s-list h2 .k { margin-left: auto; font-weight: 450; font-size: 11px; color: var(--ink3); display: flex; gap: 6px; align-items: center; }
+  .s-search { display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 9px; margin: 0 0 10px; border-radius: 8px; background: var(--raise); box-shadow: 0 0 0 1px var(--line); color: var(--ink3); font-size: 12.5px; }
+  .s-search .ph { font-size: 14px; }
+  .s-it { display: flex; align-items: center; gap: 9px; height: 31px; padding: 0 9px; border-radius: 8px; font-size: 13px; font-weight: 550; color: var(--ink2); }
+  .s-it .ph { font-size: 16px; color: var(--ink3); }
+  .s-it .c { margin-left: auto; font-size: 11px; color: var(--ink3); font-weight: 450; }
+  .s-it.sel { background: var(--raise); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+  .s-it.sel .ph { color: var(--ink); }
+  .s-gap { height: 1px; background: var(--line); margin: 8px 9px; }
+
+  .s-body { overflow: hidden; padding: 30px 44px; }
+  .s-col { max-width: 860px; display: grid; gap: 26px; }
+  .s-sec { display: none; gap: 14px; }
+  .s-show-permissions .s-sec.perm, .s-show-appearance .s-sec.look, .s-show-shortcuts .s-sec.keys { display: grid; }
+  .s-show-shortcuts .s-it.keys { background: var(--raise); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+  .s-keys { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .s-k { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--ink2); }
+  .s-k:first-of-type { border-top: 0; }
+  .s-k .kk { margin-left: auto; display: flex; gap: 3px; }
+  .s-show-permissions .s-it.perm, .s-show-appearance .s-it.look { background: var(--raise); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+  .s-head h1 { font-size: 22px; font-weight: 750; letter-spacing: -0.03em; }
+  .s-head p { color: var(--ink2); font-size: 13.5px; margin-top: 4px; max-width: 62ch; }
+  .s-card { background: var(--raise); border-radius: 12px; box-shadow: 0 0 0 1px var(--line); overflow: hidden; }
+  .s-ch { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .s-ch b { font-size: 13.5px; font-weight: 650; }
+  .s-ch .d { color: var(--ink3); font-size: 12px; }
+  .s-ch .r { margin-left: auto; display: flex; gap: 4px; }
+  .s-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--sel); gap: 2px; }
+  .s-seg span { height: 24px; padding: 0 10px; border-radius: 6px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink2); font-weight: 550; }
+  .s-seg span.on { background: var(--raise); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+  .s-rule { display: grid; grid-template-columns: minmax(0, 1.6fr) 110px minmax(0, 1fr) 72px 70px; gap: 12px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); font-size: 12.5px; }
+  .s-rule:first-of-type { border-top: 0; }
+  .s-rule.hd { font-size: 11px; font-weight: 650; color: var(--ink3); padding-top: 8px; padding-bottom: 8px; background: var(--paper); }
+  .s-rule .m { font: 12px var(--mono); letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .s-rule .m .v { color: var(--ink3); font-family: var(--sans); font-size: 12px; margin-right: 6px; }
+  .s-rule .scope { display: inline-flex; align-items: center; gap: 6px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .s-rule .scope .ph { font-size: 14px; color: var(--ink3); }
+  .s-rule .w { color: var(--ink3); font-size: 12px; }
+  .s-rule .x { justify-self: end; }
+  .s-kind { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 7px; border-radius: 6px; background: var(--sel); font-size: 11.5px; color: var(--ink2); }
+  .s-kind .ph { font-size: 13px; }
+  .s-con { display: grid; grid-template-columns: minmax(0, 1fr) 150px 80px 70px; gap: 12px; align-items: center; padding: 11px 16px; border-top: 1px solid var(--line); font-size: 12.5px; }
+  .s-con:first-of-type { border-top: 0; }
+  .s-pair { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+  .s-pair .ph { font-size: 14px; color: var(--ink3); }
+  .s-foot { padding: 10px 16px; border-top: 1px solid var(--line); background: var(--paper); color: var(--ink3); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  .s-foot .ph { font-size: 14px; }
+
+  .s-h2 { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; margin-top: 6px; }
+  .s-row { display: grid; grid-template-columns: 200px 1fr; gap: 16px; align-items: start; padding: 11px 16px; border-top: 1px solid var(--line); }
+  .s-row:first-child { border-top: 0; }
+  .s-row > b { font-size: 13px; font-weight: 600; padding-top: 4px; }
+  .s-row > b small { display: block; font-weight: 450; color: var(--ink3); font-size: 11.5px; margin-top: 2px; }
+  .s-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12.5px; color: var(--ink2); }
+  .s-ctl .h { width: 100%; color: var(--ink3); font-size: 11.5px; }
+  .s-sel { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; border-radius: 8px; box-shadow: 0 0 0 1px var(--line2); background: var(--raise); font-size: 12.5px; color: var(--ink); }
+  .s-sel .ph { font-size: 13px; color: var(--ink3); margin-left: 4px; }
+  .s-sel .l { color: var(--ink3); }
+  .s-sw { width: 22px; height: 22px; border-radius: 7px; background: var(--act); box-shadow: 0 0 0 2px var(--raise), 0 0 0 3.5px var(--ink); }
+  .s-hex { font: 12px var(--mono); color: var(--ink2); }
+  .s-chk { display: inline-flex; align-items: center; gap: 8px; }
+  .s-box { width: 15px; height: 15px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--line2); position: relative; flex: none; }
+  .s-box.on { background: var(--ink); box-shadow: none; }
+  .s-box.on::after { content: ""; position: absolute; left: 5px; top: 2px; width: 4px; height: 8px; border: solid var(--paper); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+  .s-file { display: grid; grid-template-columns: 16px 1fr auto; gap: 10px; align-items: center; width: 100%; padding: 7px 10px; border-radius: 8px; box-shadow: 0 0 0 1px var(--line); }
+  .s-file .ph { font-size: 15px; color: var(--ink3); }
+  .s-file .p { font: 12px var(--mono); }
+  .s-file .p small { font-family: var(--sans); color: var(--ink3); margin-left: 8px; font-size: 11.5px; }
+  .s-file .a { display: flex; gap: 12px; font-size: 12px; color: var(--ink2); }
+  .s-sizes { display: flex; align-items: flex-end; gap: 6px; }
+  .s-sizes span { width: 50px; height: 42px; border-radius: 9px; box-shadow: 0 0 0 1px var(--line2); display: grid; place-items: center; color: var(--ink2); font-weight: 600; }
+  .s-sizes span.on { box-shadow: 0 0 0 1.5px var(--ink); color: var(--ink); background: var(--sel); }
+  .s-prev { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+  .s-prev div { border-radius: 9px; background: var(--bg); box-shadow: 0 0 0 1px var(--line); padding: 10px 12px; font-size: 13px; }
+  .s-prev div.code { background: var(--code-bg); color: var(--code-ink); font: 12px/1.6 var(--mono); }
+</style>
+</head>
+<body>
+  <header class="cbar">
+    <div class="brand"><span class="logo">C</span>Centralu</div>
+    <div class="find"><i class="ph ph-magnifying-glass"></i>Go to a session, file, command or setting<kbd>⌘K</kbd></div>
+    <div class="cright">
+      <span class="waitpill"><i class="ph-fill ph-hand"></i>3 waiting <kbd>⌘I</kbd></span>
+      <span class="usage"><span class="ring" style="--v:41%"></span>Claude 41%</span>
+      <span class="usage"><span class="ring" style="--v:18%"></span>Codex 18%</span>
+      <span class="cicon s-on"><i class="ph-fill ph-gear-six"></i></span>
+    </div>
+  </header>
+  <div class="frame no-ev">
+    <aside class="nav">
+      <div class="nav-top">
+        <span class="ni"><i class="ph ph-crown-simple"></i>Orchestrator<span class="sub">evolving</span></span>
+        <span class="ni"><i class="ph ph-squares-four"></i>Grid<span class="k">3</span></span>
+      </div>
+      <div class="nav-scroll">
+        <div class="sec act"><i class="ph-fill ph-hand"></i>Waiting on you<span class="r">3</span></div>
+        <div class="row need"><span class="tm">X</span><span class="n">Orphaned process cleanup</span><span class="t">2m</span><span class="s">Approve: kill -TERM 40321</span></div>
+        <div class="row need"><span class="tm">C</span><span class="n">Hero copy options</span><span class="t">6m</span><span class="s">Question: which hero line</span></div>
+        <div class="row fail"><span class="tm">C</span><span class="n">결제 웹훅 재시도</span><span class="t">11m</span><span class="s">Stopped: 2 of 31 tests fail</span></div>
+
+        <div class="sec">Projects<span class="r"><i class="ph ph-arrows-down-up"></i><i class="ph ph-plus"></i></span></div>
+        <div class="proj"><i class="ph ph-caret-down"></i>centralu<span class="c">4</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Composer polish</span><span class="st"><span class="g work"></span>4m</span><span class="s">Editing SessionView.tsx</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Keeper review (manager)</span><span class="st"><span class="g idle"></span>idle</span></div>
+        <div class="row child"><span class="tm">X</span><span class="n">fix/orphans</span><span class="st"><span class="g need"></span>approve</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Release notes, beta.11</span><span class="st"><span class="g done"></span>done</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>landing-site<span class="c">2</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>payments-api<span class="c">2</span></div>
+
+        <div class="sec">Your apps<span class="r"><i class="ph ph-download-simple"></i><i class="ph ph-plus"></i></span></div>
+        <div class="app-row"><i class="ph ph-kanban"></i>project-board<span class="st">running</span></div>
+        <div class="app-row"><i class="ph ph-chart-line"></i>usage-report<span class="st">stopped</span></div>
+      </div>
+      <div class="nav-foot"><span class="ni"><i class="ph ph-folder-plus"></i>Add project</span></div>
+    </aside>
+
+    <section class="s-main">
+      <nav class="s-list">
+        <h2>Settings<span class="k"><kbd>esc</kbd> back</span></h2>
+        <div class="s-search"><i class="ph ph-magnifying-glass"></i>Search settings</div>
+        <span class="s-it"><i class="ph ph-crown-simple"></i>Orchestrator</span>
+        <span class="s-it"><i class="ph ph-puzzle-piece"></i>Apps<span class="c">2</span></span>
+        <span class="s-it"><i class="ph ph-bell"></i>Notifications</span>
+        <span class="s-it"><i class="ph ph-moon-stars"></i>Background</span>
+        <div class="s-gap"></div>
+        <span class="s-it look"><i class="ph ph-palette"></i>Appearance</span>
+        <span class="s-it look"><i class="ph ph-text-aa"></i>Typography</span>
+        <div class="s-gap"></div>
+        <span class="s-it perm"><i class="ph ph-shield-check"></i>Permissions<span class="c">4</span></span>
+        <span class="s-it"><i class="ph ph-trash"></i>Trash<span class="c">7</span></span>
+        <span class="s-it keys"><i class="ph ph-keyboard"></i>Shortcuts</span>
+        <span class="s-it"><i class="ph ph-arrow-circle-up"></i>Updates</span>
+        <span class="s-it"><i class="ph ph-chart-donut"></i>Usage</span>
+      </nav>
+
+      <div class="s-body"><div class="s-col">
+
+        <!-- Permissions -->
+        <section class="s-sec perm">
+          <div class="s-head"><h1>Permissions</h1><p>What agents may do without asking you, and which projects may reach each other. Rules are added from an approval card with Always allow.</p></div>
+          <div class="s-card">
+            <div class="s-ch"><b>Always allowed</b><span class="d">4 rules</span><span class="r"><span class="s-seg"><span class="on">All</span><span>centralu</span><span>landing-site</span><span>Sessions</span></span></span></div>
+            <div class="s-rule hd"><span>What</span><span>Kind</span><span>Where it applies</span><span>Added</span><span></span></div>
+            <div class="s-rule"><span class="m"><span class="v">Run</span>pnpm exec vitest run *</span><span><span class="s-kind"><i class="ph ph-terminal"></i>Command</span></span><span class="scope"><i class="ph ph-folder"></i>Project centralu</span><span class="w">3 days ago</span><span class="x btn sm q">Delete</span></div>
+            <div class="s-rule"><span class="m"><span class="v">Run</span>cargo test --lib</span><span><span class="s-kind"><i class="ph ph-terminal"></i>Command</span></span><span class="scope"><i class="ph ph-folder"></i>Project centralu</span><span class="w">Oct 1</span><span class="x btn sm q">Delete</span></div>
+            <div class="s-rule"><span class="m"><span class="v">Edit</span>packages/ui/**</span><span><span class="s-kind"><i class="ph ph-pencil-simple"></i>File edit</span></span><span class="scope"><span class="tm">C</span>Session Composer polish</span><span class="w">today</span><span class="x btn sm q">Delete</span></div>
+            <div class="s-rule"><span class="m"><span class="v">Run</span>gh pr view *</span><span><span class="s-kind"><i class="ph ph-terminal"></i>Command</span></span><span class="scope"><i class="ph ph-folder"></i>Project landing-site</span><span class="w">Sep 28</span><span class="x btn sm q">Delete</span></div>
+            <div class="s-foot"><i class="ph ph-info"></i>A session rule ends with its session. A project rule holds for every session in that project.</div>
+          </div>
+          <div class="s-card">
+            <div class="s-ch"><b>Projects that can reach each other</b><span class="d">Granted when a session asked another project</span></div>
+            <div class="s-con"><span class="s-pair">landing-site<i class="ph ph-arrow-right"></i>centralu</span><span><span class="s-kind"><i class="ph ph-chats-circle"></i>May ask its sessions</span></span><span class="w">Oct 1</span><span class="x btn sm q">Revoke</span></div>
+            <div class="s-con"><span class="s-pair">centralu<i class="ph ph-arrow-right"></i>payments-api</span><span><span class="s-kind"><i class="ph ph-puzzle-piece"></i>May use its apps</span></span><span class="w">Sep 24</span><span class="x btn sm q">Revoke</span></div>
+            <div class="s-foot"><i class="ph ph-info"></i>Revoking asks again the next time. Sessions already working keep what they were given.</div>
+          </div>
+        </section>
+
+        <!-- Appearance -->
+        <section class="s-sec look">
+          <div class="s-head"><h1>Appearance</h1><p>How the window looks. Changes apply at once.</p></div>
+          <div class="s-card">
+            <div class="s-row"><b>Theme</b><div class="s-ctl"><span class="s-seg"><span><i class="ph ph-moon"></i>Dark</span><span><i class="ph ph-sun"></i>Light</span><span class="on"><i class="ph ph-circle-half"></i>Follow system</span></span></div></div>
+            <div class="s-row"><b>Theme per side<small>Used while following the system</small></b><div class="s-ctl"><span class="s-sel"><span class="l">Light</span>Centralu Light<i class="ph ph-caret-down"></i></span><span class="s-sel"><span class="l">Dark</span>midnight<i class="ph ph-caret-down"></i></span></div></div>
+            <div class="s-row"><b>Accent colour<small>Marks what is waiting on you</small></b><div class="s-ctl"><span class="s-chk"><span class="s-box on"></span>Use an accent</span><span class="s-sw"></span><span class="s-hex">#8AA2FF</span></div></div>
+            <div class="s-row"><b>Your themes</b><div class="s-ctl">
+              <span class="btn sm">Customise…</span><span class="btn sm q">Import…</span><span class="h">Customise copies the theme showing now into a file of your own.</span>
+              <div class="s-file"><i class="ph ph-file-code"></i><span class="p">midnight.json<small>in use, dark side</small></span><span class="a"><span>Edit</span><span>Open file</span><span>Reveal</span><span>Delete</span></span></div>
+              <div class="s-file"><i class="ph ph-file-code"></i><span class="p">paper-high-contrast.json<small>imported</small></span><span class="a"><span>Edit</span><span>Open file</span><span>Reveal</span><span>Delete</span></span></div>
+            </div></div>
+          </div>
+          <h2 class="s-h2">Typography</h2>
+          <div class="s-card">
+            <div class="s-row"><b>Text size<small>For the whole app</small></b><div class="s-ctl"><div class="s-sizes"><span style="font-size:11px">가Aa</span><span style="font-size:12.5px">가Aa</span><span class="on" style="font-size:14px">가Aa</span><span style="font-size:15.5px">가Aa</span><span style="font-size:17px">가Aa</span></div></div></div>
+            <div class="s-row"><b>Fonts<small>Pick one, or type any installed name</small></b><div class="s-ctl"><span class="s-sel"><span class="l">Body</span>Pretendard<i class="ph ph-caret-down"></i></span><span class="s-sel"><span class="l">Code</span>JetBrains Mono<i class="ph ph-caret-down"></i></span>
+              </div></div>
+            <div class="s-row"><b>Line height</b><div class="s-ctl"><span class="s-seg"><span>Compact</span><span class="on">Normal</span><span>Relaxed</span></span></div></div>
+          </div>
+          <div class="s-card">
+            <div class="s-ch"><b>Behaviour</b></div>
+            <div class="s-row"><b>Composer</b><div class="s-ctl" style="display:grid;gap:8px"><span class="s-chk"><span class="s-box on"></span>Fold the composer in the grid and on project screens</span><span class="s-chk"><span class="s-box"></span>Send with <kbd>⌘↵</kbd> instead of <kbd>↵</kbd></span></div></div>
+            <div class="s-row"><b>Spinning mark<small>While a session is working</small></b><div class="s-ctl" style="display:grid;gap:8px"><span class="s-chk"><span class="s-box on"></span>Panel border in the grid and on project screens</span><span class="s-chk"><span class="s-box on"></span>Session icon in the navigator</span></div></div>
+          </div>
+        </section>
+
+
+        <!-- Shortcuts: only the ones the app handles today -->
+        <section class="s-sec keys">
+          <div class="s-head"><h1>Shortcuts</h1><p>Letter keys never fire while you type or while a layer is open. <kbd>esc</kbd> closes the topmost layer.</p></div>
+          <div class="s-keys">
+            <div style="display:grid;gap:14px;align-content:start"><div class="s-card"><div class="s-ch"><b>Anywhere</b></div><div class="s-k">Palette<span class="kk"><kbd>⌘K</kbd></span></div><div class="s-k">Waiting list<span class="kk"><kbd>⌘I</kbd></span></div><div class="s-k">Next waiting, also from other apps<span class="kk"><kbd>⌘⇧A</kbd></span></div><div class="s-k">Evidence panel<span class="kk"><kbd>⌘B</kbd></span></div><div class="s-k">Open project 1 to 9<span class="kk"><kbd>⌘1</kbd><kbd>…</kbd><kbd>⌘9</kbd></span></div><div class="s-k">Evidence tab 1 to 4<span class="kk"><kbd>⌘⇧1</kbd><kbd>…</kbd><kbd>⌘⇧4</kbd></span></div></div><div class="s-card"><div class="s-ch"><b>Approval card</b></div><div class="s-k">Allow<span class="kk"><kbd>Y</kbd></span></div><div class="s-k">Deny<span class="kk"><kbd>N</kbd></span></div><div class="s-k">Always allow<span class="kk"><kbd>A</kbd></span></div><div class="s-k">Always allow, whole project<span class="kk"><kbd>⌥A</kbd></span></div></div><div class="s-card"><div class="s-ch"><b>Waiting list and palette</b></div><div class="s-k">Move<span class="kk"><kbd>↑</kbd><kbd>↓</kbd></span></div><div class="s-k">Move, waiting list only<span class="kk"><kbd>J</kbd><kbd>K</kbd></span></div><div class="s-k">Open<span class="kk"><kbd>↵</kbd></span></div><div class="s-k">Close<span class="kk"><kbd>esc</kbd></span></div></div></div>
+            <div style="display:grid;gap:14px;align-content:start"><div class="s-card"><div class="s-ch"><b>Composer</b></div><div class="s-k">Send<span class="kk"><kbd>↵</kbd></span></div><div class="s-k">Send, when set in Appearance<span class="kk"><kbd>⌘↵</kbd></span></div><div class="s-k">New line<span class="kk"><kbd>⇧↵</kbd></span></div><div class="s-k">Earlier and later messages<span class="kk"><kbd>↑</kbd><kbd>↓</kbd></span></div><div class="s-k">Commands, files<span class="kk"><kbd>/</kbd><kbd>@</kbd></span></div><div class="s-k">Pick a suggestion<span class="kk"><kbd>↵</kbd><kbd>Tab</kbd></span></div></div><div class="s-card"><div class="s-ch"><b>Diff and code viewer</b></div><div class="s-k">Copy the whole file or diff<span class="kk"><kbd>⌘A</kbd></span></div><div class="s-k">Next and previous match<span class="kk"><kbd>↵</kbd><kbd>⇧↵</kbd></span></div></div><div class="s-card"><div class="s-ch"><b>Rename</b></div><div class="s-k">Save<span class="kk"><kbd>↵</kbd></span></div><div class="s-k">Cancel<span class="kk"><kbd>esc</kbd></span></div></div></div>
+          </div>
+        </section>
+      </div></div>
+    </section>
+  </div>
+</body>
+</html>

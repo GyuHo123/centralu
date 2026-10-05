@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pinned app</title>
+<link rel="stylesheet" href="session.css">
+<script>
+  const h = location.hash
+  if (h.includes('dark')) document.documentElement.dataset.theme = 'dark'
+  if (h.includes('runs')) document.documentElement.classList.add('show-runs')
+</script>
+<style>
+
+.frame { grid-template-columns: 268px 1fr 380px; }
+.app-row.a-sel { background: var(--raise); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+.a-main { display: grid; grid-template-rows: 52px auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; background: var(--bg); position: relative; }
+.a-head { display: flex; align-items: center; gap: 8px; padding: 0 14px 0 18px; border-bottom: 1px solid var(--line); background: var(--paper); }
+.a-head > * { white-space: nowrap; flex: none; }
+.a-head .sp { flex: 1; }
+.a-head h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; }
+.a-head .a-ic { width: 26px; height: 26px; border-radius: 8px; background: var(--sel); display: grid; place-items: center; }
+.a-head .a-ic .ph { font-size: 15px; }
+.a-st { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink2); }
+.a-st .a-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink2); box-shadow: 0 0 0 3px var(--sel); }
+.a-cue { font-size: 11.5px; color: var(--ink3); }
+.a-chg { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: 7px; box-shadow: 0 0 0 1px var(--line2); font-size: 12px; color: var(--ink); font-weight: 550; background: var(--raise); }
+.a-chg .ph { font-size: 13px; }
+.a-head .sp { flex: 1; }
+.a-tools { display: flex; gap: 2px; align-items: center; }
+.a-t { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; border-radius: 8px; font-size: 12.5px; font-weight: 550; color: var(--ink2); }
+.a-t .ph { font-size: 15px; }
+.a-t.on, html:not(.show-runs) .a-tb, .show-runs .a-tr { background: var(--sel); color: var(--ink); }
+.a-t .a-miss { font: 600 10.5px var(--sans); padding: 0 5px; border-radius: 5px; background: var(--sel); color: var(--ink); }
+.a-t.on .a-miss { background: var(--raise); }
+.a-sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+.a-tail { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 14px 7px 18px; background: var(--code-bg); color: var(--code-ink); font: 11.5px var(--mono); border-bottom: 1px solid var(--line); }
+.a-tail .a-k { color: var(--danger); font-weight: 700; }
+:root:not([data-theme="dark"]) .a-tail .a-k { color: #ff8a80; }
+.a-tail .a-l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.a-tail .a-acts { display: flex; gap: 12px; font-family: var(--sans); font-size: 12px; color: var(--code-dim); align-items: center; }
+.a-tail .a-acts b { color: var(--code-ink); font-weight: 600; }
+.a-tail .a-acts .ph { font-size: 14px; }
+/* the app's own frame: whatever the app draws */
+.a-frame { margin: 14px 18px 0; border-radius: 12px; background: var(--raise); box-shadow: 0 0 0 1px var(--line); overflow: hidden; display: grid; grid-template-rows: auto 1fr; min-height: 0; position: relative; }
+.a-ah { display: flex; align-items: center; gap: 10px; padding: 14px 18px 10px; }
+.a-ah h2 { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+.a-ah .a-f { margin-left: auto; display: flex; gap: 6px; }
+.a-ah .a-f span { height: 26px; padding: 0 10px; border-radius: 7px; background: var(--bg); font-size: 12px; color: var(--ink2); display: inline-flex; align-items: center; }
+.a-board { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 4px 18px 18px; min-height: 0; }
+.a-col { background: var(--bg); border-radius: 10px; padding: 10px; display: grid; gap: 8px; align-content: start; }
+.a-col h4 { font-size: 12px; font-weight: 650; color: var(--ink2); display: flex; justify-content: space-between; }
+.a-col h4 span { color: var(--ink3); font-weight: 450; }
+.a-card { background: var(--raise); border-radius: 8px; box-shadow: 0 0 0 1px var(--line); padding: 9px 10px; font-size: 12.5px; display: grid; gap: 6px; }
+.a-card .a-m { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--ink3); }
+.a-card .a-tag { padding: 0 6px; border-radius: 5px; background: var(--sel); color: var(--ink2); }
+/* fix bar: ask the builder */
+.a-fix { margin: 12px 18px 14px; display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-radius: 12px; background: var(--raise); box-shadow: 0 0 0 1px var(--line2); }
+.a-fix .ph { font-size: 16px; color: var(--ink3); }
+.a-fix > * { flex: none; white-space: nowrap; }
+.a-fix .a-in { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink3); font-size: 13.5px; }
+.a-fix .a-shot { display: inline-flex; gap: 6px; align-items: center; height: 26px; padding: 0 8px; border-radius: 7px; background: var(--sel); font-size: 12px; color: var(--ink2); }
+.a-fix .a-link { font-size: 12px; color: var(--ink2); padding: 0 6px; }
+/* the builder pane: a folded session pane */
+.a-side { background: var(--paper); border-left: 1px solid var(--line); display: grid; grid-template-rows: 52px 1fr; min-height: 0; position: relative; overflow: hidden; }
+.a-sh { display: flex; align-items: center; gap: 8px; padding: 0 12px 0 14px; border-bottom: 1px solid var(--line); }
+.a-sh b { font-size: 13.5px; font-weight: 700; }
+.a-sh .a-w { font-size: 12px; color: var(--ink3); display: inline-flex; gap: 6px; align-items: center; }
+.a-sh .sp { flex: 1; }
+.a-conv { padding: 14px 14px 40px; display: grid; gap: 12px; align-content: end; overflow: hidden; min-height: 0; }
+.a-conv .you { font-size: 13px; max-width: 92%; }
+.a-conv .say { font-size: 13px; line-height: 1.6; }
+.a-conv .work-h, .a-conv .call { font-size: 12px; }
+.a-fold { position: absolute; left: 12px; right: 12px; bottom: -22px; height: 38px; border-radius: 12px 12px 0 0; background: var(--raise); box-shadow: 0 0 0 1px var(--line2); padding: 6px 12px; font-size: 12px; color: var(--ink3); display: flex; gap: 8px; }
+.a-fold::before { content: ""; position: absolute; top: -10px; left: 50%; width: 28px; height: 3px; border-radius: 2px; background: var(--line2); transform: translateX(-50%); }
+/* runs panel */
+.a-runs { display: none; }
+.show-runs .a-runs { display: grid; }
+.show-runs .a-builder { display: none; }
+.a-runs { grid-template-rows: 52px 1fr; background: var(--paper); border-left: 1px solid var(--line); min-height: 0; overflow: hidden; }
+.a-rb { padding: 6px 12px 12px; display: grid; gap: 14px; align-content: start; overflow: hidden; }
+.a-rb h5 { font-size: 11.5px; font-weight: 650; color: var(--ink3); padding: 8px 2px 6px; display: flex; }
+.a-rb h5 span { margin-left: auto; font-weight: 450; }
+.a-perm { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px; background: var(--raise); box-shadow: 0 0 0 1px var(--line); font-size: 12.5px; margin-bottom: 4px; }
+.a-perm .ph { font-size: 14px; color: var(--ink3); }
+.a-perm .a-fg { margin-left: auto; font-size: 12px; color: var(--ink3); }
+.a-use { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.a-use div { padding: 9px 10px; border-radius: 9px; background: var(--raise); box-shadow: 0 0 0 1px var(--line); display: grid; gap: 1px; }
+.a-use b { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.a-use span { font-size: 11.5px; color: var(--ink3); }
+.a-run { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 10px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.a-run .a-tool { font: 12px var(--mono); }
+.a-run .a-o { font-size: 11.5px; color: var(--ink3); text-align: right; }
+.a-run .a-o.a-bad { color: var(--danger); font-weight: 600; }
+.a-run .a-by { font-size: 11.5px; color: var(--ink3); display: flex; gap: 6px; align-items: center; }
+.a-run .a-open { font-size: 11.5px; color: var(--ink2); text-align: right; }
+.a-run.a-chain { margin-left: 14px; border-top: none; padding-top: 2px; position: relative; }
+.a-run.a-chain::before { content: ""; position: absolute; left: -6px; top: -4px; height: 14px; width: 8px; border-left: 1px solid var(--line2); border-bottom: 1px solid var(--line2); border-bottom-left-radius: 5px; }
+/* capability ask over the app */
+.a-ask { display: none; position: absolute; inset: 0; background: rgb(14 16 19 / 0.22); place-items: center; z-index: 2; }
+:root[data-theme="dark"] .a-ask { background: rgb(0 0 0 / 0.5); }
+.show-runs .a-ask { display: grid; }
+.a-askc { width: 400px; background: var(--raise); border-radius: 14px; box-shadow: 0 0 0 1.5px var(--act), 0 24px 60px -20px rgb(14 16 19 / 0.4); padding: 16px; display: grid; gap: 10px; }
+.a-askc .dh { display: flex; gap: 7px; align-items: center; font-size: 12.5px; font-weight: 650; color: var(--act); }
+.a-askc .dh .ph-fill { font-size: 15px; }
+.a-askc p { font-size: 15px; font-weight: 650; letter-spacing: -0.015em; }
+.a-askc .a-why { font-size: 12.5px; color: var(--ink3); font-weight: 450; }
+
+</style>
+</head>
+<body>
+  <header class="cbar">
+    <div class="brand"><span class="logo">C</span>Centralu</div>
+    <div class="find"><i class="ph ph-magnifying-glass"></i>Go to a session, file, command or setting<kbd>⌘K</kbd></div>
+    <div class="cright">
+      <span class="waitpill"><i class="ph-fill ph-hand"></i>3 waiting <kbd>⌘I</kbd></span>
+      <span class="usage"><span class="ring" style="--v:41%"></span>Claude 41%</span>
+      <span class="usage"><span class="ring" style="--v:18%"></span>Codex 18%</span>
+      <span class="cicon"><i class="ph ph-gear-six"></i></span>
+    </div>
+  </header>
+
+  <div class="frame">
+    <aside class="nav">
+      <div class="nav-top">
+        <span class="ni"><i class="ph ph-crown-simple"></i>Orchestrator<span class="sub">evolving</span></span>
+        <span class="ni"><i class="ph ph-squares-four"></i>Grid<span class="k">3</span></span>
+      </div>
+      <div class="nav-scroll">
+        <div class="sec act"><i class="ph-fill ph-hand"></i>Waiting on you<span class="r">3</span></div>
+        <div class="row need"><span class="tm">X</span><span class="n">Orphaned process cleanup</span><span class="t">2m</span><span class="s">Approve: kill -TERM 40321</span></div>
+        <div class="row need"><span class="tm">C</span><span class="n">Hero copy options</span><span class="t">6m</span><span class="s">Question: which hero line</span></div>
+        <div class="row fail"><span class="tm">C</span><span class="n">결제 웹훅 재시도</span><span class="t">11m</span><span class="s">Stopped: 2 of 31 tests fail</span></div>
+
+        <div class="sec">Projects<span class="r"><i class="ph ph-arrows-down-up"></i><i class="ph ph-plus"></i></span></div>
+        <div class="proj"><i class="ph ph-caret-down"></i>centralu<span class="c">4</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Composer polish</span><span class="st"><span class="g work"></span>4m</span><span class="s">Editing SessionView.tsx</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Keeper review (manager)</span><span class="st"><span class="g idle"></span>idle</span></div>
+        <div class="row child"><span class="tm">X</span><span class="n">fix/orphans</span><span class="st"><span class="g need"></span>approve</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Release notes, beta.11</span><span class="st"><span class="g done"></span>done</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>landing-site<span class="c">2</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>payments-api<span class="c">2</span></div>
+
+        <div class="sec">Your apps<span class="r"><i class="ph ph-download-simple"></i><i class="ph ph-plus"></i></span></div>
+        <div class="app-row a-sel"><i class="ph ph-kanban"></i>project-board<span class="st">running</span></div>
+        <div class="app-row"><i class="ph ph-chart-line"></i>usage-report<span class="st">stopped</span></div>
+      </div>
+      <div class="nav-foot"><span class="ni"><i class="ph ph-folder-plus"></i>Add project</span></div>
+    </aside>
+
+    <section class="a-main">
+      <header class="a-head">
+        <span class="a-ic"><i class="ph ph-kanban"></i></span><h1>project-board</h1>
+        <span class="a-st"><span class="a-dot"></span>Running</span>
+        <span class="a-cue">12s ago</span>
+        <span class="a-chg"><i class="ph ph-arrow-clockwise"></i>Changed · Reload</span>
+        <span class="sp"></span>
+        <span class="a-tools">
+          <span class="a-t a-tb"><i class="ph ph-hammer"></i>Builder</span>
+          <span class="a-t a-tr"><i class="ph ph-list-checks"></i>Runs</span>
+          <span class="a-t"><i class="ph ph-key"></i>Secrets<span class="a-miss">1</span></span>
+          <span class="a-t" title="Share with other projects"><i class="ph ph-share-network"></i></span>
+          <span class="a-t" title="Versions"><i class="ph ph-clock-counter-clockwise"></i></span>
+          <span class="a-sep"></span>
+          <span class="ib" title="Close"><i class="ph ph-x"></i></span>
+        </span>
+      </header>
+      <div class="a-tail">
+        <span class="a-k">stderr</span>
+        <span class="a-l">TypeError: Cannot read properties of undefined (reading 'tag') at moveCard (board.ts:88:21)</span>
+        <span class="a-acts"><b>Send to builder</b><span>Show</span><span>Open Runs</span><i class="ph ph-x"></i></span>
+      </div>
+      <div class="a-frame">
+        <div class="a-ah"><h2>Sprint 41</h2><span style="color:var(--ink3);font-size:12.5px">centralu, 11 cards</span><span class="a-f"><span>All agents</span><span>This week</span></span></div>
+        <div class="a-board">
+          <div class="a-col"><h4>To do <span>3</span></h4>
+            <div class="a-card">Kill orphaned vite<div class="a-m"><span class="a-tag">keeper</span>Codex</div></div>
+            <div class="a-card">Document strays.ts<div class="a-m"><span class="a-tag">docs</span></div></div>
+            <div class="a-card">Hero copy, pick a line<div class="a-m"><span class="a-tag">landing</span>Claude</div></div>
+          </div>
+          <div class="a-col"><h4>Doing <span>2</span></h4>
+            <div class="a-card">Find orphans<div class="a-m"><span class="a-tag">keeper</span>Codex</div></div>
+            <div class="a-card">Composer polish<div class="a-m"><span class="a-tag">ui</span>Claude</div></div>
+          </div>
+          <div class="a-col"><h4>Review <span>2</span></h4>
+            <div class="a-card">Webhook retry backoff<div class="a-m"><span class="a-tag">payments</span>Claude</div></div>
+            <div class="a-card">WebP pipeline<div class="a-m"><span class="a-tag">landing</span></div></div>
+          </div>
+          <div class="a-col"><h4>Done <span>4</span></h4>
+            <div class="a-card">Keeper handoff test<div class="a-m"><span class="a-tag">keeper</span></div></div>
+            <div class="a-card">Release notes, beta.11<div class="a-m"><span class="a-tag">docs</span></div></div>
+          </div>
+        </div>
+        <div class="a-ask"><div class="a-askc">
+          <div class="dh"><i class="ph-fill ph-hand"></i>project-board asks for a permission</div>
+          <p>Send desktop notifications<br><span class="a-why">When a card moves to Review. You can forget this later in Runs.</span></p>
+          <div class="row-b"><span class="btn sm p">Allow <kbd>Y</kbd></span><span class="btn sm">Deny <kbd>N</kbd></span></div>
+        </div></div>
+      </div>
+      <div class="a-fix">
+        <i class="ph ph-hammer"></i><span class="a-in">Ask the builder to change this app</span>
+        <span class="a-shot"><i class="ph ph-camera" style="font-size:14px;color:var(--ink2)"></i>Screenshot</span>
+        <span class="a-link">Show the conversation</span>
+        <span class="send"><i class="ph ph-arrow-up"></i></span>
+      </div>
+    </section>
+
+    <aside class="a-side a-builder">
+      <div class="a-sh"><span class="tm">C</span><b>Builder</b><span class="a-w"><span class="g work"></span>working, 1m</span><span class="sp"></span><span class="ib" title="Close the builder"><i class="ph ph-x"></i></span></div>
+      <div class="a-conv">
+          <div class="mark">Builder for project-board</div>
+          <div class="you" style="display:grid;gap:8px">The Review column is cut off at this width.<span style="display:flex;gap:6px;align-items:center;font-size:11.5px;color:var(--ink3)"><span style="width:44px;height:30px;border-radius:5px;background:var(--sel);box-shadow:0 0 0 1px var(--line2)"></span>screenshot.png, from the fix bar</span></div>
+          <div class="say">Columns now share the width evenly and never drop below 140px.</div>
+          <div class="you">Add a Review column between Doing and Done.</div>
+          <div class="work"><div class="work-h"><i class="ph ph-caret-right"></i><b>Worked</b> edited board.ts, columns.ts<span class="sp"></span><span class="add" style="font:11.5px var(--mono)">+24</span><span class="del" style="font:11.5px var(--mono)">−3</span></div></div>
+          <div class="say">Added. Agents can move cards there with <code>move_card</code>, same as the other columns.</div>
+          <div class="you">Cards I drag to Done should keep their tag.</div>
+          <div class="work"><div class="work-h"><i class="ph ph-caret-right"></i><b>Worked</b> read 2 files, edited 1<span class="sp"></span><span style="color:var(--ink3)">18s</span></div></div>
+          <div class="say">The drop handler rebuilt the card without its tag. It now copies the whole card, and the board reloads on its own when I save.</div>
+          <div class="live"><span class="spin"></span>Writing board.ts</div>
+      </div>
+      <div class="a-fold">Reply to the builder, / for commands</div>
+    </aside>
+
+    <aside class="a-runs">
+      <div class="a-sh"><i class="ph ph-list-checks" style="font-size:16px"></i><b>Runs</b><span class="sp"></span><span class="ib" title="Refresh"><i class="ph ph-arrow-clockwise"></i></span><span class="ib" title="Close"><i class="ph ph-x"></i></span></div>
+      <div class="a-rb">
+        <div><h5>Permissions</h5>
+          <div class="a-perm"><i class="ph ph-folder-open"></i>Read project files<span class="a-fg">Forget</span></div>
+          <div class="a-perm"><i class="ph ph-globe-simple"></i>Reach api.github.com<span class="a-fg">Forget</span></div>
+        </div>
+        <div><h5>Agent use</h5>
+          <div class="a-use"><div><b>14</b><span>calls, last 24 hours</span></div><div><b>212</b><span>calls, last 30 days</span></div></div>
+        </div>
+        <div><h5>Runs<span>newest first</span></h5>
+          <div class="a-run"><span class="a-tool">move_card</span><span class="a-o a-bad">Failed</span><span class="a-by"><span class="tm">X</span>Orphaned process cleanup</span><span class="a-open">Open session</span></div>
+          <div class="a-run a-chain"><span class="a-tool">list_cards</span><span class="a-o">ok, 41 ms</span><span class="a-by">same turn</span><span class="a-open"></span></div>
+          <div class="a-run"><span class="a-tool">add_card</span><span class="a-o">ok, 120 ms</span><span class="a-by"><span class="tm">X</span>Orphaned process cleanup</span><span class="a-open">Open session</span></div>
+          <div class="a-run"><span class="a-tool">add_card</span><span class="a-o">ok, 98 ms</span><span class="a-by"><span class="tm">C</span>Hero copy options</span><span class="a-open">Open session</span></div>
+          <div class="a-run a-chain"><span class="a-tool">set_tag</span><span class="a-o">ok, 12 ms</span><span class="a-by">same turn</span><span class="a-open"></span></div>
+          <div class="a-run"><span class="a-tool">summary</span><span class="a-o">ok, 302 ms</span><span class="a-by"><i class="ph ph-crown-simple" style="font-size:13px"></i>Orchestrator</span><span class="a-open">Open session</span></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</body>
+</html>

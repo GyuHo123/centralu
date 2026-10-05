@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Orchestrator</title>
+<link rel="stylesheet" href="session.css">
+<script>
+  const h = location.hash
+  if (h.includes('dark')) document.documentElement.dataset.theme = 'dark'
+  if (h.includes('first')) document.documentElement.classList.add('show-first')
+</script>
+<style>
+
+.o-first { display: none; }
+.show-first .waitpill, .show-first .ni .k { display: none; }
+.show-first .o-first { display: block; }
+.show-first .o-live { display: none; }
+.show-first section.o-first { display: grid; }
+.o-none { font-size: 12px; color: var(--ink3); padding: 4px 9px; line-height: 1.5; }
+.show-first .o-addp { background: var(--raise); color: var(--ink); box-shadow: 0 0 0 1px var(--line2); }
+.o-crown { width: 26px; height: 26px; border-radius: 8px; background: var(--ink); color: var(--paper); display: grid; place-items: center; }
+.o-crown .ph { font-size: 15px; }
+.o-tag { font-size: 11px; font-weight: 600; color: var(--ink3); padding: 1px 7px; border-radius: 6px; box-shadow: 0 0 0 1px var(--line2); }
+/* the summary table: one line a project */
+.o-sum { border-radius: 12px; box-shadow: 0 0 0 1px var(--line); background: var(--paper); overflow: hidden; }
+.o-sr { display: grid; grid-template-columns: 130px 1fr 92px; gap: 12px; align-items: center; padding: 9px 14px; border-top: 1px solid var(--line); font-size: 13px; }
+.o-sr:first-child { border-top: none; font-size: 11.5px; color: var(--ink3); font-weight: 650; padding: 8px 14px; }
+.o-sr .o-p { font-weight: 650; }
+.o-sr .o-n { color: var(--ink2); }
+.o-sr .o-w { font-size: 12px; display: flex; gap: 6px; align-items: center; justify-content: flex-end; color: var(--ink3); }
+.o-sr .o-w.o-need { color: var(--act); font-weight: 650; }
+.o-sr .o-w.o-fail { color: var(--danger); font-weight: 650; }
+/* ask_project: a question to another project */
+.o-ask { border-radius: 12px; box-shadow: 0 0 0 1px var(--line); background: var(--paper); overflow: hidden; }
+.o-ah { display: flex; align-items: center; gap: 8px; padding: 9px 12px; font-size: 12.5px; color: var(--ink2); }
+.o-ah b { color: var(--ink); font-weight: 600; }
+.o-ah .o-arrow { font-size: 15px; color: var(--ink); }
+.o-ah .sp { flex: 1; }
+.o-ah .o-s { font-size: 11.5px; color: var(--ink3); }
+.o-res { border-top: 1px solid var(--line); padding: 10px 14px; font-size: 13px; line-height: 1.6; color: var(--ink2); display: grid; gap: 8px; }
+.o-res .o-go { font-size: 12px; color: var(--ink); font-weight: 600; }
+/* proposals the orchestrator makes about itself */
+.o-prop { border-radius: 12px; background: var(--raise); box-shadow: 0 0 0 1.5px var(--act); padding: 12px 14px; display: grid; gap: 9px; }
+.o-prop .dh { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 650; color: var(--act); }
+.o-prop .dh .ph-fill, .o-prop .dh .ph { font-size: 15px; }
+.o-prop p { font-size: 14px; font-weight: 600; }
+.o-prop p span { display: block; font-size: 12.5px; color: var(--ink3); font-weight: 450; margin-top: 2px; }
+.o-prop .o-code { font: 12px/1.6 var(--mono); background: var(--code-bg); color: var(--code-ink); border-radius: 8px; padding: 8px 10px; }
+.o-prop .o-code .dim { color: var(--code-dim); }
+.o-pi { display: grid; grid-template-columns: 18px 1fr auto auto; gap: 10px; align-items: center; padding-top: 9px; border-top: 1px solid var(--line); }
+.o-pi > .ph { font-size: 16px; color: var(--ink2); align-self: start; margin-top: 2px; }
+.o-sugg { width: min(780px, calc(100% - 40px)); margin: 0 auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.o-sugg span { height: 28px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; border-radius: 8px; background: var(--paper); box-shadow: 0 0 0 1px var(--line); font-size: 12.5px; color: var(--ink2); }
+.o-sugg .ph { font-size: 14px; color: var(--ink3); }
+.composer { position: relative; }
+.o-typed { color: var(--ink); }
+.o-typed b { font-weight: 600; background: var(--sel); border-radius: 4px; padding: 0 3px; }
+.o-ac { position: absolute; left: 36px; bottom: calc(100% + 6px); width: 380px; background: var(--raise); border-radius: 12px; box-shadow: 0 0 0 1px var(--line2), 0 18px 40px -18px rgb(14 16 19 / 0.35); padding: 6px; z-index: 3; }
+.o-ac h5 { font-size: 11px; color: var(--ink3); font-weight: 650; padding: 4px 8px; }
+.o-ac .pr { grid-template-columns: 20px 1fr auto; }
+/* before any session: #first */
+section.o-first { background: var(--bg); align-content: center; padding: 0 64px; overflow: hidden; }
+.o-wrap { width: min(720px, 100%); display: grid; gap: 22px; }
+.o-eye { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--ink3); font-weight: 600; }
+.o-wrap h1 { font-size: 34px; line-height: 1.15; letter-spacing: -0.035em; font-weight: 750; }
+.o-wrap .o-lead { color: var(--ink2); font-size: 14.5px; line-height: 1.6; margin-top: 8px; max-width: 60ch; }
+.o-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.o-tool { display: grid; grid-template-columns: 30px 1fr auto; gap: 2px 10px; align-items: center; padding: 12px 14px; border-radius: 12px; background: var(--raise); box-shadow: 0 0 0 1px var(--line); }
+.o-tool .tm { grid-row: span 2; width: 30px; height: 30px; border-radius: 8px; font-size: 12px; }
+.o-tool b { font-size: 14px; font-weight: 650; }
+.o-tool .o-st { grid-column: 2; font-size: 12px; color: var(--ink3); display: flex; gap: 6px; align-items: center; }
+.o-tool .o-st .ph { font-size: 13px; }
+.o-tool .o-r { grid-row: span 2; }
+.o-tool.o-pick { box-shadow: 0 0 0 1.5px var(--ink); }
+.o-tool .o-check { width: 20px; height: 20px; border-radius: 50%; background: var(--ink); color: var(--paper); display: grid; place-items: center; }
+.o-tool .o-check .ph { font-size: 12px; }
+.o-start { background: var(--raise); border-radius: 14px; box-shadow: 0 0 0 1px var(--line2); padding: 14px 14px 10px 16px; display: grid; gap: 10px; }
+.o-start .o-in { color: var(--ink3); font-size: 15px; }
+.o-start .row-b .sp { flex: 1; }
+.o-qs { display: grid; }
+.o-q { display: flex; align-items: center; gap: 10px; padding: 10px 2px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--ink2); }
+.o-q .ph { font-size: 15px; color: var(--ink3); }
+.o-q .o-arr { margin-left: auto; }
+.o-foot { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: var(--ink3); }
+.o-foot .o-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink2); box-shadow: 0 0 0 3px var(--sel); }
+.o-foot .sp { flex: 1; }
+
+</style>
+</head>
+<body>
+  <header class="cbar">
+    <div class="brand"><span class="logo">C</span>Centralu</div>
+    <div class="find"><i class="ph ph-magnifying-glass"></i>Go to a session, file, command or setting<kbd>⌘K</kbd></div>
+    <div class="cright">
+      <span class="waitpill"><i class="ph-fill ph-hand"></i>3 waiting <kbd>⌘I</kbd></span>
+      <span class="usage"><span class="ring" style="--v:41%"></span>Claude 41%</span>
+      <span class="usage"><span class="ring" style="--v:18%"></span>Codex 18%</span>
+      <span class="cicon"><i class="ph ph-gear-six"></i></span>
+    </div>
+  </header>
+
+  <div class="frame no-ev">
+    <aside class="nav">
+      <div class="nav-top">
+        <span class="ni sel"><i class="ph ph-crown-simple"></i>Orchestrator<span class="sub">evolving</span></span>
+        <span class="ni"><i class="ph ph-squares-four"></i>Grid<span class="k">3</span></span>
+      </div>
+      <div class="nav-scroll o-live">
+        <div class="sec act"><i class="ph-fill ph-hand"></i>Waiting on you<span class="r">3</span></div>
+        <div class="row need"><span class="tm">X</span><span class="n">Orphaned process cleanup</span><span class="t">2m</span><span class="s">Approve: kill -TERM 40321</span></div>
+        <div class="row need"><span class="tm">C</span><span class="n">Hero copy options</span><span class="t">6m</span><span class="s">Question: which hero line</span></div>
+        <div class="row fail"><span class="tm">C</span><span class="n">결제 웹훅 재시도</span><span class="t">11m</span><span class="s">Stopped: 2 of 31 tests fail</span></div>
+
+        <div class="sec">Projects<span class="r"><i class="ph ph-arrows-down-up"></i><i class="ph ph-plus"></i></span></div>
+        <div class="proj"><i class="ph ph-caret-down"></i>centralu<span class="c">4</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Composer polish</span><span class="st"><span class="g work"></span>4m</span><span class="s">Editing SessionView.tsx</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Keeper review (manager)</span><span class="st"><span class="g idle"></span>idle</span></div>
+        <div class="row child"><span class="tm">X</span><span class="n">fix/orphans</span><span class="st"><span class="g need"></span>approve</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Release notes, beta.11</span><span class="st"><span class="g done"></span>done</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>landing-site<span class="c">2</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>payments-api<span class="c">2</span></div>
+
+        <div class="sec">Your apps<span class="r"><i class="ph ph-download-simple"></i><i class="ph ph-plus"></i></span></div>
+        <div class="app-row"><i class="ph ph-kanban"></i>project-board<span class="st">running</span></div>
+        <div class="app-row"><i class="ph ph-chart-line"></i>usage-report<span class="st">stopped</span></div>
+      </div>
+      <div class="nav-scroll o-first">
+        <div class="sec">Projects</div>
+        <div class="o-none">No projects yet. Add a folder, or ask the orchestrator to start one.</div>
+      </div>
+      <div class="nav-foot"><span class="ni o-addp"><i class="ph ph-folder-plus"></i>Add project</span></div>
+    </aside>
+
+    <section class="main o-live">
+      <header class="sh">
+        <span class="o-crown"><i class="ph ph-crown-simple"></i></span><h1>Orchestrator</h1>
+        <span class="o-tag">evolving</span>
+        <span class="chip"><i class="ph ph-cpu"></i>Claude, sonnet</span>
+        <span class="sp"></span>
+        <span class="state" style="color:var(--ink2)"><span class="spin"></span>Working</span>
+        <span class="acts">
+          <span class="ib" title="Restart"><i class="ph ph-arrow-clockwise"></i></span>
+          <span class="ib" title="Session settings"><i class="ph ph-sliders-horizontal"></i></span>
+          <span class="ib" title="More"><i class="ph ph-dots-three"></i></span>
+        </span>
+      </header>
+
+      <div class="stream">
+        <div class="col">
+          <div class="you">What is everyone doing, and what needs me first?</div>
+          <div class="work"><div class="work-h"><i class="ph ph-caret-right"></i><b>Looked around</b> read 9 sessions in 3 projects<span class="sp"></span><span style="color:var(--ink3)">6s</span></div></div>
+          <div class="o-sum">
+            <div class="o-sr"><span>Project</span><span>What is happening</span><span style="text-align:right">Needs you</span></div>
+            <div class="o-sr"><span class="o-p">centralu</span><span class="o-n">Orphan cleanup wants to stop a dev server. Composer polish is editing.</span><span class="o-w o-need"><span class="g need"></span>1 approval</span></div>
+            <div class="o-sr"><span class="o-p">landing-site</span><span class="o-n">Hero copy waits for your pick of three lines.</span><span class="o-w o-need"><span class="g need"></span>1 question</span></div>
+            <div class="o-sr"><span class="o-p">payments-api</span><span class="o-n">Webhook retry stopped: 2 of 31 tests fail.</span><span class="o-w o-fail"><span class="g fail"></span>stopped</span></div>
+          </div>
+          <div class="o-ask">
+            <div class="o-ah"><span class="o-arrow">↗</span><b>Asked payments-api</b>Why do the two webhook retry tests fail?<span class="sp"></span><span class="o-s">answered in 48s</span><i class="ph ph-caret-down"></i></div>
+            <div class="o-res">"Both tests expect the third retry after 4s, but backoff now doubles from 1s, so it lands at 8s. The code is right, the tests are stale."<span class="o-go">Open session →</span></div>
+          </div>
+          <div class="say">Start with the approval in centralu: <code>kill -TERM 40321</code> stops a dev server that has had no parent for 3 days. The payments failure is stale tests, not a bug, so it can wait.</div>
+          <div class="o-prop">
+            <div class="dh"><i class="ph-fill ph-sparkle"></i>The orchestrator wants to change itself, 2 proposals</div>
+            <div class="o-pi"><i class="ph ph-book-open-text"></i><p>Skill: triage<span>Rank what needs you across every project, the way I just did.</span></p><span class="btn sm p">Save &amp; restart</span><span class="btn sm q">Dismiss</span></div>
+            <div class="o-pi"><i class="ph ph-plugs-connected"></i><p>MCP server: linear<span class="mono" style="font-size:11.5px">npx -y @linear/mcp-server, needs LINEAR_API_KEY</span></p><span class="btn sm p">Install &amp; restart</span><span class="btn sm q">Dismiss</span></div>
+          </div>
+          <div class="live"><span class="spin"></span>Thinking, ~2k tokens<span class="sp"></span><span class="btn sm">Stop</span></div>
+        </div>
+      </div>
+
+      <div class="dock">
+        <div class="composer">
+<div class="in">Ask about any project, @ for sessions, / for commands</div>
+          <div class="bar">
+            <span class="ib"><i class="ph ph-paperclip"></i></span>
+            <span class="chip"><i class="ph ph-cpu"></i>sonnet, medium effort</span>
+            <span class="chip"><i class="ph ph-shield-check"></i>Normal</span>
+            <span class="sp"></span>
+            <span class="meter">Context <i></i>37%</span>
+            <span class="send"><i class="ph ph-arrow-up"></i></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="o-first">
+      <div class="o-wrap">
+        <div>
+          <div class="o-eye"><span class="o-crown"><i class="ph ph-crown-simple"></i></span>Meet your orchestrator</div>
+          <h1 style="margin-top:14px">One place to ask about<br>every project.</h1>
+          <p class="o-lead">It reads your sessions, starts new ones, and asks other projects for you. Pick the agent that runs it; you can switch later in Settings.</p>
+        </div>
+        <div class="o-tools">
+          <div class="o-tool o-pick"><span class="tm">C</span><b>Claude Code</b><span class="o-r"><span class="o-check"><i class="ph ph-check"></i></span></span><span class="o-st"><i class="ph ph-check-circle"></i>Installed, logged in</span></div>
+          <div class="o-tool"><span class="tm">X</span><b>Codex</b><span class="o-r"><span class="btn sm">Log in</span></span><span class="o-st"><i class="ph ph-warning-circle"></i>Installed, not logged in</span></div>
+        </div>
+        <div class="o-start">
+          <div class="o-in">Ask the orchestrator anything…</div>
+          <div class="row-b"><span class="chip"><i class="ph ph-cpu"></i>Claude Code</span><span class="sp"></span><span class="send"><i class="ph ph-arrow-up"></i></span></div>
+        </div>
+        <div class="o-qs">
+          <div class="o-q"><i class="ph ph-lightbulb"></i>Which of my folders have uncommitted work?<i class="ph ph-arrow-right o-arr"></i></div>
+          <div class="o-q"><i class="ph ph-lightbulb"></i>Set up a session to review my last pull request<i class="ph ph-arrow-right o-arr"></i></div>
+          <div class="o-q"><i class="ph ph-lightbulb"></i>What can you do across projects?<i class="ph ph-arrow-right o-arr"></i></div>
+        </div>
+        <div class="o-foot"><span class="btn sm"><i class="ph ph-folder-open" style="font-size:15px"></i>…or just pick a folder to start a session</span><span class="sp"></span><span class="o-dot"></span>Connected to the agent host<span>Check again</span></div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

@@ -1,0 +1,80 @@
+/*
+ * v3: every surface of today's window, redrawn. The frame is the same four parts as now:
+ * command bar, navigator (today's sidebar), the main view, and the evidence panel.
+ */
+@import url("tokens.css");
+
+body { display: grid; grid-template-rows: 44px 1fr; height: 100vh; }
+
+/* ---------- command bar (today's top bar) ---------- */
+.cbar { display: grid; grid-template-columns: 268px 1fr auto; align-items: center; background: var(--paper); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 9px; padding: 0 16px; font-weight: 750; letter-spacing: -0.02em; font-size: 14px; }
+.brand .logo { width: 22px; height: 22px; border-radius: 7px; background: var(--ink); color: var(--paper); display: grid; place-items: center; font-size: 12px; font-weight: 800; }
+.find { justify-self: center; width: min(560px, 92%); height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 9px; background: var(--raise); box-shadow: 0 0 0 1px var(--line); color: var(--ink3); font-size: 12.5px; }
+.find .ph { font-size: 15px; }
+.find kbd { margin-left: auto; }
+.cright { display: flex; align-items: center; gap: 14px; padding: 0 14px; }
+.waitpill { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px 0 8px; border-radius: 9px; background: var(--act); color: var(--act-ink); font-weight: 650; font-size: 12.5px; }
+.waitpill .ph-fill { font-size: 15px; }
+.waitpill kbd { background: rgb(255 255 255 / 0.18); border-color: rgb(255 255 255 / 0.3); color: inherit; }
+:root[data-theme="dark"] .waitpill kbd { background: rgb(0 0 0 / 0.15); border-color: rgb(0 0 0 / 0.25); }
+.usage { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink3); }
+.ring { width: 18px; height: 18px; border-radius: 50%; background: conic-gradient(var(--ink2) var(--v), var(--sel) 0); display: grid; place-items: center; }
+.ring::after { content: ""; width: 12px; height: 12px; border-radius: 50%; background: var(--paper); }
+.cicon { color: var(--ink3); }
+.cicon .ph { font-size: 17px; }
+
+.frame { display: grid; grid-template-columns: 268px 1fr 360px; min-height: 0; }
+.frame.no-ev { grid-template-columns: 268px 1fr; }
+
+/* ---------- navigator (today's sidebar) ---------- */
+.nav { background: var(--paper); border-right: 1px solid var(--line); display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+.nav-top { padding: 10px 8px 4px; display: grid; gap: 2px; }
+.ni { display: flex; align-items: center; gap: 9px; height: 32px; padding: 0 9px; border-radius: 8px; color: var(--ink2); font-weight: 550; font-size: 13px; }
+.ni .ph { font-size: 16px; }
+.ni .k { margin-left: auto; }
+.ni .sub { color: var(--ink3); font-weight: 450; font-size: 11.5px; }
+.ni.sel { background: var(--raise); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+.nav-scroll { overflow: hidden; padding: 4px 8px; }
+.sec { display: flex; align-items: center; gap: 6px; padding: 12px 9px 5px; font-size: 11.5px; font-weight: 650; color: var(--ink3); }
+.sec .r { margin-left: auto; display: flex; gap: 8px; color: var(--ink3); }
+.sec .r .ph { font-size: 14px; }
+.sec.act { color: var(--act); }
+.proj { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 9px; font-weight: 650; font-size: 13px; }
+.proj .ph { font-size: 13px; color: var(--ink3); }
+.proj .c { margin-left: auto; color: var(--ink3); font-weight: 450; font-size: 11.5px; }
+.row { display: grid; grid-template-columns: 18px 1fr auto; gap: 1px 8px; align-items: center; padding: 6px 9px; border-radius: 8px; }
+.row .n { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .s { grid-column: 2 / 4; font-size: 11.5px; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .t { font-size: 11px; color: var(--ink3); }
+.row.sel { background: var(--raise); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+.row.need .s { color: var(--act); font-weight: 600; }
+.row.fail .s { color: var(--danger); font-weight: 600; }
+.row.child { margin-left: 18px; position: relative; }
+.row.child::before { content: ""; position: absolute; left: -9px; top: -4px; bottom: 50%; width: 8px; border-left: 1px solid var(--line2); border-bottom: 1px solid var(--line2); border-bottom-left-radius: 6px; }
+.row .st { font-size: 11px; color: var(--ink3); display: flex; gap: 4px; align-items: center; }
+.app-row { display: flex; align-items: center; gap: 9px; height: 30px; padding: 0 9px; border-radius: 8px; font-size: 13px; color: var(--ink2); }
+.app-row .ph { font-size: 15px; }
+.app-row .st { margin-left: auto; font-size: 11px; color: var(--ink3); }
+.nav-foot { border-top: 1px solid var(--line); padding: 8px; }
+
+/* glyphs for state, shape + word */
+.g { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.g.work { border: 1.5px solid var(--ink3); border-top-color: var(--ink); }
+.g.need { background: var(--act); border-radius: 2px; transform: rotate(45deg); width: 7px; height: 7px; }
+.g.fail { background: var(--danger); border-radius: 1px; }
+.g.done { background: var(--ink3); }
+.g.idle { border: 1.5px dotted var(--ink3); }
+
+/* ---------- evidence panel ---------- */
+.ev { background: var(--paper); border-left: 1px solid var(--line); display: grid; grid-template-rows: 46px 42px 1fr auto; min-height: 0; }
+.ev-h { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--line); font-weight: 650; }
+.ev-h .ph { font-size: 16px; }
+.ev-h .m { color: var(--ink3); font-weight: 450; font-size: 12px; font-family: var(--mono); }
+.ev-h .r { margin-left: auto; display: flex; gap: 10px; color: var(--ink3); }
+.ev-h .r .ph { font-size: 15px; }
+.tabs { display: flex; gap: 2px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+.tab { display: inline-flex; gap: 5px; align-items: center; padding: 4px 9px; border-radius: 7px; color: var(--ink3); font-size: 12.5px; font-weight: 550; }
+.tab .c { font-size: 11px; color: var(--ink3); font-weight: 450; }
+.tab.sel { background: var(--ink); color: var(--paper); }
+.tab.sel .c { color: inherit; opacity: 0.7; }

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dialogs</title>
+<link rel="stylesheet" href="session.css">
+<script>
+  const h = location.hash
+  if (h.includes('dark')) document.documentElement.dataset.theme = 'dark'
+  document.documentElement.classList.add('d-show-' + (h.includes('handoff') ? 'handoff' : h.includes('delete') ? 'delete' : 'new'))
+</script>
+<style>
+  .d-scrim { position: fixed; inset: 0; z-index: 20; background: rgb(14 16 19 / 0.32); display: grid; place-items: center; }
+  :root[data-theme="dark"] .d-scrim { background: rgb(0 0 0 / 0.55); }
+  .d-box { display: none; width: 640px; background: var(--raise); border-radius: 16px; box-shadow: 0 0 0 1px var(--line2), 0 30px 80px -24px rgb(14 16 19 / 0.45); overflow: hidden; }
+  .d-show-new .d-box.new, .d-show-handoff .d-box.handoff, .d-show-delete .d-box.delete { display: block; }
+  .d-box.handoff { width: 560px; } .d-box.delete { width: 500px; }
+  .d-h { display: flex; align-items: center; gap: 10px; padding: 16px 20px 4px; }
+  .d-h h2 { font-size: 17px; font-weight: 750; letter-spacing: -0.025em; }
+  .d-h .x { margin-left: auto; color: var(--ink3); }
+  .d-h .x .ph { font-size: 17px; }
+  .d-sub { padding: 0 20px 14px; color: var(--ink2); font-size: 13px; }
+  .d-sec { padding: 12px 20px; border-top: 1px solid var(--line); display: grid; gap: 9px; }
+  .d-lab { font-size: 11.5px; font-weight: 650; color: var(--ink3); display: flex; align-items: center; gap: 8px; }
+  .d-lab .r { margin-left: auto; font-weight: 450; display: flex; gap: 8px; }
+  .d-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .d-tool { display: grid; grid-template-columns: 28px 1fr auto; gap: 1px 10px; align-items: center; padding: 10px 12px; border-radius: 11px; box-shadow: 0 0 0 1px var(--line2); }
+  .d-tool .tm { grid-row: span 2; width: 28px; height: 28px; border-radius: 8px; font-size: 12px; }
+  .d-tool b { font-size: 13.5px; font-weight: 650; }
+  .d-tool .s { grid-column: 2 / 4; font-size: 11.5px; color: var(--ink3); display: flex; gap: 6px; align-items: center; }
+  .d-tool .s .ok { color: var(--add); }
+  .d-tool .s .ph { font-size: 13px; }
+  .d-tool .rd { width: 16px; height: 16px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--line2); }
+  .d-tool.on { box-shadow: 0 0 0 1.5px var(--ink); background: var(--bg); }
+  .d-tool.on .rd { box-shadow: inset 0 0 0 5px var(--ink); }
+  .d-tool .warn { color: var(--ink); font-weight: 600; }
+  .d-past { border-radius: 10px; box-shadow: 0 0 0 1px var(--line); overflow: hidden; }
+  .d-pr { display: grid; grid-template-columns: 1fr auto auto; gap: 1px 12px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 12.5px; }
+  .d-pr:first-child { border-top: 0; }
+  .d-pr b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .d-pr .d { grid-column: 1; font-size: 11.5px; color: var(--ink3); }
+  .d-pr .w { grid-row: span 2; font-size: 11.5px; color: var(--ink3); }
+  .d-pr .a { grid-row: span 2; }
+  .d-pr.sel { background: var(--sel); }
+  .d-pr .open { font-size: 12px; color: var(--ink2); display: inline-flex; gap: 5px; align-items: center; }
+  .d-tog { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; }
+  .d-tog .h { font-weight: 450; color: var(--ink3); font-size: 12px; }
+  .d-sw { width: 30px; height: 18px; border-radius: 9px; background: var(--ink); position: relative; flex: none; }
+  .d-sw::after { content: ""; position: absolute; right: 2px; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--paper); }
+  .d-sw.off { background: var(--line2); } .d-sw.off::after { right: auto; left: 2px; }
+  .d-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+  .d-f { display: grid; gap: 4px; }
+  .d-f.wide { grid-column: 1 / 3; }
+  .d-f > span { font-size: 11.5px; color: var(--ink3); }
+  .d-in { height: 32px; border-radius: 8px; box-shadow: 0 0 0 1px var(--line2); background: var(--raise); display: flex; align-items: center; gap: 6px; padding: 0 10px; font: 12.5px var(--mono); letter-spacing: 0; }
+  .d-in .ph { font-size: 13px; color: var(--ink3); margin-left: auto; }
+  .d-in.ph-holder { color: var(--ink3); font-family: var(--sans); }
+  .d-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 32px; border-radius: 8px; box-shadow: 0 0 0 1px var(--line2); padding: 4px 6px; }
+  .d-chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 7px; border-radius: 6px; background: var(--sel); font: 11.5px var(--mono); letter-spacing: 0; }
+  .d-chip .ph { font-size: 11px; color: var(--ink3); }
+  .d-chip.sug { background: transparent; box-shadow: inset 0 0 0 1px dashed var(--line2); color: var(--ink3); border: 1px dashed var(--line2); }
+  .d-ft { display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--paper); }
+  .d-ft .sp { flex: 1; }
+  .d-ft .h { font-size: 11.5px; color: var(--ink3); }
+  .btn.ink { background: var(--ink); color: var(--paper); box-shadow: none; }
+  .btn.ink kbd { background: rgb(255 255 255 / 0.16); border-color: rgb(255 255 255 / 0.3); color: inherit; }
+  :root[data-theme="dark"] .btn.ink kbd { background: rgb(0 0 0 / 0.12); border-color: rgb(0 0 0 / 0.25); }
+  .btn.off { opacity: 0.4; }
+  .btn.red { background: var(--danger); color: #fff; box-shadow: none; }
+  :root[data-theme="dark"] .btn.red { color: #1a0605; }
+  .d-opt { display: grid; grid-template-columns: 18px 1fr; gap: 2px 10px; padding: 10px 12px; border-radius: 10px; box-shadow: 0 0 0 1px var(--line); }
+  .d-opt .rd, .d-opt .bx { margin-top: 1px; }
+  .d-opt b { font-size: 13px; font-weight: 600; }
+  .d-opt > span:last-child { grid-column: 2; font-size: 12px; color: var(--ink3); }
+  .d-opt.on { box-shadow: 0 0 0 1.5px var(--ink); background: var(--bg); }
+  .rd { width: 16px; height: 16px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--line2); display: inline-block; }
+  .on > .rd { box-shadow: inset 0 0 0 5px var(--ink); }
+  .bx { width: 16px; height: 16px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--line2); position: relative; display: inline-block; }
+  .bx.on { background: var(--ink); box-shadow: none; }
+  .bx.on::after { content: ""; position: absolute; left: 5px; top: 2px; width: 4px; height: 8px; border: solid var(--paper); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+  .bx.red.on { background: var(--danger); }
+  .d-segs { display: inline-flex; gap: 6px; }
+  .d-seg { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px 0 8px; border-radius: 9px; box-shadow: 0 0 0 1px var(--line2); font-size: 12.5px; font-weight: 600; }
+  .d-seg.on { box-shadow: 0 0 0 1.5px var(--ink); background: var(--bg); }
+  .d-block { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; background: var(--act-soft); box-shadow: 0 0 0 1px color-mix(in srgb, var(--act) 35%, transparent); font-size: 12.5px; color: var(--ink); }
+  .d-block .ph-fill { color: var(--act); font-size: 16px; margin-top: 1px; }
+  .d-block .cmd { font-size: 12px; padding: 5px 8px; margin-top: 6px; }
+  .d-block a { color: var(--act); font-weight: 650; text-decoration: none; margin-left: auto; white-space: nowrap; }
+  .d-list { display: grid; gap: 6px; font-size: 12.5px; color: var(--ink2); }
+  .d-list div { display: flex; gap: 8px; align-items: center; }
+  .d-list .ph { font-size: 15px; color: var(--ink3); }
+  .d-chk { display: grid; grid-template-columns: 18px 1fr; gap: 2px 10px; font-size: 13px; }
+  .d-chk span:last-child { grid-column: 2; font-size: 12px; color: var(--ink3); }
+  .d-chk b { font-weight: 600; }
+  .d-chk b.red { color: var(--danger); }
+</style>
+</head>
+<body>
+  <header class="cbar">
+    <div class="brand"><span class="logo">C</span>Centralu</div>
+    <div class="find"><i class="ph ph-magnifying-glass"></i>Go to a session, file, command or setting<kbd>⌘K</kbd></div>
+    <div class="cright">
+      <span class="waitpill"><i class="ph-fill ph-hand"></i>3 waiting <kbd>⌘I</kbd></span>
+      <span class="usage"><span class="ring" style="--v:41%"></span>Claude 41%</span>
+      <span class="usage"><span class="ring" style="--v:18%"></span>Codex 18%</span>
+      <span class="cicon"><i class="ph ph-gear-six"></i></span>
+    </div>
+  </header>
+
+  <div class="frame">
+    <aside class="nav">
+      <div class="nav-top">
+        <span class="ni"><i class="ph ph-crown-simple"></i>Orchestrator<span class="sub">evolving</span></span>
+        <span class="ni"><i class="ph ph-squares-four"></i>Grid<span class="k">3</span></span>
+      </div>
+      <div class="nav-scroll">
+        <div class="sec act"><i class="ph-fill ph-hand"></i>Waiting on you<span class="r">3</span></div>
+        <div class="row need sel"><span class="tm">X</span><span class="n">Orphaned process cleanup</span><span class="t">2m</span><span class="s">Approve: kill -TERM 40321</span></div>
+        <div class="row need"><span class="tm">C</span><span class="n">Hero copy options</span><span class="t">6m</span><span class="s">Question: which hero line</span></div>
+        <div class="row fail"><span class="tm">C</span><span class="n">결제 웹훅 재시도</span><span class="t">11m</span><span class="s">Stopped: 2 of 31 tests fail</span></div>
+
+        <div class="sec">Projects<span class="r"><i class="ph ph-arrows-down-up"></i><i class="ph ph-plus"></i></span></div>
+        <div class="proj"><i class="ph ph-caret-down"></i>centralu<span class="c">4</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Composer polish</span><span class="st"><span class="g work"></span>4m</span><span class="s">Editing SessionView.tsx</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Keeper review (manager)</span><span class="st"><span class="g idle"></span>idle</span></div>
+        <div class="row child"><span class="tm">X</span><span class="n">fix/orphans</span><span class="st"><span class="g need"></span>approve</span></div>
+        <div class="row"><span class="tm">C</span><span class="n">Release notes, beta.11</span><span class="st"><span class="g done"></span>done</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>landing-site<span class="c">2</span></div>
+        <div class="proj"><i class="ph ph-caret-right"></i>payments-api<span class="c">2</span></div>
+
+        <div class="sec">Your apps<span class="r"><i class="ph ph-download-simple"></i><i class="ph ph-plus"></i></span></div>
+        <div class="app-row"><i class="ph ph-kanban"></i>project-board<span class="st">running</span></div>
+        <div class="app-row"><i class="ph ph-chart-line"></i>usage-report<span class="st">stopped</span></div>
+      </div>
+      <div class="nav-foot"><span class="ni"><i class="ph ph-folder-plus"></i>Add project</span></div>
+    </aside>
+
+    <section class="main">
+      <header class="sh">
+        <span class="tm">X</span><h1>Orphaned process cleanup</h1>
+        <span class="chip"><i class="ph ph-git-branch"></i>fix/orphans</span>
+        <span class="sp"></span>
+        <span class="state"><i class="ph-fill ph-hand"></i>Waiting on you</span>
+        <span class="acts">
+          <span class="ib lab"><i class="ph ph-play"></i>Run</span>
+          <span class="ib" title="Restart"><i class="ph ph-arrow-clockwise"></i></span>
+          <span class="ib" title="Continue in a new session"><i class="ph ph-git-fork"></i></span>
+          <span class="ib" title="Session settings"><i class="ph ph-sliders-horizontal"></i></span>
+          <span class="ib" title="Rename, move to trash"><i class="ph ph-dots-three"></i></span>
+        </span>
+      </header>
+
+      <div class="stream">
+        <div class="pin"><i class="ph ph-arrow-bend-down-right"></i>Answering <b>Run a script that finds only the orphaned processes and stops them.</b></div>
+        <div class="col">
+          <div class="mark">Earlier messages were compacted</div>
+          <div class="you">Run a script that finds only the orphaned processes and stops them. Show me the list before you kill anything.</div>
+
+          <div class="work">
+            <div class="work-h"><i class="ph ph-caret-down"></i><b>Worked</b> read 2 files, ran 2 commands, edited 1<span class="sp"></span><span style="color:var(--ink3)">41s</span></div>
+            <div class="call"><i class="ph ph-file-text"></i><span class="v">Read</span><span class="p">scripts/strays.ts</span><span class="r">218 lines</span><i class="ph ph-caret-right"></i></div>
+            <div class="call"><i class="ph ph-terminal"></i><span class="v">Ran</span><span class="p">ps -eo pid,ppid,pgid,comm</span><span class="r">0.4s</span><i class="ph ph-caret-down"></i></div>
+            <div class="card">
+              <div><span class="dim">  PID  PPID  PGID COMMAND</span></div>
+              <div>40321     1 40321 node vite</div>
+              <div>40388 40321 40321 esbuild</div>
+              <div class="more"><span>42 more lines</span><span>Show all</span><span>Copy</span></div>
+            </div>
+            <div class="call"><i class="ph ph-pencil-simple"></i><span class="v">Edited</span><span class="p">scripts/strays.ts</span><span class="r"><span class="add">+14</span> <span class="del">−3</span></span><i class="ph ph-caret-right"></i></div>
+          </div>
+
+          <div class="agent"><span class="ic"><i class="ph ph-robot"></i></span><b>Explore agent</b><span class="o">6 steps<i class="ph ph-caret-right"></i></span><span class="d">Checked which processes the keeper holds</span></div>
+
+          <div class="view">
+            <div class="view-h"><i class="ph ph-kanban"></i><b>project-board</b><span style="color:var(--ink3)">opened by add_card</span><span class="sp"></span><span class="ib"><i class="ph ph-arrows-out-simple"></i></span><span class="ib"><i class="ph ph-x"></i></span></div>
+            <div class="board">
+              <div class="colm"><h4>To do 3</h4><span class="tk">Kill orphaned vite</span><span class="tk">Document strays.ts</span></div>
+              <div class="colm"><h4>Doing 1</h4><span class="tk">Find orphans</span></div>
+              <div class="colm"><h4>Done 4</h4><span class="tk">Keeper handoff test</span></div>
+            </div>
+          </div>
+
+          <div class="say">Two processes have no living parent and no keeper hold: <code>40321</code>, a <code>vite</code> dev server started 3 days ago, and <code>40388</code>, its esbuild child. I will stop the dev server first; its child exits with it.</div>
+
+          <div class="plan">
+            <h3>Plan, 2 of 3</h3>
+            <div class="step done"><i class="ph ph-check-circle"></i>List processes without a parent or a keeper hold</div>
+            <div class="step now"><i class="ph-fill ph-arrow-circle-right"></i>Stop the orphaned dev server</div>
+            <div class="step"><i class="ph ph-circle"></i>Run strays.ts again and confirm nothing is left</div>
+          </div>
+          <div class="live"><span class="spin"></span>Waiting for your answer<span class="sp"></span><span class="bg"><i class="ph ph-terminal-window"></i>1 background: pnpm dev</span><span class="btn sm">Stop</span></div>
+        </div>
+      </div>
+
+      <div class="dock">
+        <div class="decide">
+          <div class="dh"><i class="ph-fill ph-hand"></i>Codex wants to run a command<span class="w">2 min</span></div>
+          <div class="cmd">kill -TERM 40321<span class="d">in ~/code/centralu</span></div>
+          <div class="row-b">
+            <span class="btn sm p">Allow <kbd>Y</kbd></span>
+            <span class="btn sm">Deny <kbd>N</kbd></span>
+            <span class="btn sm q">Always allow <kbd>A</kbd></span>
+            <span class="btn sm q">For the whole project <kbd>⌥A</kbd></span>
+            <span class="sp"></span>
+            <span class="h">Next waiting <kbd>⌘⇧A</kbd></span>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="in">Reply, / for commands, @ for files</div>
+          <div class="bar">
+            <span class="ib"><i class="ph ph-paperclip"></i></span>
+            <span class="chip"><i class="ph ph-cpu"></i>gpt-5-codex, high effort</span>
+            <span class="chip"><i class="ph ph-shield-check"></i>Normal</span>
+            <span class="sp"></span>
+            <span class="meter">Context <i></i>37%</span>
+            <span class="send"><i class="ph ph-arrow-up"></i></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="ev">
+      <div class="ev-h"><i class="ph ph-git-branch"></i>fix/orphans<span class="m">↑1</span><span class="r"><i class="ph ph-arrows-out"></i><i class="ph ph-sidebar-simple"></i></span></div>
+      <div class="tabs"><span class="tab sel">Changes <span class="c">3</span></span><span class="tab">History</span><span class="tab">Files</span><span class="tab">Terminal <span class="c">1</span></span></div>
+      <div class="ev-body">
+        <div class="grp-h">Staged<span class="r">Unstage all</span></div>
+        <div class="f sel"><span class="box on"></span><span class="k add">M</span><span class="p">scripts/strays.ts</span><span class="n"><span class="add">+14</span> <span class="del">−3</span></span></div>
+        <div class="grp-h">Changes<span class="r">Stage all</span></div>
+        <div class="f"><span class="box"></span><span class="k add">A</span><span class="p">scripts/strays.test.ts</span><span class="n add">+41</span></div>
+        <div class="f"><span class="box"></span><span class="k del">D</span><span class="p">docs/old-notes.md</span><span class="n del">−22</span></div>
+        <div class="hunk">
+          <div class="hh">scripts/strays.ts  @@ 41,7 +41,18 @@</div>
+          <div class="c">  const procs = await listProcesses()</div>
+          <div class="r">- return procs.filter(p =&gt; p.ppid === 1)</div>
+          <div class="a">+ const held = await keeperHolds()</div>
+          <div class="a">+ return procs.filter(p =&gt;</div>
+          <div class="a">+   p.ppid === 1 &amp;&amp; !held.has(p.pgid))</div>
+          <div class="c">}</div>
+        </div>
+        <div class="note"><span>Expand</span><span>Open in IDE</span><span>Show all</span></div>
+      </div>
+      <div class="commit">
+        <div class="in">Commit message</div>
+        <div class="row-b"><span class="btn sm ink">Commit 1 file</span><span class="btn sm">Push ↑1</span></div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="d-scrim">
+
+    <!-- New session: from the project ⋯ menu, the project screen, or ⌘K -->
+    <div class="d-box new">
+      <div class="d-h"><h2>New session in centralu</h2><span class="x"><i class="ph ph-x"></i></span></div>
+      <div class="d-sub">Start fresh, or pick up a conversation the tool already has on disk.</div>
+      <div class="d-sec">
+        <div class="d-lab">Tool</div>
+        <div class="d-tools">
+          <div class="d-tool on"><span class="tm">C</span><b>Claude Code</b><span class="rd"></span><span class="s"><i class="ph ph-check-circle ok"></i>2.1.4, signed in</span></div>
+          <div class="d-tool"><span class="tm">X</span><b>Codex</b><span class="rd"></span><span class="s"><i class="ph ph-warning-circle"></i><span class="warn">Not signed in.</span> Run <span class="mono">codex login</span></span></div>
+        </div>
+      </div>
+      <div class="d-sec">
+        <div class="d-lab">Past conversations in this folder<span class="r"><span><kbd>↑</kbd> <kbd>↓</kbd></span></span></div>
+        <div class="d-past">
+          <div class="d-pr sel"><b>Keeper drain timeout under load</b><span class="w">Yesterday</span><span class="a btn sm">Load <kbd>↵</kbd></span><span class="d">48 messages, claude-sonnet</span></div>
+          <div class="d-pr"><b>Composer polish</b><span class="w">4m</span><span class="a open">Already open<i class="ph ph-arrow-right"></i></span><span class="d">Running as a session</span></div>
+          <div class="d-pr"><b>Split the store migration into steps</b><span class="w">Sep 30</span><span class="a"></span><span class="d">112 messages, claude-opus</span></div>
+        </div>
+      </div>
+      <div class="d-sec">
+        <div class="d-tog"><span class="d-sw"></span>Run in a git worktree<span class="h">Its own folder and branch, so it cannot step on other sessions</span></div>
+        <div class="d-grid">
+          <label class="d-f"><span>Branch</span><span class="d-in">agent/keeper-drain</span></label>
+          <label class="d-f"><span>From</span><span class="d-in">main<i class="ph ph-caret-down"></i></span></label>
+          <label class="d-f wide"><span>Setup command, runs once in the new folder</span><span class="d-in">pnpm install --frozen-lockfile</span></label>
+          <label class="d-f wide"><span>Copy files git ignores</span><span class="d-chips"><span class="d-chip">.env.local<i class="ph ph-x"></i></span><span class="d-chip sug">+ .env</span><span class="d-chip sug">+ .npmrc</span><span class="d-chip sug">+ apps/desktop/.dev.toml</span></span></label>
+        </div>
+      </div>
+      <div class="d-ft"><span class="h">Claude Code, new worktree from main</span><span class="sp"></span><span class="btn sm q">Cancel</span><span class="btn sm ink">Start <kbd>⌘↵</kbd></span></div>
+    </div>
+
+    <!-- Hand off: session ⋯ menu -->
+    <div class="d-box handoff">
+      <div class="d-h"><h2>Hand off to a fresh session</h2><span class="x"><i class="ph ph-x"></i></span></div>
+      <div class="d-sub">A new session starts with a note on where <b>Orphaned process cleanup</b> left off, and its context starts empty.</div>
+      <div class="d-sec">
+        <div class="d-block"><i class="ph-fill ph-hand"></i><div>This session is waiting on you. Answer the card first, then hand off.<div class="cmd">kill -TERM 40321</div></div><a>Go to the card</a></div>
+      </div>
+      <div class="d-sec">
+        <div class="d-lab">Where the note comes from</div>
+        <div class="d-opt on"><span class="rd"></span><b>Ask the agent</b><span>Codex writes the note. Best when it knows things the record does not show.</span></div>
+        <div class="d-opt"><span class="rd"></span><b>From the record</b><span>Built from the conversation without asking. Works when the agent is stuck or out of context.</span></div>
+      </div>
+      <div class="d-sec">
+        <div class="d-lab">Continue with</div>
+        <div class="d-segs"><span class="d-seg on"><span class="tm">X</span>Codex</span><span class="d-seg"><span class="tm">C</span>Claude Code</span></div>
+        <div class="d-chk" style="margin-top:4px"><span class="bx on"></span><b>Move the old session to trash</b><span>You can restore it from Settings, Trash.</span></div>
+      </div>
+      <div class="d-ft"><span class="sp"></span><span class="btn sm q">Cancel</span><span class="btn sm ink off">Hand off</span></div>
+    </div>
+
+    <!-- Delete: session ⋯ menu -->
+    <div class="d-box delete">
+      <div class="d-h"><h2>Move to trash?</h2><span class="x"><i class="ph ph-x"></i></span></div>
+      <div class="d-sub"><b>Orphaned process cleanup</b> stops and goes to the trash. You can read or restore it from Settings, Trash.</div>
+      <div class="d-sec">
+        <div class="d-lab">Also delete for good</div>
+        <div class="d-chk"><span class="bx red on"></span><b class="red">Codex's conversation file</b><span>~/.codex/sessions/2026/10/05/rollout-40321.jsonl. Restoring brings back the record here, not the agent's memory.</span></div>
+        <div class="d-chk" style="margin-top:6px"><span class="bx"></span><b>The worktree fix/orphans</b><span>~/code/centralu-worktrees/fix-orphans, 3 uncommitted changes and 1 unpushed commit.</span></div>
+      </div>
+      <div class="d-ft"><span class="sp"></span><span class="btn sm q">Cancel</span><span class="btn sm red">Move to trash, delete 1 file</span></div>
+    </div>
+
+  </div>
+</body>
+</html>
