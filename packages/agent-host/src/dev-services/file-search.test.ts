@@ -2,8 +2,8 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import { score, searchFiles } from './file-search.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { heldFileIndexes, invalidateFileIndex, score, searchFiles } from './file-search.js'
 
 /**
  * When someone types `@ses`, what they are usually looking for is `SessionView.tsx`.
@@ -87,5 +87,22 @@ describe('searchFiles — Korean file names', () => {
     writeFileSync(join(d, 'src', 'deep', 'Widget.tsx'), '')
 
     expect(await searchFiles(d, 'Widget')).toEqual([{ path: 'src/deep/Widget.tsx', name: 'Widget.tsx' }])
+  })
+})
+
+describe('the file index cache lets go of roots nobody searches any more (#392)', () => {
+  it('a stale index is swept when another root is searched', async () => {
+    invalidateFileIndex()
+    const a = mkdtempSync(join(tmpdir(), 'cc-fs-a-'))
+    const b = mkdtempSync(join(tmpdir(), 'cc-fs-b-'))
+    writeFileSync(join(a, 'one.ts'), '')
+    writeFileSync(join(b, 'two.ts'), '')
+    const now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    await searchFiles(a, 'one', 5)
+    clock.mockReturnValue(now + 60_000)
+    await searchFiles(b, 'two', 5)
+    clock.mockRestore()
+    expect(heldFileIndexes()).toBe(1)
   })
 })

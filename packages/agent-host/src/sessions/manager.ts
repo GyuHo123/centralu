@@ -113,6 +113,7 @@ import {
 } from '../dev-services/fs.js'
 import { isMissingPathError } from '../dev-services/path-guard.js'
 import { DirWatchers } from '../dev-services/watch.js'
+import { invalidateFileIndex } from '../dev-services/file-search.js'
 import { attachmentBytes, saveAttachment, clearAttachments, sweepAttachments } from '../dev-services/attachments.js'
 import { handoffNoteBytes, handoffNoteDir, sweepHandoffNotes, writeHandoffNote } from '../dev-services/handoff-notes.js'
 import { attachCommitSessions, looksLikeGitCommit, parseCommitSha } from '../dev-services/git-attrib.js'
@@ -872,7 +873,16 @@ export class SessionManager {
       (a, b) => Number(!!b.parentSessionId) - Number(!!a.parentSessionId),
     )
     for (const s of leavesFirst) await this.trashSession(s.id).catch(() => {})
+    const root = this.store.listProjects().find((p) => p.id === projectId)?.path
     this.store.deleteProject(projectId)
+    // What was held for the project's folder goes with it (#392): its watchers and its `@` file index
+    this.watchers.drop(projectId)
+    if (root) invalidateFileIndex(root)
+  }
+
+  /** How many of a project's directories are watched (tests) */
+  watchedDirCount(projectId: string): number {
+    return this.watchers.watchedCount(projectId)
   }
 
   /**

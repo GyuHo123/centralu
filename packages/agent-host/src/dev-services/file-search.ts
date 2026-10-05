@@ -36,6 +36,11 @@ export function invalidateFileIndex(root?: string): void {
   else cache.clear()
 }
 
+/** How many roots have an index held (tests) */
+export function heldFileIndexes(): number {
+  return cache.size
+}
+
 async function gitFiles(root: string): Promise<string[] | null> {
   try {
     /*
@@ -95,8 +100,11 @@ async function walk(root: string): Promise<string[]> {
 }
 
 async function indexOf(root: string): Promise<string[]> {
+  const now = Date.now()
   const hit = cache.get(root)
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.files
+  if (hit && now - hit.at < TTL_MS) return hit.files
+  // A stale index is never read again, so it is swept here rather than kept until the same root is searched (#392)
+  for (const [r, index] of cache) if (now - index.at >= TTL_MS) cache.delete(r)
   const files = (await gitFiles(root)) ?? (await walk(root))
   cache.set(root, { files, at: Date.now() })
   return files
