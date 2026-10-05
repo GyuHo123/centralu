@@ -99,19 +99,29 @@ describe('a vacuum cut off by a kill is still owed', () => {
     writeFileSync(
       script,
       `import { createRequire } from 'node:module'
+import { writeSync } from 'node:fs'
 const { Store } = await import(${JSON.stringify(storeModule)})
 const Database = createRequire(${JSON.stringify(storeModule)})('better-sqlite3')
 const exec = Database.prototype.exec
 Database.prototype.exec = function (sql) {
-  if (sql === 'VACUUM') process.kill(process.pid, 'SIGKILL')
+  if (sql === 'VACUUM') {
+    writeSync(1, 'killed at the vacuum\\n')
+    process.kill(process.pid, 'SIGKILL')
+  }
   return exec.call(this, sql)
 }
 const s = new Store(${JSON.stringify(file)}, { swap: ${swap} })
 if (${swap}) s.runDeferred()
+writeSync(1, 'survived\\n')
 `,
     )
-    const r = spawnSync(process.execPath, ['--import', 'tsx', script], { cwd: root, stdio: 'ignore', timeout: 60_000 })
-    expect(r.signal).toBe('SIGKILL')
+    const r = spawnSync(process.execPath, ['--import', 'tsx', script], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 60_000,
+    })
+    // Not the signal: on Windows a SIGKILL ends the process with an exit code and no signal
+    expect(String(r.stdout)).toBe('killed at the vacuum\n')
   }
 
   it('the next open vacuums', () => {
