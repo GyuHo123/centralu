@@ -34,6 +34,7 @@ import { AgentVersionService } from './agent-versions.js'
 import { acquireInstanceLock, lockConflictMessage } from './dev-services/instance-lock.js'
 import { hostLogPath, rotateIfLarge, startupBanner, teeStderrToFile } from './log-file.js'
 import { hostDrain } from './drain.js'
+import { stopThenClose } from './shutdown.js'
 import { bridgeAddress, ControlChannel, KEEPS_AGENTS_ACROSS_SWAP, onDrain, standby, viewPort } from './swap-control.js'
 
 /**
@@ -606,14 +607,13 @@ async function stopServices(mode: LeaveMode, handOver: boolean): Promise<void> {
   /*
    * The store closes however the rest goes (#396). It used to close only if every step before it succeeded: one that
    * threw left the store open and its WAL unfolded, and on the signal path the host never reached its exit and waited
-   * to be killed.
+   * to be killed. Each close runs whatever the other does, and neither hides the error that came first (shutdown.ts).
    */
-  try {
-    await stopServicesBeforeStore(mode, handOver)
-  } finally {
-    store.close()
-    held?.children.close()
-  }
+  await stopThenClose(
+    () => stopServicesBeforeStore(mode, handOver),
+    [() => store.close(), () => held?.children.close()],
+    (line) => console.error(line),
+  )
 }
 
 async function stopServicesBeforeStore(mode: LeaveMode, handOver: boolean): Promise<void> {
