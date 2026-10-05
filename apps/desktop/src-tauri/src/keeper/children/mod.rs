@@ -1204,6 +1204,13 @@ impl Reactor {
          * bound.
          */
         if !matches!(conn.role, Role::Attach { .. }) && conn.wbuf.len() > CONTROL_OUT_CAP {
+            // Never silent: a host whose control connection goes sees every child it holds exit
+            // with SIGHUP and cannot spawn until it restarts.
+            let role = if matches!(conn.role, Role::Control) { "control" } else { "hello" };
+            log(&format!(
+                "dropped {role} connection {id}: {} bytes queued past the {CONTROL_OUT_CAP}-byte cap, its peer is not reading",
+                conn.wbuf.len()
+            ));
             return Flush::Lost;
         }
         if !flushed {
