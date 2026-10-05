@@ -191,8 +191,12 @@ export class Store {
    * It never waits. With another connection reading, a TRUNCATE checkpoint waits out the whole busy timeout (5 s,
    * measured) on the event loop and then reports busy rather than throwing, which is longer than the 3 s a host has to
    * shut down (#396).
+   *
+   * On a closed store it does nothing and says so: a shutdown path that closes the store twice must not throw on the
+   * second close, where it would hide why the shutdown went wrong.
    */
   checkpoint(): boolean {
+    if (!this.db.open) return false
     const wait = this.db.pragma('busy_timeout', { simple: true }) as number
     try {
       this.db.pragma('busy_timeout = 0')

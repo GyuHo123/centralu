@@ -182,6 +182,13 @@ describe('the WAL', () => {
     s.close()
   })
 
+  it('a checkpoint or a second close on a closed store does nothing rather than throw', () => {
+    const s = new Store(storeFile())
+    s.close()
+    expect(s.checkpoint()).toBe(false)
+    expect(() => s.close()).not.toThrow()
+  })
+
   it('the settings a file store depends on are set by the store itself', () => {
     const file = storeFile()
     const s = new Store(file)
