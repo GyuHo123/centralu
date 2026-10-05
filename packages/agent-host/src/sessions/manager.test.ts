@@ -213,6 +213,30 @@ describe('projects', () => {
     await expect(rpc('projects.gitStatus', { projectId: 'nope' })).rejects.toThrow(/Project not found/)
   })
 
+  it.skipIf(process.platform === 'win32')('does not run repository fsmonitor before project trust', async () => {
+    const path = mkdtempSync(join(tmpdir(), 'cc-untrusted-git-'))
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: path })
+      const marker = join(path, 'fsmonitor-ran')
+      const hook = join(path, 'fsmonitor.sh')
+      writeFileSync(hook, `#!/bin/sh\nprintf ran >> "${marker}"\nprintf '2\\n'\n`)
+      chmodSync(hook, 0o755)
+      execFileSync('git', ['config', 'core.fsmonitor', hook], { cwd: path })
+
+      const project = (await rpc('projects.add', { path })) as { id: string }
+      await rpc('projects.list', {})
+      await rpc('projects.gitStatus', { projectId: project.id })
+      await rpc('git.status', { projectId: project.id })
+      expect(existsSync(marker)).toBe(false)
+
+      await rpc('projects.setTrusted', { projectId: project.id, trusted: true })
+      await rpc('projects.gitStatus', { projectId: project.id })
+      expect(existsSync(marker)).toBe(true)
+    } finally {
+      rmSync(path, { recursive: true, force: true })
+    }
+  })
+
   /*
    * The last tool chosen becomes that project's default (2026-08-27 flow review).
    *
@@ -3042,6 +3066,27 @@ describe('worktree sessions', () => {
       expect(r.isError).toBe(true)
       expect(r.text).toContain('uncommitted changes')
       // Nothing was deleted — a refusal is not a partial execution.
+      expect(wtMgr.listSessions().some((x) => x.id === s.id)).toBe(true)
+      expect(existsSync(s.worktree!.path)).toBe(true)
+    })
+
+    it('does not delete when the only uncommitted work is inside a submodule', async () => {
+      const moduleRepo = join(root, 'module-source')
+      execFileSync('git', ['init', '-q', '-b', 'main', moduleRepo], { cwd: root })
+      writeFileSync(join(moduleRepo, 'module.txt'), 'committed\n')
+      g(moduleRepo, ['add', '.'])
+      g(moduleRepo, ['commit', '-qm', 'module init'])
+      g(repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', moduleRepo, 'nested'])
+      g(repo, ['commit', '-qm', 'add submodule'])
+
+      const { s, managerId } = await makeChild('feat/dirty-submodule')
+      g(s.worktree!.path, ['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init'])
+      writeFileSync(join(s.worktree!.path, 'nested', 'module.txt'), 'uncommitted\n')
+
+      const r = await wtMgr.runOrchestratorTool(managerId, 'delete_worktree_session', { sessionId: s.id })
+
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain('uncommitted changes')
       expect(wtMgr.listSessions().some((x) => x.id === s.id)).toBe(true)
       expect(existsSync(s.worktree!.path)).toBe(true)
     })

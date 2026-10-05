@@ -134,6 +134,11 @@ function withTimeout<T>(p: Promise<T>, ms: number, label = 'A call'): Promise<T>
   ])
 }
 
+/** Pre-trust status reads may inspect names, but may not run repository-configured helpers. */
+function projectGitStatusOptions(trusted: boolean) {
+  return trusted ? {} : { disableFsmonitor: true, ignoreSubmodules: true }
+}
+
 /**
  * Maximum number of lines of conversation to load. The older side is cut off first.
  * Pushing a session with hundreds of turns in whole makes the first render noticeably slow,
@@ -950,13 +955,13 @@ export class SessionManager {
   }
 
   private async projectInfo(id: string, path: string): Promise<ProjectInfo> {
-    const git = await gitSummary(path)
     /*
      * **Reads the stored value.** 'claude' used to be hardcoded here, which meant the DB's
      * default_tool column was never read anywhere — and since nothing wrote to it either, nobody
      * noticed (2026-08-27, caught by a test while adding the remember-tool feature).
      */
     const row = this.store.listProjects().find((p) => p.id === id)
+    const git = await gitSummary(path, projectGitStatusOptions(row?.trusted ?? false))
     const stored = row?.defaultTool
     return {
       id, path, name: basename(path), defaultTool: stored === 'codex' ? 'codex' : 'claude',
@@ -1265,7 +1270,7 @@ export class SessionManager {
      */
     let worktree: Worktree | null = null
     if (params.worktree && params.projectId) {
-      const summary = await gitSummary(params.cwd)
+      const summary = await gitSummary(params.cwd, projectGitStatusOptions(this.projectTrusted(params.projectId)))
       if (!summary.isRepo || summary.denied) {
         throw Object.assign(
           new Error(
@@ -4085,7 +4090,7 @@ export class SessionManager {
   }
 
   gitStatusFiles(projectId: string) {
-    return gitStatusFiles(this.cwdOf(projectId))
+    return gitStatusFiles(this.cwdOf(projectId), projectGitStatusOptions(this.projectTrusted(projectId)))
   }
   gitDiff(projectId: string, path: string, staged?: boolean) {
     return gitDiff(this.cwdOf(projectId), path, { staged })
@@ -5372,10 +5377,15 @@ export class SessionManager {
         }
         const project = this.store.listProjects().find((p) => p.id === app.projectId)
         if (!project) throw new Error('the project of this app is gone')
-        const summary = await gitSummary(project.path)
+        const summary = await gitSummary(project.path, projectGitStatusOptions(project.trusted))
         if (summary.denied) throw new Error("Centralu cannot read this project's folder (the system denied access)")
         if (!summary.isRepo) return { isRepo: false, branch: null, changedFiles: 0, files: [] }
-        return { isRepo: true, branch: summary.branch, changedFiles: summary.changedFiles, files: await gitStatusFiles(project.path) }
+        return {
+          isRepo: true,
+          branch: summary.branch,
+          changedFiles: summary.changedFiles,
+          files: await gitStatusFiles(project.path, projectGitStatusOptions(project.trusted)),
+        }
       }
     }
   }

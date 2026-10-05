@@ -26,6 +26,7 @@ export type GitSummary = { isRepo: boolean; branch: string; changedFiles: number
 export type GitFileStatus = { path: string; staged: boolean; status: 'M' | 'A' | 'D' | 'R' | 'U' | '?' }
 export type GitCommit = { sha: string; shortSha: string; subject: string; author: string; when: number; parents: string[] }
 export type GitBranch = { name: string; current: boolean; remote: boolean; upstream?: string }
+export type GitStatusOptions = { disableFsmonitor?: boolean; ignoreSubmodules?: boolean }
 
 const OK = { timeout: 10_000, maxBuffer: 32 * 1024 * 1024 }
 
@@ -36,8 +37,9 @@ const OK = { timeout: 10_000, maxBuffer: 32 * 1024 * 1024 }
  * screen and losing the path a click needed to follow it to the file. Turning it off leaves the
  * original name intact (only quotes, backslashes and control characters are still escaped).
  */
-async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await exec(programPath('git'), ['-c', 'core.quotePath=false', ...args], { cwd, ...OK })
+async function git(cwd: string, args: string[], disableFsmonitor = false): Promise<string> {
+  const safeConfig = disableFsmonitor ? ['-c', 'core.fsmonitor=false'] : []
+  const { stdout } = await exec(programPath('git'), ['-c', 'core.quotePath=false', ...safeConfig, ...args], { cwd, ...OK })
   return stdout
 }
 
@@ -51,9 +53,10 @@ async function isRepo(cwd: string): Promise<boolean> {
   }
 }
 
-export async function gitSummary(cwd: string): Promise<GitSummary> {
+export async function gitSummary(cwd: string, options: GitStatusOptions = {}): Promise<GitSummary> {
   try {
-    const stdout = await git(cwd, ['status', '--porcelain=v2', '--branch'])
+    const statusConfig = options.ignoreSubmodules ? ['--ignore-submodules=all'] : []
+    const stdout = await git(cwd, ['status', ...statusConfig, '--porcelain=v2', '--branch'], options.disableFsmonitor)
     let branch = '(detached)'
     let changed = 0
     for (const line of stdout.split('\n')) {
@@ -70,9 +73,10 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
 }
 
 /** The list of changed files. Why porcelain v2 is used: it stays safe even when a name has spaces or non-ASCII characters */
-export async function gitStatusFiles(cwd: string): Promise<GitFileStatus[]> {
+export async function gitStatusFiles(cwd: string, options: GitStatusOptions = {}): Promise<GitFileStatus[]> {
   if (!(await isRepo(cwd))) return []
-  const stdout = await git(cwd, ['status', '--porcelain=v2', '-z', '--untracked-files=all'])
+  const statusConfig = options.ignoreSubmodules ? ['--ignore-submodules=all'] : []
+  const stdout = await git(cwd, ['status', ...statusConfig, '--porcelain=v2', '-z', '--untracked-files=all'], options.disableFsmonitor)
   const out: GitFileStatus[] = []
 
   const tokens = stdout.split('\0')
@@ -398,7 +402,7 @@ export async function gitCheckout(
 ): Promise<{ ok: boolean; conflicts: string[]; message?: string }> {
   if (!(await isRepo(cwd))) return { ok: false, conflicts: [], message: 'Not a git repository' }
   if (opts.dryRun) {
-    const dirty = (await gitStatusFiles(cwd)).filter((f) => f.status !== '?').map((f) => f.path)
+    const dirty = (await gitStatusFiles(cwd, { disableFsmonitor: true })).filter((f) => f.status !== '?').map((f) => f.path)
     return { ok: dirty.length === 0, conflicts: [...new Set(dirty)] }
   }
   try {
@@ -626,7 +630,9 @@ export async function gitBranchDelete(repoCwd: string, branch: string): Promise<
 
 /** Whether uncommitted changes remain — used to ask whether removal is safe */
 export async function gitWorktreeDirty(path: string): Promise<{ dirty: boolean; changedFiles: number }> {
-  const summary = await gitSummary(path)
+  // This check guards a forced removal, so submodule changes must remain visible. Disabling a
+  // repository-configured monitor is independent: the safety read does not need to run code.
+  const summary = await gitSummary(path, { disableFsmonitor: true })
   return { dirty: summary.changedFiles > 0, changedFiles: summary.changedFiles }
 }
 
