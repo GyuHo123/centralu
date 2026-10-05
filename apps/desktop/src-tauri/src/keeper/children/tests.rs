@@ -298,3 +298,39 @@ fn a_new_attach_replaces_the_old_reader() {
     read_until(&mut new, "ping\n");
     new.write_all(b"\n").unwrap();
 }
+
+/// A control connection whose peer stopped reading is dropped once its queue passes the cap, even
+/// though the flush never completes (#392). Built by hand rather than through a client that never
+/// reads: how much a unix socket holds before it refuses differs by kernel (one Linux under WSL took
+/// 26 MB), and the queue only grows past what the socket takes.
+#[test]
+fn a_control_queue_past_the_cap_is_dropped_while_the_socket_is_full() {
+    let d = temp_dir("cap");
+    let sock = d.0.join("s");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let (wake_r, wake_w) = UnixStream::pair().unwrap();
+    let shared = Arc::new(Shared { cmds: Mutex::new(Vec::new()), wake: OwnedFd::from(wake_w), sock });
+    let mut r = Reactor::new(listener, OwnedFd::from(wake_r), shared).unwrap();
+
+    let (mine, peer) = UnixStream::pair().unwrap();
+    mine.set_nonblocking(true).unwrap();
+    let chunk = vec![0u8; 64 * 1024];
+    loop {
+        match (&mine).write(&chunk) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let wbuf = vec![b'x'; CONTROL_OUT_CAP + 1];
+    r.conns.insert(1, Conn { stream: mine, role: Role::Control, rbuf: Vec::new(), wbuf: wbuf.clone() });
+    assert!(r.flush_conn(1) == Flush::Lost, "a full queue on a socket nobody reads is kept");
+
+    // Under the cap, the same connection is only waiting for room
+    let (mine, _peer2) = UnixStream::pair().unwrap();
+    mine.set_nonblocking(true).unwrap();
+    while (&mine).write(&chunk).is_ok() {}
+    r.conns.insert(2, Conn { stream: mine, role: Role::Control, rbuf: Vec::new(), wbuf: vec![b'x'; 1024] });
+    assert!(r.flush_conn(2) == Flush::Keep);
+    drop(peer);
+}
