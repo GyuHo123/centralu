@@ -817,6 +817,42 @@ describe('the cursor for a session where an event arrives before history (#79)',
     expect(useStore.getState().chat['off-focused']).toHaveLength(300)
   })
 
+  it('an off-screen conversation is not cut while a page of its history is on the way', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('off-paging', sessionInfo('off-paging'))
+    mock.sessions.set('off-paging-other', sessionInfo('off-paging-other'))
+    mock.messages.set('off-paging', rows('off-paging', 130))
+    await useStore.getState().attach(mock)
+    useStore.getState().focusSession('off-paging')
+    await vi.waitFor(() => expect(useStore.getState().history['off-paging']).toBeDefined())
+    // Leaving cuts it to the window: rows 81..130, with older rows still to read
+    useStore.getState().focusSession('off-paging-other')
+    expect(useStore.getState().history['off-paging']).toMatchObject({ oldestSeq: 81, more: true })
+
+    // A page of older rows is asked for and held on its way
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const real = mock.agents.loadMessages.bind(mock.agents)
+    mock.agents.loadMessages = async (...args: Parameters<typeof real>) => {
+      const page = await real(...args)
+      await gate
+      return page
+    }
+    const paging = useStore.getState().loadOlder('off-paging')
+    expect(useStore.getState().history['off-paging']!.loading).toBe(true)
+
+    // Meanwhile the session keeps working off screen, past the point where it would be cut
+    for (let i = 131; i <= 190; i++) {
+      mock.emit({ sessionId: 'off-paging', type: 'tool_call', callId: `c${i}`, summary: { tool: 'Read', title: `L${i}`, readOnly: true } } as never)
+    }
+    release()
+    await paging
+    mock.agents.loadMessages = real
+
+    // The page joins the rows it was asked for: no gap between it and the rest
+    expect(useStore.getState().chat['off-paging']!.map(line)).toEqual(L(190))
+  })
+
   it.each(['orchestrator', 'grid'] as const)(
     'the focused session keeps everything it loaded while the %s is on screen',
     async (view) => {
