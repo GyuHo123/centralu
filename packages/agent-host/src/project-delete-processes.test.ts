@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ToolName } from '@cc/protocol'
 import type { AgentAdapter } from './adapters/contract.js'
 import { CommandRunner } from './dev-services/commands.js'
+import { heldFileIndexes, invalidateFileIndex } from './dev-services/file-search.js'
 import { Store } from './dev-services/store.js'
 import { TerminalService } from './dev-services/terminal.js'
 import { SessionManager } from './sessions/manager.js'
@@ -44,6 +45,7 @@ function fakePtyModule(spawned: FakePty[]) {
 let fixture = ''
 let spawned: FakePty[] = []
 let rpc: ReturnType<typeof createRpcHandler>
+let mgr: SessionManager
 
 beforeEach(() => {
   fixture = realpathSync(mkdtempSync(join(tmpdir(), 'cc-proj-del-')))
@@ -52,7 +54,7 @@ beforeEach(() => {
   spawned = []
   const store = new Store()
   const adapters = new Map<ToolName, AgentAdapter>()
-  const mgr = new SessionManager(store, adapters, () => {})
+  mgr = new SessionManager(store, adapters, () => {})
   const terminals = new TerminalService(() => {})
   const commands = new CommandRunner(() => {})
   for (const svc of [terminals, commands]) {
@@ -93,5 +95,22 @@ describe('project deletion — terminals and executions', () => {
     expect(await rpc('commands.state', { projectId: again.id })).toEqual({ runs: [] })
     expect(((await rpc('terminal.list', { projectId: b.id })) as { terminals: unknown[] }).terminals).toHaveLength(1)
     expect(((await rpc('commands.state', { projectId: b.id })) as { runs: unknown[] }).runs).toHaveLength(1)
+  })
+})
+
+describe('project deletion — what was held for the folder (#392)', () => {
+  it("a deleted project's directory watchers and file index are let go", async () => {
+    invalidateFileIndex()
+    const a = (await rpc('projects.add', { path: join(fixture, 'a') })) as { id: string }
+    mkdirSync(join(fixture, 'a', 'src'))
+    await rpc('fs.watch', { projectId: a.id, paths: ['', 'src'] })
+    await rpc('files.search', { projectId: a.id, query: 'x', limit: 5 })
+    expect(mgr.watchedDirCount(a.id)).toBe(2)
+    expect(heldFileIndexes()).toBe(1)
+
+    await rpc('projects.delete', { projectId: a.id })
+
+    expect(mgr.watchedDirCount(a.id)).toBe(0)
+    expect(heldFileIndexes()).toBe(0)
   })
 })

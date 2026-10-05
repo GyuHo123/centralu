@@ -850,9 +850,11 @@ export class ClaudeBackgroundTracker {
     if (subtype === 'task_notification') {
       const id = str(m.task_id)
       const known = this.info.get(id)
+      // Every task that started is forgotten when it ends, foreground ones included: returning first kept each one's
+      // info for the life of the process (#392)
+      this.info.delete(id)
       if (!this.seen.has(id)) return []
       this.seen.delete(id)
-      this.info.delete(id)
       this.live = this.live.filter((x) => x !== id)
       const raw = str(m.status)
       const status = raw === 'failed' || raw === 'stopped' ? raw : 'completed'
@@ -864,7 +866,11 @@ export class ClaudeBackgroundTracker {
 
   /** The process went away and took its tasks with it — each live one ends as stopped, with the reason. */
   release(why: string): NormalizedEvent[] {
-    if (this.live.length === 0) return []
+    if (this.live.length === 0) {
+      this.info.clear()
+      this.seen.clear()
+      return []
+    }
     const ended = this.live.map((id) => ({ ...this.entry(id, this.info.get(id)), status: 'stopped' as const, summary: why }))
     this.live = []
     this.info.clear()

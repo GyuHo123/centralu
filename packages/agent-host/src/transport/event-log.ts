@@ -10,6 +10,9 @@ export type LoggedEvent = { seq: number; event: NormalizedEvent }
 
 export class EventLog {
   private buf: LoggedEvent[] = []
+  /** Serialised size of each entry in `buf`, index for index */
+  private sizes: number[] = []
+  private chars = 0
   private seq = 0
   /**
    * Which host lifetime issued these numbers (#82).
@@ -26,7 +29,24 @@ export class EventLog {
    */
   readonly streamEpoch: string = randomUUID()
 
-  constructor(private capacity = 2000) {}
+  /**
+   * `maxChars` bounds what the buffer holds, in serialised characters, whatever the event count.
+   *
+   * The count cap alone did not bound memory: a `message_image` event carries its whole base64
+   * image, so 2000 of a screenshot-heavy session's events could pin hundreds of MB for as long as
+   * the host stayed quiet afterwards (#392). Past the cap the oldest events go first, the newest
+   * always stays, and a client whose cursor falls out is told to resync, exactly as when the count
+   * cap pushes it out.
+   *
+   * The host passes its replay budget (`HostServer`): a hello never replays more than that, so an
+   * event further back could only ever be answered with a resync. A character never encodes to
+   * fewer UTF-8 bytes than one (`JSON.stringify` escapes a lone surrogate), so every window that
+   * fits the budget on the wire is still held here. Unbounded when not given.
+   */
+  constructor(
+    private capacity = 2000,
+    private maxChars = Number.POSITIVE_INFINITY,
+  ) {}
 
   get currentSeq(): number {
     return this.seq
@@ -37,10 +57,21 @@ export class EventLog {
     return this.buf[0]?.seq ?? 0
   }
 
-  append(event: NormalizedEvent): LoggedEvent {
+  /** `chars` is the event's serialised size; the caller already has it (`broadcast` stringifies once) */
+  append(event: NormalizedEvent, chars = JSON.stringify(event).length): LoggedEvent {
     const entry = { seq: ++this.seq, event }
     this.buf.push(entry)
-    if (this.buf.length > this.capacity) this.buf.splice(0, this.buf.length - this.capacity)
+    this.sizes.push(chars)
+    this.chars += chars
+    // The newest event always stays, however large: dropping it would leave nothing to replay at all
+    let drop = 0
+    while (drop < this.buf.length - 1 && (this.buf.length - drop > this.capacity || this.chars > this.maxChars)) {
+      this.chars -= this.sizes[drop++]!
+    }
+    if (drop > 0) {
+      this.buf.splice(0, drop)
+      this.sizes.splice(0, drop)
+    }
     return entry
   }
 

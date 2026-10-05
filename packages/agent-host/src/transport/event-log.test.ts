@@ -104,3 +104,32 @@ describe('EventLog: reconnect restoration (T3-1 done criteria)', () => {
     expect(log.since(0, log.streamEpoch).events.map((e) => e.seq)).toEqual([1, 2])
   })
 })
+
+describe('EventLog: memory is bounded by size, not only by count (#392)', () => {
+  const image = (n: number): NormalizedEvent =>
+    ({ type: 'message_image', sessionId: 's1', mime: 'image/png', data: 'x'.repeat(n) }) as never
+
+  it('drops the oldest events once the serialised total passes the cap', () => {
+    const log = new EventLog(2000, 10_000)
+    for (let i = 0; i < 50; i++) log.append(image(1_000))
+    expect(log.currentSeq).toBe(50)
+    expect(log.oldestSeq).toBeGreaterThan(40)
+    // A cursor pushed out by size is told to resync, as one pushed out by count is
+    expect(log.since(1, log.streamEpoch).resyncRequired).toBe(true)
+    expect(log.since(49, log.streamEpoch).events.map((e) => e.seq)).toEqual([50])
+  })
+
+  it('keeps the newest event even when it alone is past the cap', () => {
+    const log = new EventLog(2000, 10_000)
+    log.append(image(1_000))
+    log.append(image(50_000))
+    expect(log.oldestSeq).toBe(2)
+    expect(log.since(1, log.streamEpoch).events.map((e) => e.seq)).toEqual([2])
+  })
+
+  it('still drops by count when the events are small', () => {
+    const log = new EventLog(3)
+    for (let i = 0; i < 5; i++) log.append(ev(String(i)))
+    expect(log.oldestSeq).toBe(3)
+  })
+})
