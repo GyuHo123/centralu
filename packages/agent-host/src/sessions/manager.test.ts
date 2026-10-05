@@ -236,6 +236,9 @@ describe('projects', () => {
       await rpc('git.checkout', { projectId, branch: 'main', dryRun: true })
       await rpc('fs.listDir', { projectId, path: '' })
       await rpc('files.search', { projectId, query: 'new' })
+      await expect(
+        rpc('agents.createSession', { projectId, cwd: planted.dir, tool: 'claude', worktree: true }),
+      ).rejects.toThrow(/trusted project/)
       expect(planted.ran()).toEqual([])
 
       await rpc('projects.setTrusted', { projectId, trusted: true })
@@ -2547,6 +2550,8 @@ describe('worktree sessions', () => {
     wtMgr.prLookup = async () => null
     wtRpc = createRpcHandler(wtMgr, adapters)
     project = (await wtRpc('projects.add', { path: repo })) as { id: string; path: string }
+    // A worktree is only made in a trusted project (#407)
+    await wtRpc('projects.setTrusted', { projectId: project.id, trusted: true })
   })
 
   /*

@@ -506,7 +506,20 @@ export async function gitWorktreeAdd(
   path: string,
   branch: string,
   from?: string,
+  trust: GitTrust = {},
 ): Promise<Worktree> {
+  /*
+   * **Only in a trusted project (#407).** A checkout writes every tracked file through the
+   * repository's smudge filters and then fires `post-checkout` (and `reference-transaction` for
+   * the new branch). Turning those off is not a safe middle: the worktree would hold files the
+   * filters never converted (an LFS pointer, a git-crypt blob), which the session then edits and
+   * commits back. `--no-checkout` avoids the filters but leaves an empty folder the agent would
+   * have to fill by running git itself. Refusing leaves nothing half-made; the manager says why
+   * before it gets here.
+   */
+  if (trust.trusted !== true) {
+    throw Object.assign(new Error('A worktree can only be created in a trusted project'), { code: 'internal' })
+  }
   await gitWrite(repoCwd, ['worktree', 'add', '-b', branch, path, ...(from ? [from] : [])])
   return { path, branch }
 }

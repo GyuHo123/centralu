@@ -1278,6 +1278,19 @@ export class SessionManager {
       }
       const path = this.worktreePathFor(params.projectId, id)
       /*
+       * **Only in a trusted project (#407).** `git worktree add` checks every file out through the
+       * repository's smudge filters and fires its `post-checkout` hook: the repository's own code,
+       * before the person said the repository may run any. Why this refuses instead of checking
+       * out with those turned off: `gitWorktreeAdd`. Nothing before this point ran the
+       * repository's programs (the read above is locked for an untrusted project).
+       */
+      if (!this.projectTrusted(params.projectId)) {
+        throw Object.assign(
+          new Error("Worktree sessions need a trusted project: checking out runs the repository's hooks and filters. Trust the project first."),
+          { code: 'internal' },
+        )
+      }
+      /*
        * The person can set the branch name (#69) — because the branch name doubles as the session
        * name, it is effectively permanent. If not set, the session id's leading characters are used
        * (the session has no name yet, or the auto-name is applied later, and it can contain spaces
@@ -1317,7 +1330,7 @@ export class SessionManager {
       // the trunk.
       const baseSha = from ? await gitRevParse(params.cwd, from) : await gitHeadSha(params.cwd)
       try {
-        worktree = await gitWorktreeAdd(params.cwd, path, branch, from ?? undefined)
+        worktree = await gitWorktreeAdd(params.cwd, path, branch, from ?? undefined, { trusted: true })
         if (baseSha) worktree = { ...worktree, base: baseSha }
       } catch (err) {
         const msg = (err as { stderr?: string; message?: string }).stderr ?? (err as Error).message

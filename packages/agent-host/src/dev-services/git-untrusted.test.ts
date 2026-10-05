@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -11,6 +11,7 @@ import {
   gitLog,
   gitStatusFiles,
   gitSummary,
+  gitWorktreeAdd,
   gitWorktreeDirty,
   type GitTrust,
 } from './git.js'
@@ -156,6 +157,25 @@ describe('git reads before trust run none of the repository’s programs (#407)'
     const r = repo()
     execFileSync('git', ['log', '-n3', '--pretty=format:%H'], { cwd: r.dir })
     expect(r.ran()).toEqual(['gpg'])
+  })
+})
+
+describe('worktrees before trust (#407)', () => {
+  it('refuses to create one, running nothing and leaving no branch behind', async () => {
+    const r = repo()
+    const path = join(r.root, 'wt')
+    await expect(gitWorktreeAdd(r.dir, path, 'centralu/untrusted', undefined, UNTRUSTED)).rejects.toThrow(/trusted project/)
+    expect(r.ran()).toEqual([])
+    expect(existsSync(path)).toBe(false)
+    expect(execFileSync('git', ['branch', '--list', 'centralu/untrusted'], { cwd: r.dir, encoding: 'utf8' })).toBe('')
+  })
+
+  it('a trusted project checks out as plain git does, hooks and filters included', async () => {
+    const r = repo()
+    const path = join(r.root, 'wt')
+    await gitWorktreeAdd(r.dir, path, 'centralu/trusted', undefined, TRUSTED)
+    expect(existsSync(join(path, 'a.txt'))).toBe(true)
+    expect(r.ran()).toEqual(expect.arrayContaining(['hook-post-checkout', 'hook-reference-transaction', 'smudge']))
   })
 })
 
