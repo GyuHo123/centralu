@@ -841,6 +841,73 @@ test('the run dialog: a dev server is stopped with Stop, and its log is kept', a
   await expect(page.getByTestId('run-log')).toContainText('5173')
 })
 
+/**
+ * Makes every following read of a command's stored log wait until `failLogReads` rejects it — a read that timed
+ * out, or a connection that dropped mid-reconnect. A view holds live output until that read answers.
+ */
+async function holdLogReads(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as never as { __mock: any; __logReads: ((e: Error) => void)[] }
+    w.__logReads = []
+    w.__mock.commands.log = () => new Promise((_resolve, reject) => w.__logReads.push(reject))
+  })
+}
+
+async function failLogReads(page: Page): Promise<void> {
+  await expect.poll(() => page.evaluate(() => (window as never as { __logReads: unknown[] }).__logReads.length)).toBeGreaterThan(0)
+  await page.evaluate(() => {
+    for (const reject of (window as never as { __logReads: ((e: Error) => void)[] }).__logReads) reject(new Error('timed out'))
+  })
+}
+
+async function emitDevOutput(page: Page, data: string): Promise<void> {
+  await page.evaluate((d: string) => {
+    const w = window as never as { __mock: any; __store: any }
+    const pid = Object.keys(w.__store.getState().projects)[0]
+    w.__mock.emitCommandOutput(pid, 'pnpm dev', d)
+  }, data)
+}
+
+test('the run dialog: output still shows when the stored log cannot be read', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', 'task')
+
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm dev')
+  await page.getByTestId('run-add').click()
+  await page.getByTestId('run-command-0').click()
+  await holdLogReads(page)
+  await page.getByTestId('run-exec').click()
+
+  await emitDevOutput(page, 'Server listening on 5173\r\n')
+  await failLogReads(page)
+  await expect(page.getByTestId('run-log')).toContainText('5173')
+  await emitDevOutput(page, 'GET / 200\r\n')
+  await expect(page.getByTestId('run-log')).toContainText('GET / 200')
+})
+
+test('the terminal panel: a running command\'s output still shows when its stored log cannot be read', async ({ page }) => {
+  await setup(page)
+  await newSession(page, 'alpha', 'claude', 'task')
+
+  await page.getByTestId('run-open').click()
+  await page.getByTestId('run-add-input').fill('pnpm dev')
+  await page.getByTestId('run-add').click()
+  await page.getByTestId('run-command-0').click()
+  await page.getByTestId('run-exec').click()
+  await expect(page.getByTestId('run-running-0')).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await holdLogReads(page)
+  await page.getByTestId('evidence-tab-terminal').click()
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toBeVisible()
+  await emitDevOutput(page, 'Server listening on 5173\r\n')
+  await failLogReads(page)
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toContainText('5173')
+  await emitDevOutput(page, 'GET / 200\r\n')
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toContainText('GET / 200')
+})
+
 test('the open button turns white while a command is running', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', 'task')
