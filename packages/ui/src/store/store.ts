@@ -52,6 +52,7 @@ import {
 import type { AppCreated, AppToolResult, ConnectionState, NewAppSpec, Platform, WorkspaceSnapshot } from '@cc/platform/ports'
 import { isOnScreen } from '../app/onscreen.js'
 import { activateTab, defaultLayout, sanitizeLayout, type PanelGroup, type PanelTab } from './panelLayout.js'
+import { reloadBudget } from './reloadBudget.js'
 
 /**
  * The store only does the wiring — all state-change logic lives in core (docs/state-management.md
@@ -371,19 +372,7 @@ export function registerPinnedFrame(key: string, frame: InlineFrame): () => void
  */
 export const AUTO_RELOADS = 3
 export const AUTO_RELOAD_WINDOW_MS = 60_000
-const autoReloads = new Map<string, number[]>()
-
-function allowAutoReload(key: string, now = Date.now()): boolean {
-  // A view that was closed (or a session deleted) never asks again, so its key is swept once its window has passed
-  for (const [k, times] of autoReloads) {
-    if (times.every((t) => now - t >= AUTO_RELOAD_WINDOW_MS)) autoReloads.delete(k)
-  }
-  const recent = (autoReloads.get(key) ?? []).filter((t) => now - t < AUTO_RELOAD_WINDOW_MS)
-  const ok = recent.length < AUTO_RELOADS
-  if (ok) recent.push(now)
-  autoReloads.set(key, recent)
-  return ok
-}
+const autoReloads = reloadBudget(AUTO_RELOADS, AUTO_RELOAD_WINDOW_MS)
 
 /** The app's current code as reported by the list — `null` if unknown (never came up, or an old host) */
 function codeStampOf(apps: readonly ExternalAppInfo[], projectId: string | null, appId: string): string | null {
@@ -423,7 +412,7 @@ function followAppCode(get: () => AppState, set: (fn: (s: AppState) => Partial<A
       continue
     }
     if (now === pv.codeStamp || pv.stale) continue
-    if (allowAutoReload(`pinned\n${pv.key}`)) void get().reloadPinnedView(pv.key)
+    if (autoReloads.allow(`pinned\n${pv.key}`)) void get().reloadPinnedView(pv.key)
     else set((s) => ({ pinnedViews: s.pinnedViews.map((p) => (p.key === pv.key ? { ...p, stale: true } : p)) }))
   }
   for (const [sessionId, views] of Object.entries(inlineViews)) {
@@ -440,7 +429,7 @@ function followAppCode(get: () => AppState, set: (fn: (s: AppState) => Partial<A
         continue
       }
       if (now === v.codeStamp || v.stale) continue
-      if (allowAutoReload(`inline\n${sessionId}\n${v.callId}`)) void get().reloadInlineView(sessionId, v.callId)
+      if (autoReloads.allow(`inline\n${sessionId}\n${v.callId}`)) void get().reloadInlineView(sessionId, v.callId)
       else patch({ stale: true })
     }
   }
