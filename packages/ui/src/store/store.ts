@@ -1551,6 +1551,12 @@ export type AppState = {
  * So this number is pushed above every stored item as it is brought in.
  */
 /** A new object with one key removed (never mutates state directly) */
+function omitKey<T>(obj: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...obj }
+  delete next[key]
+  return next
+}
+
 /**
  * Everything the store keeps per session, for sessions that are gone. Kept in one place so a deletion and a
  * reconnect that finds a session missing clear the same things.
@@ -1583,12 +1589,6 @@ function forgetSessions(s: AppState, gone: ReadonlySet<string>): Partial<AppStat
     wakeLocked: keep(s.wakeLocked),
     focusedSessionId: s.focusedSessionId && gone.has(s.focusedSessionId) ? null : s.focusedSessionId,
   }
-}
-
-function omitKey<T>(obj: Record<string, T>, key: string): Record<string, T> {
-  const next = { ...obj }
-  delete next[key]
-  return next
 }
 
 /**
