@@ -3356,11 +3356,16 @@ export const useStore = create<AppState>((set, get) => ({
 
     set((st) => {
       const sessions = { ...st.sessions, [sessionId]: withSeq }
-      // An off-screen conversation is cut back to the window (OFFSCREEN_TRIM_AT), never while a page of history is
-      // still on its way: that page is merged against the rows it was asked for
+      /*
+       * An off-screen conversation is cut back to the window (OFFSCREEN_TRIM_AT), never while a page of history is
+       * still on its way: that page is merged against the rows it was asked for. The focused session is never cut,
+       * even while the orchestrator, the grid or a pinned app covers it: it is the conversation the person returns
+       * to, with the pages they loaded and their reading position (docs/state-management.md §4).
+       */
       const trimmed =
         chat !== undefined &&
         chat.length > OFFSCREEN_TRIM_AT &&
+        sessionId !== st.focusedSessionId &&
         !st.history[sessionId]?.loading &&
         !isOnScreen(st.view, sessionId, {
           focusedSessionId: st.focusedSessionId,

@@ -816,6 +816,27 @@ describe('the cursor for a session where an event arrives before history (#79)',
     }
     expect(useStore.getState().chat['off-focused']).toHaveLength(300)
   })
+
+  it.each(['orchestrator', 'grid'] as const)(
+    'the focused session keeps everything it loaded while the %s is on screen',
+    async (view) => {
+      const mock = new MockPlatform()
+      mock.sessions.set('off-kept', sessionInfo('off-kept'))
+      mock.messages.set('off-kept', rows('off-kept', 150))
+      await useStore.getState().attach(mock)
+      useStore.getState().focusSession('off-kept')
+      expect(await readAll('off-kept')).toEqual(L(150))
+
+      // Looking elsewhere does not take focus: the session stays focused, only the view changes
+      useStore.getState().setView(view)
+      mock.emit({ sessionId: 'off-kept', type: 'tool_call', callId: 'c151', summary: { tool: 'Read', title: 'L151', readOnly: true } } as never)
+
+      const st = useStore.getState()
+      expect(st.focusedSessionId).toBe('off-kept')
+      expect(st.chat['off-kept']!.map(line)).toEqual(L(151))
+      expect(st.history['off-kept']).toMatchObject({ oldestSeq: 1, more: false })
+    },
+  )
 })
 
 describe('merging the session list on reconnect (U4)', () => {
