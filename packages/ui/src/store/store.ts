@@ -1558,7 +1558,8 @@ export type AppState = {
  * Everything kept per session goes together (#163). A leftover notification card would focus a nonexistent
  * session on click, showing "Select a project or session." The rest (history cursor, draft, wake error) is dead
  * weight nobody reads any more. The conversation's views go too — the host has already closed the instance — and
- * the read position disappears along with the session: the same id will never be reused (#61).
+ * the read position goes with the session (#61). An id can come back: restoring a session from the trash brings
+ * it back under the same id, and it then opens like a session read for the first time.
  */
 function forgetSessions(s: AppState, gone: ReadonlySet<string>): Partial<AppState> {
   if (gone.size === 0) return {}
@@ -4087,7 +4088,11 @@ export const useStore = create<AppState>((set, get) => ({
         projects,
         sessions,
         ...forgetSessions(s, new Set(doomed)),
-        // What was kept per project goes with it: a deleted project's id never comes back to read it
+        /*
+         * What was kept per project goes with it. The id can come back (restoring one of its sessions from the trash
+         * re-adds the project under its old id), and then it starts the way a newly added project does: the deletion
+         * stopped its command runs, and a git epoch of 0 and folded folders are the defaults anyway.
+         */
         gitEpoch: omitKey(s.gitEpoch, projectId),
         expandedDirs: omitKey(s.expandedDirs, projectId),
         commandRuns: omitKey(s.commandRuns, projectId),
