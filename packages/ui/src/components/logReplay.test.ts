@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { logReplay } from './logReplay.js'
+import { logReplay, UNREAD_LOG_LINE } from './logReplay.js'
 
 function view() {
   const written: string[] = []
@@ -15,12 +15,13 @@ describe('a command log view joining the stored log and live output', () => {
     expect(written).toEqual(['a', 'b', 'c'])
   })
 
-  it('stops holding output when the stored log cannot be read', () => {
+  it('stops holding output when the stored log cannot be read, and says the earlier output is missing', () => {
     const { written, log } = view()
     log.chunk('early')
     log.fail()
     log.chunk('later')
-    expect(written).toEqual(['early', 'later'])
+    expect(written).toEqual([UNREAD_LOG_LINE, 'early', 'later'])
+    expect(UNREAD_LOG_LINE).toContain('earlier output could not be read')
   })
 
   it('stops holding output when the log belongs to another run, and draws none of it', () => {

@@ -868,7 +868,7 @@ async function emitDevOutput(page: Page, data: string): Promise<void> {
   }, data)
 }
 
-test('the run dialog: output still shows when the stored log cannot be read', async ({ page }) => {
+test('the run dialog: output still shows when the stored log cannot be read, under a line saying so', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', 'task')
 
@@ -882,11 +882,13 @@ test('the run dialog: output still shows when the stored log cannot be read', as
   await emitDevOutput(page, 'Server listening on 5173\r\n')
   await failLogReads(page)
   await expect(page.getByTestId('run-log')).toContainText('5173')
+  // A pane that starts mid-run says so, rather than passing for the whole log
+  await expect(page.getByTestId('run-log')).toContainText('earlier output could not be read')
   await emitDevOutput(page, 'GET / 200\r\n')
   await expect(page.getByTestId('run-log')).toContainText('GET / 200')
 })
 
-test('the terminal panel: a running command\'s output still shows when its stored log cannot be read', async ({ page }) => {
+test('the terminal panel: a running command\'s output still shows when its stored log cannot be read, under a line saying so', async ({ page }) => {
   await setup(page)
   await newSession(page, 'alpha', 'claude', 'task')
 
@@ -904,6 +906,8 @@ test('the terminal panel: a running command\'s output still shows when its store
   await emitDevOutput(page, 'Server listening on 5173\r\n')
   await failLogReads(page)
   await expect(page.getByTestId('cmd-term-pnpm dev')).toContainText('5173')
+  // A pane that starts mid-run says so, rather than passing for the whole log
+  await expect(page.getByTestId('cmd-term-pnpm dev')).toContainText('earlier output could not be read')
   await emitDevOutput(page, 'GET / 200\r\n')
   await expect(page.getByTestId('cmd-term-pnpm dev')).toContainText('GET / 200')
 })
