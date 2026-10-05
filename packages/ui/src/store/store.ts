@@ -52,6 +52,7 @@ import {
 import type { AppCreated, AppToolResult, ConnectionState, NewAppSpec, Platform, WorkspaceSnapshot } from '@cc/platform/ports'
 import { isOnScreen } from '../app/onscreen.js'
 import { activateTab, defaultLayout, sanitizeLayout, type PanelGroup, type PanelTab } from './panelLayout.js'
+import { reloadBudget } from './reloadBudget.js'
 
 /**
  * The store only does the wiring — all state-change logic lives in core (docs/state-management.md
@@ -371,15 +372,7 @@ export function registerPinnedFrame(key: string, frame: InlineFrame): () => void
  */
 export const AUTO_RELOADS = 3
 export const AUTO_RELOAD_WINDOW_MS = 60_000
-const autoReloads = new Map<string, number[]>()
-
-function allowAutoReload(key: string, now = Date.now()): boolean {
-  const recent = (autoReloads.get(key) ?? []).filter((t) => now - t < AUTO_RELOAD_WINDOW_MS)
-  const ok = recent.length < AUTO_RELOADS
-  if (ok) recent.push(now)
-  autoReloads.set(key, recent)
-  return ok
-}
+const autoReloads = reloadBudget(AUTO_RELOADS, AUTO_RELOAD_WINDOW_MS)
 
 /** The app's current code as reported by the list — `null` if unknown (never came up, or an old host) */
 function codeStampOf(apps: readonly ExternalAppInfo[], projectId: string | null, appId: string): string | null {
@@ -419,7 +412,7 @@ function followAppCode(get: () => AppState, set: (fn: (s: AppState) => Partial<A
       continue
     }
     if (now === pv.codeStamp || pv.stale) continue
-    if (allowAutoReload(`pinned\n${pv.key}`)) void get().reloadPinnedView(pv.key)
+    if (autoReloads.allow(`pinned\n${pv.key}`)) void get().reloadPinnedView(pv.key)
     else set((s) => ({ pinnedViews: s.pinnedViews.map((p) => (p.key === pv.key ? { ...p, stale: true } : p)) }))
   }
   for (const [sessionId, views] of Object.entries(inlineViews)) {
@@ -436,7 +429,7 @@ function followAppCode(get: () => AppState, set: (fn: (s: AppState) => Partial<A
         continue
       }
       if (now === v.codeStamp || v.stale) continue
-      if (allowAutoReload(`inline\n${sessionId}\n${v.callId}`)) void get().reloadInlineView(sessionId, v.callId)
+      if (autoReloads.allow(`inline\n${sessionId}\n${v.callId}`)) void get().reloadInlineView(sessionId, v.callId)
       else patch({ stale: true })
     }
   }
@@ -1554,6 +1547,40 @@ function omitKey<T>(obj: Record<string, T>, key: string): Record<string, T> {
 }
 
 /**
+ * Everything the store keeps per session, for sessions that are gone. Kept in one place so a deletion and a
+ * reconnect that finds a session missing clear the same things.
+ *
+ * Everything kept per session goes together (#163). A leftover notification card would focus a nonexistent
+ * session on click, showing "Select a project or session." The rest (history cursor, draft, wake error) is dead
+ * weight nobody reads any more. The conversation's views go too — the host has already closed the instance — and
+ * the read position goes with the session (#61). An id can come back: restoring a session from the trash brings
+ * it back under the same id, and it then opens like a session read for the first time.
+ */
+function forgetSessions(s: AppState, gone: ReadonlySet<string>): Partial<AppState> {
+  if (gone.size === 0) return {}
+  const keep = <T,>(obj: Record<string, T>): Record<string, T> => {
+    const out: Record<string, T> = {}
+    for (const [id, v] of Object.entries(obj)) if (!gone.has(id)) out[id] = v
+    return out
+  }
+  // Events parked for a session that will now never register would wait forever
+  for (const id of gone) pendingEvents.delete(id)
+  return {
+    chat: keep(s.chat),
+    inlineViews: keep(s.inlineViews),
+    scrollAnchor: keep(s.scrollAnchor),
+    notices: s.notices.filter((n) => !gone.has(n.sessionId)),
+    history: keep(s.history),
+    subagentSteps: keep(s.subagentSteps),
+    drafts: keep(s.drafts),
+    stickToBottom: keep(s.stickToBottom),
+    wakeError: keep(s.wakeError),
+    wakeLocked: keep(s.wakeLocked),
+    focusedSessionId: s.focusedSessionId && gone.has(s.focusedSessionId) ? null : s.focusedSessionId,
+  }
+}
+
+/**
  * A `set` that updates one session **after** awaiting an RPC (#163) — changes nothing if
  * `session_deleted` arrived in the meantime.
  *
@@ -2191,6 +2218,43 @@ const HISTORY_PAGE = 100
 
 /** How many recent messages a non-focused session keeps — reopening it loads more from the store */
 const WINDOW_SIZE = 50
+
+/**
+ * Cuts a conversation down to its last `WINDOW_SIZE` rows, or returns null when there is nothing to cut.
+ *
+ * **Shrinking the window moves the cursor along with it** (dogfooding, 2026-09-09: "older
+ * conversation does not load above").
+ *
+ * This used to trim only `chat`. That left the top of the screen at the freshly trimmed spot
+ * while the cursor (`oldestSeq`) stayed at its old value, so "load earlier conversation"
+ * prepended **a range that does not connect to the screen** — the trimmed-away gap was never
+ * seen again. The trim point is now the new cursor.
+ *
+ * The cursor is the top row's **stored number** (#79). Back when the render key was used, if
+ * the top of the 50 kept rows was a live row, the cursor received a number shared across every
+ * session. The window never starts at an unnumbered row (an image, a message before
+ * confirmation) — it has no number to set, and that row lives in the store anyway, so
+ * `loadOlder` brings it back. If there is no numbered row at all, nothing is trimmed: trimming
+ * with no cursor would leave no way back into the trimmed gap.
+ */
+function trimWindow(items: ChatItem[]): { items: ChatItem[]; oldestSeq: number } | null {
+  if (items.length <= WINDOW_SIZE) return null
+  let top = items.length - WINDOW_SIZE
+  while (top < items.length && items[top]!.storedSeq === undefined) top++
+  const oldestSeq = items[top]?.storedSeq
+  return oldestSeq === undefined ? null : { items: items.slice(top), oldestSeq }
+}
+
+/**
+ * How long an off-screen conversation may grow before it is cut back to the window.
+ *
+ * Losing focus is not the only way a conversation grows out of sight: a worker the orchestrator
+ * started, a session an app asked for, a grid panel that is not the focused one — none of them is
+ * ever focused and then left, so the trim in `focusSession` never reached them, and every event
+ * (screenshots included, base64 and all) stayed in memory for the life of the window. Twice the
+ * window leaves slack, so the cut happens once per window's worth of rows rather than on every event.
+ */
+const OFFSCREEN_TRIM_AT = WINDOW_SIZE * 2
 
 /** A holding pen for events belonging to a session not yet registered in the store (replayed right after registration) */
 const pendingEvents = new Map<string, NormalizedEvent[]>()
@@ -3202,30 +3266,8 @@ export const useStore = create<AppState>((set, get) => ({
     if (e.type === 'session_deleted') {
       set((s) => {
         const sessions = { ...s.sessions }
-        const chat = { ...s.chat }
         delete sessions[sessionId]
-        delete chat[sessionId]
-        return {
-          sessions,
-          chat,
-          // That conversation's views go too — the host has already closed the instance
-          inlineViews: omitKey(s.inlineViews, sessionId),
-          // The read position disappears along with the session — the same id will never be reused (#61)
-          scrollAnchor: omitKey(s.scrollAnchor, sessionId),
-          /*
-           * Everything kept per session goes together (#163). A leftover notification card would
-           * focus a nonexistent session on click, showing "Select a project or session." The rest
-           * (history cursor, draft, wake error) is dead weight nobody reads any more.
-           */
-          notices: s.notices.filter((n) => n.sessionId !== sessionId),
-          history: omitKey(s.history, sessionId),
-          subagentSteps: omitKey(s.subagentSteps, sessionId),
-          drafts: omitKey(s.drafts, sessionId),
-          stickToBottom: omitKey(s.stickToBottom, sessionId),
-          wakeError: omitKey(s.wakeError, sessionId),
-          wakeLocked: omitKey(s.wakeLocked, sessionId),
-          focusedSessionId: s.focusedSessionId === sessionId ? null : s.focusedSessionId,
-        }
+        return { sessions, ...forgetSessions(s, new Set([sessionId])) }
       })
       return
     }
@@ -3304,12 +3346,40 @@ export const useStore = create<AppState>((set, get) => ({
 
     set((st) => {
       const sessions = { ...st.sessions, [sessionId]: withSeq }
+      /*
+       * An off-screen conversation is cut back to the window (OFFSCREEN_TRIM_AT), never while a page of history is
+       * still on its way: that page is merged against the rows it was asked for. The focused session is never cut,
+       * even while the orchestrator, the grid or a pinned app covers it: it is the conversation the person returns
+       * to, with the pages they loaded and their reading position (docs/state-management.md §4).
+       */
+      const trimmed =
+        chat !== undefined &&
+        chat.length > OFFSCREEN_TRIM_AT &&
+        sessionId !== st.focusedSessionId &&
+        !st.history[sessionId]?.loading &&
+        !isOnScreen(st.view, sessionId, {
+          focusedSessionId: st.focusedSessionId,
+          orchestratorId: st.orchestratorId,
+          gridSessions: gridSessionIds(st.gridPanels),
+          builderPaneSessionId: st.builderPaneSessionId,
+          projectScreen: projectScreenSessions(st),
+        })
+          ? trimWindow(chat)
+          : null
       return {
         sessions,
         ...(lockedLate !== null
           ? { wakeError: { ...st.wakeError, [sessionId]: lockedLate }, wakeLocked: { ...st.wakeLocked, [sessionId]: true } }
           : {}),
-        chat: chat === undefined ? st.chat : { ...st.chat, [sessionId]: chat },
+        ...(trimmed
+          ? {
+              history: {
+                ...st.history,
+                [sessionId]: { oldestSeq: trimmed.oldestSeq, more: trimmed.oldestSeq > 1, loading: false },
+              },
+            }
+          : {}),
+        chat: chat === undefined ? st.chat : { ...st.chat, [sessionId]: trimmed ? trimmed.items : chat },
         // A turn begins because an event arrived — this is where its start instant is
         // recorded, so the elapsed line survives remounting (issue #23)
         workingSince: trackWorkingSince(st.workingSince, sessions, Date.now()),
@@ -3454,35 +3524,15 @@ export const useStore = create<AppState>((set, get) => ({
     // The summary (state, unread, preview) stays intact, so the sidebar and inbox remain accurate.
     if (prev && prev !== id) {
       const items = get().chat[prev]
-      if (items && items.length > WINDOW_SIZE) {
-        /*
-         * **Shrinking the window moves the cursor along with it** (dogfooding, 2026-09-09: "older
-         * conversation does not load above").
-         *
-         * This used to trim only `chat`. That left the top of the screen at the freshly trimmed spot
-         * while the cursor (`oldestSeq`) stayed at its old value, so "load earlier conversation"
-         * prepended **a range that does not connect to the screen** — the trimmed-away gap was never
-         * seen again. The trim point is now the new cursor.
-         *
-         * The cursor is the top row's **stored number** (#79). Back when the render key was used, if
-         * the top of the 50 kept rows was a live row, the cursor received a number shared across every
-         * session. The window never starts at an unnumbered row (an image, a message before
-         * confirmation) — it has no number to set, and that row lives in the store anyway, so
-         * `loadOlder` brings it back. If there is no numbered row at all, nothing is trimmed: trimming
-         * with no cursor would leave no way back into the trimmed gap.
-         */
-        let top = items.length - WINDOW_SIZE
-        while (top < items.length && items[top]!.storedSeq === undefined) top++
-        const cursor = items[top]?.storedSeq
-        if (cursor !== undefined) {
-          set((s) => ({
-            chat: { ...s.chat, [prev]: items.slice(top) },
-            history: {
-              ...s.history,
-              [prev]: { oldestSeq: cursor, more: cursor > 1, loading: false },
-            },
-          }))
-        }
+      const trimmed = items && trimWindow(items)
+      if (trimmed) {
+        set((s) => ({
+          chat: { ...s.chat, [prev]: trimmed.items },
+          history: {
+            ...s.history,
+            [prev]: { oldestSeq: trimmed.oldestSeq, more: trimmed.oldestSeq > 1, loading: false },
+          },
+        }))
       }
     }
 
@@ -4022,18 +4072,20 @@ export const useStore = create<AppState>((set, get) => ({
         .filter((x) => x.projectId === projectId)
         .map((x) => x.id)
       const sessions = { ...s.sessions }
-      const chat = { ...s.chat }
-      for (const id of doomed) {
-        delete sessions[id]
-        delete chat[id]
-      }
+      for (const id of doomed) delete sessions[id]
       return {
         projects,
         sessions,
-        chat,
+        ...forgetSessions(s, new Set(doomed)),
+        /*
+         * What was kept per project goes with it. The id can come back (restoring one of its sessions from the trash
+         * re-adds the project under its old id), and then it starts the way a newly added project does: the deletion
+         * stopped its command runs, and a git epoch of 0 and folded folders are the defaults anyway.
+         */
+        gitEpoch: omitKey(s.gitEpoch, projectId),
+        expandedDirs: omitKey(s.expandedDirs, projectId),
+        commandRuns: omitKey(s.commandRuns, projectId),
         focusedProjectId: s.focusedProjectId === projectId ? null : s.focusedProjectId,
-        focusedSessionId:
-          s.focusedSessionId && doomed.includes(s.focusedSessionId) ? null : s.focusedSessionId,
         trustAsk: s.trustAsk === projectId ? null : s.trustAsk,
         foldedProjects: s.foldedProjects.filter((id) => id !== projectId),
         projectPanels: Object.fromEntries(Object.entries(s.projectPanels).filter(([id]) => id !== projectId)),
@@ -5567,16 +5619,17 @@ export const useStore = create<AppState>((set, get) => ({
               ...liveFactsOf(f),
             }
       }
-      // The remains of a deleted session (its conversation, its focus) are cleared along with it
-      const chat: typeof st.chat = {}
-      for (const [id, items] of Object.entries(st.chat)) if (sessions[id]) chat[id] = items
+      /*
+       * The remains of a session deleted while disconnected are cleared the way `session_deleted` clears them: that
+       * event fell into the gap and is never replayed, so this is the only place they can go (#163).
+       */
+      const gone = new Set(Object.keys(st.sessions).filter((id) => !sessions[id]))
       return {
         sessions,
-        chat,
+        ...forgetSessions(st, gone),
         // Same reason as attach: a session may have been working across the gap, and the
         // sessions that vanished should not leave their instants behind (issue #23)
         workingSince: trackWorkingSince(st.workingSince, sessions, Date.now()),
-        focusedSessionId: st.focusedSessionId && sessions[st.focusedSessionId] ? st.focusedSessionId : null,
       }
     })
     // If the merge registered a session for the first time, replay any events held in the pen from before it was registered
