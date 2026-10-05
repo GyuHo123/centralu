@@ -72,6 +72,11 @@ interface MigrationStep {
   breaksOlderReaders: boolean
   /** Rewrites or re-indexes every message, or `VACUUM`s the file: too long to run while another host waits (#280) */
   heavy?: true
+  /**
+   * The step commits on its own instead of inside the runner's transaction: it switches `foreign_keys`, which SQLite
+   * ignores inside a transaction. Such a step must be one unit by itself, and safe to run again.
+   */
+  ownTransaction?: true
   run: () => void
 }
 
@@ -210,13 +215,16 @@ export class Store {
     for (const step of steps) {
       const due = current < step.to || deferred.has(step.to)
       if (!due) continue
+      const bump = () => {
+        if (step.to > this.schemaVersion) this.db.pragma(`user_version = ${step.to}`)
+      }
       if (swap && (step.heavy || step.breaksOlderReaders)) {
         deferred.add(step.to)
+        bump()
       } else {
-        floor = this.runStep(step, floor)
+        floor = this.runStep(step, floor, bump)
         deferred.delete(step.to)
       }
-      if (step.to > this.schemaVersion) this.db.pragma(`user_version = ${step.to}`)
     }
     if (deferred.size > 0 || deferredBefore > 0) this.writeDeferred([...deferred])
     if (deferred.size > 0 && this.dbPath !== ':memory:') {
@@ -246,18 +254,47 @@ export class Store {
   /**
    * Runs one step, raising `min_reader_version` first when the step breaks older readers. Returns the new floor.
    *
-   * Raised **before** the step runs. A start killed between the two then leaves a store that turns away an older host
-   * it could still have served, which costs an update; the other order leaves a store an older host opens and breaks
-   * on, which is what the record exists to prevent.
+   * Raised **before** the step runs, in the same commit. A store an older host opens and breaks on is what the record
+   * exists to prevent; since the step and the record commit together (#396), a step that fails takes the raise back
+   * with it and the store stays one any older host could read. A step that commits on its own (`ownTransaction`) keeps
+   * the old order: the record first, then the step.
    */
-  private runStep(step: MigrationStep, floor: number): number {
-    if (step.breaksOlderReaders && step.to > floor) {
-      floor = step.to
-      this.writeMinReader(floor)
+  private runStep(step: MigrationStep, floor: number, record: () => void): number {
+    const raise = step.breaksOlderReaders && step.to > floor
+    const apply = () => {
+      if (raise) this.writeMinReader(step.to)
+      step.run()
+      record()
     }
-    step.run()
+    /*
+     * **A step and the record that it ran commit together (#396).** Each statement used to commit on its own, and the
+     * version a moment later: a start killed between two ALTERs of one step left the first column added and the next
+     * start, finding that column, skipped the step for good, so every later query on the missing column failed. A
+     * swap makes that kill likelier: the keeper stops a host that has not finished activating. What cannot run inside a
+     * transaction (VACUUM) waits for the commit (`afterStep`); a vacuum that is cut off loses nothing.
+     */
+    if (step.ownTransaction) {
+      apply()
+    } else {
+      this.pendingAfterStep = []
+      let later: (() => void)[]
+      try {
+        this.db.transaction(apply)()
+      } finally {
+        later = this.pendingAfterStep
+        this.pendingAfterStep = null
+      }
+      for (const work of later) work()
+    }
     this.migrationsRun += 1
-    return floor
+    return raise ? step.to : floor
+  }
+
+  /** Work a migration step leaves for after its commit; outside a step it runs at once */
+  private pendingAfterStep: (() => void)[] | null = null
+  private afterStep(work: () => void): void {
+    if (this.pendingAfterStep) this.pendingAfterStep.push(work)
+    else work()
   }
 
   /** Steps a swap left for later that have not run yet (#280 step 3) */
@@ -278,10 +315,11 @@ export class Store {
     let ran = 0
     for (const step of this.migrationSteps()) {
       if (!left.has(step.to)) continue
-      floor = this.runStep(step, floor)
-      left.delete(step.to)
-      // One at a time, so a host that dies half way leaves exactly what is still owed
-      this.writeDeferred([...left])
+      // One at a time, and in the step's own commit, so a host that dies half way leaves exactly what is still owed
+      floor = this.runStep(step, floor, () => {
+        left.delete(step.to)
+        this.writeDeferred([...left])
+      })
       ran += 1
     }
     if (this.dbPath !== ':memory:') console.error(`[store] ran ${ran} step(s) left from the swap (${Date.now() - t0}ms)`)
@@ -570,6 +608,7 @@ export class Store {
         to: 10,
         // Same columns, one NOT NULL relaxed: an older build reads and writes it as before. The table is tens of rows
         breaksOlderReaders: false,
+        ownTransaction: true,
         run: () => {
           /*
            * The orchestrator **does not belong to a project.**
@@ -655,10 +694,10 @@ export class Store {
           /*
            * SQLite does not hand back freed space on its own. The room the duplicate rows took
            * up is still sitting in the file, so it is reclaimed once here — measured on the
-           * real database, 165MB to 21MB. (VACUUM does not run inside a transaction, so it is
-           * called separately after the commit.)
+           * real database, 165MB to 21MB. (VACUUM does not run inside a transaction, so it waits
+           * for the step's commit.)
            */
-          this.db.exec('VACUUM')
+          this.afterStep(() => this.db.exec('VACUUM'))
         },
       },
       {
@@ -1682,7 +1721,7 @@ export class Store {
        * process does was also the one thing it did silently.
        */
       console.error(`[store] merged streaming rows into messages: ${before.n} -> ${after.n} rows`)
-      this.db.exec('VACUUM') // SQLite does not hand back freed space on its own (see v11's note)
+      this.afterStep(() => this.db.exec('VACUUM')) // SQLite does not hand back freed space on its own (see v11's note)
     }
   }
 
@@ -1752,17 +1791,19 @@ export class Store {
       if (stale.n > 0) console.error(`[store] search index rebuilt without tool calls: dropped ${stale.n} rows, kept ${rows} (${t1 - t0}ms)`)
       return
     }
-    const before = pages() * pageSize
-    try {
-      this.db.exec('VACUUM')
-    } catch (err) {
-      console.error(`[store] could not vacuum after rebuilding the search index; ${mb(free)} stay free in the file: ${(err as Error).message}`)
-      return
-    }
-    console.error(
-      `[store] search index rebuilt without tool calls: dropped ${stale.n} rows, kept ${rows} (${t1 - t0}ms); ` +
-        `vacuumed ${mb(before)} -> ${mb(pages() * pageSize)} (${Date.now() - t1}ms)`,
-    )
+    this.afterStep(() => {
+      const before = pages() * pageSize
+      try {
+        this.db.exec('VACUUM')
+      } catch (err) {
+        console.error(`[store] could not vacuum after rebuilding the search index; ${mb(free)} stay free in the file: ${(err as Error).message}`)
+        return
+      }
+      console.error(
+        `[store] search index rebuilt without tool calls: dropped ${stale.n} rows, kept ${rows} (${t1 - t0}ms); ` +
+          `vacuumed ${mb(before)} -> ${mb(pages() * pageSize)} (${Date.now() - t1}ms)`,
+      )
+    })
   }
 
   /** v10: drops the NOT NULL on project_id. SQLite cannot alter a column, so the table is rebuilt */
