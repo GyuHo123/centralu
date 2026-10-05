@@ -602,6 +602,20 @@ process.on('uncaughtException', (err) => {
  * closes them.
  */
 async function stopServices(mode: LeaveMode, handOver: boolean): Promise<void> {
+  /*
+   * The store closes however the rest goes (#396). It used to close only if every step before it succeeded: one that
+   * threw left the store open and its WAL unfolded, and on the signal path the host never reached its exit and waited
+   * to be killed.
+   */
+  try {
+    await stopServicesBeforeStore(mode, handOver)
+  } finally {
+    store.close()
+    held?.children.close()
+  }
+}
+
+async function stopServicesBeforeStore(mode: LeaveMode, handOver: boolean): Promise<void> {
   if (handOver) {
     try {
       const n = recordViewHandover(store, views, inlineViews)
@@ -641,8 +655,6 @@ async function stopServices(mode: LeaveMode, handOver: boolean): Promise<void> {
   inlineViews.dispose()
   await views.dispose()
   await server.close()
-  store.close()
-  held?.children.close()
 }
 
 let leaving: LeaveMode | null = null
@@ -650,7 +662,9 @@ const shutdown = async (mode: LeaveMode, handOver: boolean) => {
   // A second signal while leaving changes nothing: the first decided what happens to the children
   if (leaving) return
   leaving = mode
-  await stopServices(mode, handOver)
+  await stopServices(mode, handOver).catch((err) => {
+    console.error(`[agent-host] a step of shutting down failed; leaving anyway: ${(err as Error).stack ?? err}`)
+  })
   // Why it ended becomes the first line of the next investigation — it never disappears silently
   console.error(`[agent-host] shutting down (pid ${process.pid}, ${mode === 'detach' ? 'agents, terminals and commands left running in the keeper' : 'stopped'})`)
   stopLog()
