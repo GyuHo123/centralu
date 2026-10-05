@@ -62,8 +62,9 @@ Selectors are implemented as memoised wrappers around pure functions in `core`. 
 
 ## 4. Message windowing (how the §7.1 memory target is met)
 
-- We do not hold every message of a session in memory. **Focused session**: the most recent N (200 by default) + page-loading from StorePort when scrolling up. **Unfocused sessions**: no messages at all, only a summary (last line, seq, state).
-- When focus is lost, that session's messages are trimmed to the window size.
+- We do not hold every message of a session in memory. **Focused session**: everything loaded so far, read a page at a time from StorePort when scrolling up. **Unfocused sessions**: a window of the most recent 50 rows (`WINDOW_SIZE`) beside the summary (last line, seq, state); opening one reads the rest back.
+- When focus is lost, that session's messages are trimmed to the window size, and the history cursor moves to the top of what is kept.
+- A session that is not on screen and keeps receiving events (a worker the orchestrator started, a session an app asked for, an unfocused grid panel) is trimmed the same way once it reaches twice the window (#392). It was never focused and then left, so the trim above never reached it.
 - A streaming `message_delta` is appended to the last message — only that row re-renders, without recreating list items (including the virtual list's measure recalculation).
 - **A launch card's subagent steps are outside the window** (#222). They are not in the conversation (`chat`) and are never paged with it: `subagentSteps[session][callId]` holds them once the person opens that card, read a page at a time from `messages.subagent`. A live `subagent_event` joins an opened card only once every earlier step is read, and touches nothing else — not the conversation, not the session's state, not unread. Whether the section is open lives in the store, not the card, because the virtual list detaches rows that scroll away and a card drawn again must come back as it was left.
 
