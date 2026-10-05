@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from './store.js'
@@ -64,5 +64,50 @@ describe('a migration step is one unit with the record that it ran', () => {
 
     expect(columns(file)).not.toContain('half_a')
     expect(raw(file, (db) => db.pragma('user_version', { simple: true }))).toBe(version)
+  })
+})
+
+describe('the WAL', () => {
+  it('is folded once the steps a swap left for later have run', () => {
+    const file = storeFile()
+    raw(file, (db) => db.pragma('user_version = 38'))
+    const s = new Store(file, { swap: true })
+    expect(s.deferredSteps).toEqual([40])
+
+    s.runDeferred()
+
+    expect(statSync(`${file}-wal`).size).toBe(0)
+    s.close()
+  })
+
+  it('a checkpoint with another connection reading reports it did not fold, without waiting', () => {
+    const file = storeFile()
+    const s = new Store(file)
+    s.addProject({ id: 'p2', path: '/tmp/p2', name: 'p2' })
+    const reader = new Database(file, { readonly: true })
+    try {
+      reader.exec('BEGIN')
+      reader.prepare('SELECT COUNT(*) FROM projects').get()
+      const t0 = Date.now()
+      expect(s.checkpoint()).toBe(false)
+      expect(Date.now() - t0).toBeLessThan(1000)
+      reader.exec('COMMIT')
+    } finally {
+      reader.close()
+    }
+    expect(s.checkpoint()).toBe(true)
+    expect(statSync(`${file}-wal`).size).toBe(0)
+    s.close()
+  })
+
+  it('the settings a file store depends on are set by the store itself', () => {
+    const file = storeFile()
+    const s = new Store(file)
+    const db = (s as unknown as { db: Database.Database }).db
+    expect(db.pragma('foreign_keys', { simple: true })).toBe(1)
+    expect(db.pragma('synchronous', { simple: true })).toBe(1)
+    expect(db.pragma('busy_timeout', { simple: true })).toBe(5000)
+    expect(db.pragma('journal_size_limit', { simple: true })).toBe(64 * 1024 * 1024)
+    s.close()
   })
 })

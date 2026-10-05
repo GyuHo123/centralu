@@ -139,6 +139,21 @@ export class Store {
        */
       this.refuseIfTooNew()
       this.db.pragma('journal_mode = WAL')
+      /*
+       * Set here rather than left to how better-sqlite3 happens to be built (#396). CASCADE on project and session
+       * deletion depends on `foreign_keys`, which plain SQLite (and rusqlite, the planned replacement) leaves off;
+       * `synchronous = NORMAL` is the WAL setting that loses at most the last commits on power loss, never the file;
+       * `busy_timeout` is the library's default made visible.
+       */
+      this.db.pragma('foreign_keys = ON')
+      this.db.pragma('synchronous = NORMAL')
+      this.db.pragma('busy_timeout = 5000')
+      /*
+       * A checkpoint that resets the WAL also cuts the file back to this. Without a limit the WAL keeps the size of the
+       * largest transaction it ever held until the next TRUNCATE, at open or close: after a swap's deferred VACUUM
+       * (146 MB measured) that was the rest of a host's life, and under the keeper a host lives for days.
+       */
+      this.db.pragma(`journal_size_limit = ${WAL_SIZE_LIMIT}`)
       this.db.exec(readFileSync(SCHEMA_PATH, 'utf8'))
       this.migrate()
     } catch (e) {
@@ -160,12 +175,24 @@ export class Store {
     this.checkpoint()
   }
 
-  /** Folds the WAL into the main database and truncates the file to zero. A failure here is not fatal, so it is swallowed. */
-  checkpoint(): void {
+  /**
+   * Folds the WAL into the main database and truncates the file to zero. Returns whether it did: a failure is not
+   * fatal, and it is tried again at the next open or close.
+   *
+   * It never waits. With another connection reading, a TRUNCATE checkpoint waits out the whole busy timeout (5 s,
+   * measured) on the event loop and then reports busy rather than throwing, which is longer than the 3 s a host has to
+   * shut down (#396).
+   */
+  checkpoint(): boolean {
+    const wait = this.db.pragma('busy_timeout', { simple: true }) as number
     try {
-      this.db.pragma('wal_checkpoint(TRUNCATE)')
+      this.db.pragma('busy_timeout = 0')
+      const [row] = this.db.pragma('wal_checkpoint(TRUNCATE)') as { busy: number }[]
+      return row?.busy === 0
     } catch {
-      // TRUNCATE can be deferred while another connection is reading — try again next time
+      return false
+    } finally {
+      this.db.pragma(`busy_timeout = ${wait}`)
     }
   }
 
@@ -323,6 +350,8 @@ export class Store {
       ran += 1
     }
     if (this.dbPath !== ':memory:') console.error(`[store] ran ${ran} step(s) left from the swap (${Date.now() - t0}ms)`)
+    // A deferred VACUUM goes through the WAL whole; folded now, not at this host's close days from now
+    this.checkpoint()
     return ran
   }
 
@@ -3313,6 +3342,9 @@ export type AppRunRecord = {
  * writes to reuse; a vacuum rewrites the whole file, which is not worth it for a few megabytes.
  */
 const VACUUM_FREE_BYTES = 16 * 1024 * 1024
+
+/** What a reset WAL is cut back to (`journal_size_limit`) */
+const WAL_SIZE_LIMIT = 64 * 1024 * 1024
 
 const mb = (bytes: number): string => `${(bytes / 1048576).toFixed(1)}MB`
 
