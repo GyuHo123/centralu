@@ -34,6 +34,7 @@ import { AgentVersionService } from './agent-versions.js'
 import { acquireInstanceLock, lockConflictMessage } from './dev-services/instance-lock.js'
 import { hostLogPath, rotateIfLarge, startupBanner, teeStderrToFile } from './log-file.js'
 import { hostDrain } from './drain.js'
+import { stopThenClose } from './shutdown.js'
 import { bridgeAddress, ControlChannel, KEEPS_AGENTS_ACROSS_SWAP, onDrain, standby, viewPort } from './swap-control.js'
 
 /**
@@ -215,7 +216,8 @@ if (!lock.ok) {
   process.exit(1)
 }
 /*
- * A signal handler must never be attached here.
+ * A signal handler that ends the process must never be attached here (the one below only holds
+ * the signal for later).
  *
  * This used to register lock.release() + process.exit(0) on SIGINT/SIGTERM first. Since handlers
  * run in registration order, the real shutdown() registered afterward **never ran at all** — every
@@ -224,6 +226,26 @@ if (!lock.ok) {
  * path led to exit).
  */
 process.on('exit', lock.release)
+
+/*
+ * A signal that arrives before shutdown() exists is held, not obeyed (#82). Until a process has a
+ * listener for SIGINT or SIGTERM the kernel's default applies, which ends it on the spot: no
+ * shutdown, no WAL checkpoint, and whatever it had started already left behind. The ready line
+ * goes out well before the real handlers below are attached (the services start in between), and
+ * `centralu serve` measured the gap: a Ctrl+C passed on as soon as the ready line was read killed
+ * the host by SIGINT every time, while the same signal 3 s later shut it down cleanly. These only
+ * record the signal; the real handlers replace them and act on it (see `pendingSignal` below). A second
+ * signal before then exits at once, so a start that hangs can still be stopped from the terminal.
+ */
+let pendingSignal: NodeJS.Signals | null = null
+const holdSignal = (sig: NodeJS.Signals) => {
+  // A second one while still starting is someone insisting on a start that hangs: obey it
+  if (pendingSignal) process.exit(1)
+  pendingSignal = sig
+  console.error(`[agent-host] ${sig} while starting; shutting down once started (send it again to stop now)`)
+}
+process.on('SIGINT', holdSignal)
+process.on('SIGTERM', holdSignal)
 
 /*
  * A store a newer Centralu wrote, past what this host can read (#292), is refused here, in the same way as a lock
@@ -482,11 +504,12 @@ console.log(JSON.stringify({ ready: true, port, token, db: dbPath }))
 // What a swap would cost with this build, for the app to say before it asks (#280 step 3, swap-control.ts)
 if (underKeeper) console.log(JSON.stringify({ swap: { keepsAgents: KEEPS_AGENTS_ACROSS_SWAP && held !== null } }))
 /*
- * The heavy and breaking steps a swap left for later (store.ts, "During a swap"). By the time this
- * timer fires the ready line has gone out and the keeper has pointed the front door here: the host
- * this one replaced is gone, so a breaking step can no longer strand it.
+ * The heavy and breaking steps a swap left for later (store.ts, "During a swap"), and a vacuum a
+ * stopped host left owed (#396). By the time this timer fires the ready line has gone out and the
+ * keeper has pointed the front door here: the host this one replaced is gone, so a breaking step can
+ * no longer strand it.
  */
-if (swapping && store.deferredSteps.length > 0) {
+if (swapping && (store.deferredSteps.length > 0 || store.vacuumOwed)) {
   setTimeout(() => {
     try {
       store.runDeferred()
@@ -576,8 +599,9 @@ function record(kind: string, err: unknown): void {
  * How this host leaves (#280 step 2).
  *
  *   stop    today's ending: agents, terminals and commands are stopped with it. Always the answer
- *           without a keeper, and under one when the keeper itself is stopping ("Quit and stop
- *           agents", the last window closing with background mode off, idle exit) — it says so with
+ *           without a keeper, and under one when the keeper itself is stopping ("Quit
+ *           completely", "Restart completely", the last window closing with background mode off,
+ *           idle exit) — it says so with
  *           `stop` on the child service.
  *   detach  under a keeper that keeps the children: a restart, a build switch, a crash, the keeper's
  *           pipe closing. Nothing is stopped; the next host re-attaches to all of it.
@@ -602,6 +626,19 @@ process.on('uncaughtException', (err) => {
  * closes them.
  */
 async function stopServices(mode: LeaveMode, handOver: boolean): Promise<void> {
+  /*
+   * The store closes however the rest goes (#396). It used to close only if every step before it succeeded: one that
+   * threw left the store open and its WAL unfolded, and on the signal path the host never reached its exit and waited
+   * to be killed. Each close runs whatever the other does, and neither hides the error that came first (shutdown.ts).
+   */
+  await stopThenClose(
+    () => stopServicesBeforeStore(mode, handOver),
+    [() => store.close(), () => held?.children.close()],
+    (line) => console.error(line),
+  )
+}
+
+async function stopServicesBeforeStore(mode: LeaveMode, handOver: boolean): Promise<void> {
   if (handOver) {
     try {
       const n = recordViewHandover(store, views, inlineViews)
@@ -641,8 +678,6 @@ async function stopServices(mode: LeaveMode, handOver: boolean): Promise<void> {
   inlineViews.dispose()
   await views.dispose()
   await server.close()
-  store.close()
-  held?.children.close()
 }
 
 let leaving: LeaveMode | null = null
@@ -650,7 +685,9 @@ const shutdown = async (mode: LeaveMode, handOver: boolean) => {
   // A second signal while leaving changes nothing: the first decided what happens to the children
   if (leaving) return
   leaving = mode
-  await stopServices(mode, handOver)
+  await stopServices(mode, handOver).catch((err) => {
+    console.error(`[agent-host] a step of shutting down failed; leaving anyway: ${(err as Error).stack ?? err}`)
+  })
   // Why it ended becomes the first line of the next investigation — it never disappears silently
   console.error(`[agent-host] shutting down (pid ${process.pid}, ${mode === 'detach' ? 'agents, terminals and commands left running in the keeper' : 'stopped'})`)
   stopLog()
@@ -663,6 +700,10 @@ const shutdown = async (mode: LeaveMode, handOver: boolean) => {
  */
 process.on('SIGINT', () => void shutdown(onSignalMode, onSignalMode === 'detach'))
 process.on('SIGTERM', () => void shutdown(onSignalMode, onSignalMode === 'detach'))
+process.off('SIGINT', holdSignal)
+process.off('SIGTERM', holdSignal)
+// One that came while starting: the same ending it would have had, now that there is one
+if (pendingSignal) void shutdown(onSignalMode, onSignalMode === 'detach')
 // The keeper is stopping for good and asks this host to stop its children the way it always did. No next host to hand views to
 held?.children.on('stop', () => void shutdown('stop', false))
 

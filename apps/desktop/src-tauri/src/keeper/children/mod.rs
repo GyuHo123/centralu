@@ -881,6 +881,11 @@ impl Reactor {
             return self.drop_conn(id, Flush::Lost);
         }
         self.process_input(id);
+        // What a burst left behind once it was taken: up to IN_CAP for an attach, LINE_CAP for a
+        // control line (#392).
+        if let Some(conn) = self.conns.get_mut(&id) {
+            buffer::give_back(&mut conn.rbuf);
+        }
         if eof {
             match self.conns.get_mut(&id).map(|c| &mut c.role) {
                 // The host half-closed: it is detaching. Send what it is owed, then close.
@@ -1192,14 +1197,31 @@ impl Reactor {
 
     fn flush_conn(&mut self, id: u64) -> Flush {
         let Some(conn) = self.conns.get_mut(&id) else { return Flush::Keep };
-        match flush_raw(&mut conn.stream, &mut conn.wbuf) {
-            Ok(true) => {}
-            Ok(false) => return Flush::Keep,
+        let flushed = match flush_raw(&mut conn.stream, &mut conn.wbuf) {
+            Ok(all) => all,
             Err(_) => return Flush::Lost,
-        }
-        let Role::Attach { child, which, detaching } = conn.role else {
-            return if conn.wbuf.len() > CONTROL_OUT_CAP { Flush::Lost } else { Flush::Keep };
         };
+        buffer::give_back(&mut conn.wbuf);
+        /*
+         * The cap is checked whether or not the socket took everything (#392). Checked only after a
+         * flush that emptied the queue, it could never fire: a host or client that stops reading is
+         * exactly the one whose flush never completes, and its replies and exit events queued without
+         * bound.
+         */
+        if !matches!(conn.role, Role::Attach { .. }) && conn.wbuf.len() > CONTROL_OUT_CAP {
+            // Never silent: a host whose control connection goes sees every child it holds exit
+            // with SIGHUP and cannot spawn until it restarts.
+            let role = if matches!(conn.role, Role::Control) { "control" } else { "hello" };
+            log(&format!(
+                "dropped {role} connection {id}: {} bytes queued past the {CONTROL_OUT_CAP}-byte cap, its peer is not reading",
+                conn.wbuf.len()
+            ));
+            return Flush::Lost;
+        }
+        if !flushed {
+            return Flush::Keep;
+        }
+        let Role::Attach { child, which, detaching } = conn.role else { return Flush::Keep };
         let Some(c) = self.children.get_mut(&child) else { return Flush::Close };
         if *c.reader(which) != Some(id) {
             return Flush::Close;
@@ -1306,6 +1328,7 @@ fn write_inbuf(c: &mut Child) {
             Ok(0) => break,
             Ok(k) => {
                 c.inbuf.drain(..k);
+                buffer::give_back(&mut c.inbuf);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,

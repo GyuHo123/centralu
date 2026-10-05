@@ -256,6 +256,27 @@ describe('sidebar folding (#205)', () => {
 
     expect(useStore.getState().foldedProjects).toEqual([])
   })
+
+  it('a deleted project takes what was kept for it and its sessions along', async () => {
+    const mock = new MockPlatform()
+    const a = await mock.projects.add('/tmp/kept-gone')
+    mock.sessions.set('kept-s', sessionInfo('kept-s', { projectId: a.id }))
+    await useStore.getState().attach(mock)
+    useStore.setState((s) => ({
+      gitEpoch: { ...s.gitEpoch, [a.id]: 3 },
+      expandedDirs: { ...s.expandedDirs, [a.id]: ['src'] },
+      drafts: { ...s.drafts, 'kept-s': { text: 'half a thought', attachments: [] } },
+      history: { ...s.history, 'kept-s': { oldestSeq: 1, more: false, loading: false } },
+    }))
+
+    await useStore.getState().deleteProject(a.id, false)
+
+    const st = useStore.getState()
+    expect(st.gitEpoch[a.id]).toBeUndefined()
+    expect(st.expandedDirs[a.id]).toBeUndefined()
+    expect(st.drafts['kept-s']).toBeUndefined()
+    expect(st.history['kept-s']).toBeUndefined()
+  })
 })
 
 /*
@@ -764,6 +785,94 @@ describe('the cursor for a session where an event arrives before history (#79)',
     useStore.getState().focusSession('t79')
     expect(await readAll('t79')).toEqual(L(180))
   })
+
+  it('a session that is never on screen does not keep every event it receives', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('off-bg', sessionInfo('off-bg'))
+    mock.sessions.set('off-seen', sessionInfo('off-seen'))
+    await useStore.getState().attach(mock)
+    useStore.getState().focusSession('off-seen')
+
+    // A worker nobody opens — the trim on losing focus never reaches it
+    for (let i = 1; i <= 300; i++) {
+      mock.emit({ sessionId: 'off-bg', type: 'tool_call', callId: `c${i}`, summary: { tool: 'Read', title: `L${i}`, readOnly: true } } as never)
+    }
+    expect(useStore.getState().chat['off-bg']!.length).toBeLessThanOrEqual(100)
+
+    // Nothing is lost: opening it reads the cut rows back from the store
+    useStore.getState().focusSession('off-bg')
+    expect(await readAll('off-bg')).toEqual(L(300))
+  })
+
+  it('the conversation on screen is never cut while it is being read', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('off-focused', sessionInfo('off-focused'))
+    await useStore.getState().attach(mock)
+    useStore.getState().focusSession('off-focused')
+    await vi.waitFor(() => expect(useStore.getState().history['off-focused']).toBeDefined())
+
+    for (let i = 1; i <= 300; i++) {
+      mock.emit({ sessionId: 'off-focused', type: 'tool_call', callId: `c${i}`, summary: { tool: 'Read', title: `L${i}`, readOnly: true } } as never)
+    }
+    expect(useStore.getState().chat['off-focused']).toHaveLength(300)
+  })
+
+  it('an off-screen conversation is not cut while a page of its history is on the way', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('off-paging', sessionInfo('off-paging'))
+    mock.sessions.set('off-paging-other', sessionInfo('off-paging-other'))
+    mock.messages.set('off-paging', rows('off-paging', 130))
+    await useStore.getState().attach(mock)
+    useStore.getState().focusSession('off-paging')
+    await vi.waitFor(() => expect(useStore.getState().history['off-paging']).toBeDefined())
+    // Leaving cuts it to the window: rows 81..130, with older rows still to read
+    useStore.getState().focusSession('off-paging-other')
+    expect(useStore.getState().history['off-paging']).toMatchObject({ oldestSeq: 81, more: true })
+
+    // A page of older rows is asked for and held on its way
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const real = mock.agents.loadMessages.bind(mock.agents)
+    mock.agents.loadMessages = async (...args: Parameters<typeof real>) => {
+      const page = await real(...args)
+      await gate
+      return page
+    }
+    const paging = useStore.getState().loadOlder('off-paging')
+    expect(useStore.getState().history['off-paging']!.loading).toBe(true)
+
+    // Meanwhile the session keeps working off screen, past the point where it would be cut
+    for (let i = 131; i <= 190; i++) {
+      mock.emit({ sessionId: 'off-paging', type: 'tool_call', callId: `c${i}`, summary: { tool: 'Read', title: `L${i}`, readOnly: true } } as never)
+    }
+    release()
+    await paging
+    mock.agents.loadMessages = real
+
+    // The page joins the rows it was asked for: no gap between it and the rest
+    expect(useStore.getState().chat['off-paging']!.map(line)).toEqual(L(190))
+  })
+
+  it.each(['orchestrator', 'grid'] as const)(
+    'the focused session keeps everything it loaded while the %s is on screen',
+    async (view) => {
+      const mock = new MockPlatform()
+      mock.sessions.set('off-kept', sessionInfo('off-kept'))
+      mock.messages.set('off-kept', rows('off-kept', 150))
+      await useStore.getState().attach(mock)
+      useStore.getState().focusSession('off-kept')
+      expect(await readAll('off-kept')).toEqual(L(150))
+
+      // Looking elsewhere does not take focus: the session stays focused, only the view changes
+      useStore.getState().setView(view)
+      mock.emit({ sessionId: 'off-kept', type: 'tool_call', callId: 'c151', summary: { tool: 'Read', title: 'L151', readOnly: true } } as never)
+
+      const st = useStore.getState()
+      expect(st.focusedSessionId).toBe('off-kept')
+      expect(st.chat['off-kept']!.map(line)).toEqual(L(151))
+      expect(st.history['off-kept']).toMatchObject({ oldestSeq: 1, more: false })
+    },
+  )
 })
 
 describe('merging the session list on reconnect (U4)', () => {
@@ -787,6 +896,28 @@ describe('merging the session list on reconnect (U4)', () => {
       expect(s['u4-gone']).toBeUndefined()
       expect(s['u4-s1']!.name).toBe('changed name')
     })
+  })
+
+  it('a session deleted while disconnected leaves nothing behind, the way a deletion does (#163)', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('u4-kept', sessionInfo('u4-kept'))
+    mock.sessions.set('u4-vanished', sessionInfo('u4-vanished'))
+    await useStore.getState().attach(mock)
+    useStore.setState((s) => ({
+      drafts: { ...s.drafts, 'u4-vanished': { text: 'unsent', attachments: [] } },
+      history: { ...s.history, 'u4-vanished': { oldestSeq: 1, more: false, loading: false } },
+      notices: [...s.notices, { sessionId: 'u4-vanished', kind: 'done', name: 'u4-vanished', at: 1 } as never],
+    }))
+
+    mock.sessions.delete('u4-vanished')
+    mock.setConnectionState('disconnected')
+    mock.setConnectionState('connected')
+
+    await vi.waitFor(() => expect(useStore.getState().sessions['u4-vanished']).toBeUndefined())
+    const st = useStore.getState()
+    expect(st.drafts['u4-vanished']).toBeUndefined()
+    expect(st.history['u4-vanished']).toBeUndefined()
+    expect(st.notices.some((n) => n.sessionId === 'u4-vanished')).toBe(false)
   })
 
   it('local derived state (like preview) survives the merge', async () => {

@@ -10,6 +10,7 @@ import type { AgentRunRequest, AgentRunResult, AppCheckReport, AppRef, BrokerHos
 import { AgentRunWait, finalAnswer } from './app-agents.js'
 import { ASK_WAIT_MS, askFrame, clipAnswer, pathsIn, readableGrants, taskLine, underGrant } from './ask-project.js'
 import { builderRole } from './app-builder.js'
+import { remember } from './folder-cache.js'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
@@ -113,6 +114,7 @@ import {
 } from '../dev-services/fs.js'
 import { isMissingPathError } from '../dev-services/path-guard.js'
 import { DirWatchers } from '../dev-services/watch.js'
+import { invalidateFileIndex } from '../dev-services/file-search.js'
 import { attachmentBytes, saveAttachment, clearAttachments, sweepAttachments } from '../dev-services/attachments.js'
 import { handoffNoteBytes, handoffNoteDir, sweepHandoffNotes, writeHandoffNote } from '../dev-services/handoff-notes.js'
 import { attachCommitSessions, looksLikeGitCommit, parseCommitSha } from '../dev-services/git-attrib.js'
@@ -405,7 +407,10 @@ export class SessionManager {
    * sessionId).
    */
   private watchers = new DirWatchers((projectId, dirs) => this.emit({ type: 'fs_changed', projectId, dirs }))
-  /** Slash-command cache per tool and directory (so a list can be returned even before a session is ready) */
+  /**
+   * Slash-command cache per tool and directory (so a list can be returned even before a session is ready). Written
+   * only through `remember`, like `externalIndex`, so it keeps the most recently used keys (folder-cache.ts)
+   */
   private commandCache = new Map<string, CommandInfo[]>()
   /**
    * Conversation a tool holds -> when it was last changed (a short-lived cache).
@@ -872,7 +877,16 @@ export class SessionManager {
       (a, b) => Number(!!b.parentSessionId) - Number(!!a.parentSessionId),
     )
     for (const s of leavesFirst) await this.trashSession(s.id).catch(() => {})
+    const root = this.store.listProjects().find((p) => p.id === projectId)?.path
     this.store.deleteProject(projectId)
+    // What was held for the project's folder goes with it (#392): its watchers and its `@` file index
+    this.watchers.drop(projectId)
+    if (root) invalidateFileIndex(root)
+  }
+
+  /** How many of a project's directories are watched (tests) */
+  watchedDirCount(projectId: string): number {
+    return this.watchers.watchedCount(projectId)
   }
 
   /**
@@ -3588,7 +3602,7 @@ export class SessionManager {
     // Looked up in memory first, then on disk. The list has to survive the host being turned off and
     // back on, so slash commands still work for a sleeping session
     const cached = this.commandCache.get(key) ?? this.store.loadCommands<CommandInfo[]>(m.tool, cwd) ?? undefined
-    if (cached) this.commandCache.set(key, cached)
+    if (cached) remember(this.commandCache, key, cached)
 
     const handle = this.handles.get(sessionId)
     if (handle?.listCommands) {
@@ -3599,7 +3613,7 @@ export class SessionManager {
           .filter((c) => typeof c.name === 'string' && c.name.length > 0)
           .map((c) => ({ name: c.name, description: c.description ?? '', argumentHint: c.argumentHint ?? '' }))
         if (commands.length > 0) {
-          this.commandCache.set(key, commands)
+          remember(this.commandCache, key, commands)
           this.store.saveCommands(m.tool, cwd, commands)
         }
         return { ready: true, commands }
@@ -3687,7 +3701,7 @@ export class SessionManager {
     try {
       const rows = await adapter.listExternalSessions(cwd, EXTERNAL_LIST_LIMIT)
       const index = { ids: new Map(rows.map((r) => [r.externalId, r.updatedAt])), complete: rows.length < EXTERNAL_LIST_LIMIT }
-      this.externalIndex.set(key, { ...index, at: Date.now() })
+      remember(this.externalIndex, key, { ...index, at: Date.now() })
       return index
     } catch {
       return null
@@ -5418,7 +5432,7 @@ export class SessionManager {
    *   Location  That project (cwd is the project root) for a project app; for a user-folder app, the
    *             orchestrator's own empty folder with no project, the same as a coordinator session.
    *             The session's app slot (`appId`) is set to that app.
-   *   Preset    **Always `normal`** — never inherited from the calling session even if it is `auto`
+   *   Preset    **Always `safe`** — never inherited from the calling session even if it is `auto`
    *             (the plan's "security boundary"). An app's text is someone else's words, and an agent
    *             running on that text must never act unattended without the person's knowledge.
    *   Text      Sent as the app's own text, not the person's — recorded in the conversation as a

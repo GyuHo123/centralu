@@ -54,6 +54,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often a relay and the accept loop look up from their sockets to see whether they are asked
 /// to stop for a handoff. It bounds how long a freeze waits for an idle relay.
 const TICK_MS: i32 = 50;
+/// How long one side may refuse the relay's bytes before the connection is given up (#392).
+///
+/// The relay writes with blocking writes, and a peer that stops reading (a stopped Codex bridge,
+/// any loopback client that hangs) blocked one forever: its thread, its descriptors and full socket
+/// buffers stayed until the next swap, and every keeper handoff failed meanwhile, since a freeze
+/// waits for each relay to finish its copy. A live client reads within this; the bridge reconnects
+/// on its next call.
+#[cfg(not(test))]
+const STALL_LIMIT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const STALL_LIMIT: Duration = Duration::from_millis(300);
 
 /// One relayed connection's sockets, kept so a swap can close them and a handoff can copy them.
 struct Relay {
@@ -365,6 +376,9 @@ impl FrontDoor {
     /// One thread for both directions: poll, copy what is there, and between copies look up for a
     /// freeze. A copy in progress is always finished first, so a parked relay holds no bytes.
     fn pump(&self, client: &TcpStream, upstream: &TcpStream) {
+        // A write that cannot finish within the limit fails, and the relay ends like any other error
+        let _ = client.set_write_timeout(Some(STALL_LIMIT));
+        let _ = upstream.set_write_timeout(Some(STALL_LIMIT));
         let _ = client.set_nodelay(true);
         let _ = upstream.set_nodelay(true);
         let mut buf = [0u8; 16 * 1024];
@@ -503,6 +517,29 @@ mod tests {
 
         let mut again = connect(&door);
         assert_eq!(ask(&mut again, "3").unwrap(), "B:3");
+    }
+
+    /// A client that stops reading does not hold its relay forever (#392).
+    #[test]
+    fn a_client_that_stops_reading_is_let_go() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                // A host with a lot to say
+                thread::spawn(move || while s.write_all(&[b'x'; 64 * 1024]).is_ok() {});
+            }
+        });
+        let door = FrontDoor::open(0, "t".into()).unwrap();
+        door.point_at(Some(port));
+        let c = connect(&door);
+        (&c).write_all(b"hi\n").unwrap();
+        let t0 = Instant::now();
+        while door.open_connections() > 0 && t0.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(door.open_connections(), 0, "the relay still holds a client that never reads");
+        drop(c);
     }
 
     /// A client that reconnects during the gap waits for the next host instead of failing.
