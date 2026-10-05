@@ -16,6 +16,7 @@ centralu/
 ├─ pnpm-workspace.yaml
 │
 ├─ apps/
+│  ├─ iced-client/              # 호스트에 붙는 네이티브 Iced 창. 네이티브 렌더러를 재기 위한 것(#399), pnpm 밖
 │  ├─ web/                      # web entry point for development (Vite)
 │  │  ├─ index.html
 │  │  └─ src/main.tsx           # injects createWebPlatform() — the only place ① that knows an implementation

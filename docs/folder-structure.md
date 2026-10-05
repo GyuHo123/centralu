@@ -14,6 +14,7 @@ centralu/
 ├─ pnpm-workspace.yaml
 │
 ├─ apps/
+│  ├─ iced-client/              # a native Iced window onto the host, to measure a native renderer (#399); not in pnpm
 │  ├─ web/                      # web entry point for development (Vite)
 │  │  ├─ index.html
 │  │  └─ src/main.tsx           # injects createWebPlatform() — the only place ① that knows an implementation
