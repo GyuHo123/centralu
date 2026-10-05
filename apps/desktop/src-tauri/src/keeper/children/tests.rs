@@ -361,3 +361,53 @@ fn a_long_control_line_gives_its_read_memory_back_once_it_is_answered() {
     let kept = conn.rbuf.capacity();
     assert!(kept <= buffer::KEEP_CAPACITY, "the read buffer kept {kept} bytes of capacity");
 }
+
+/// A child's stdin queue, once a large request is written, does not keep that request's size (#392).
+#[test]
+fn a_large_request_gives_the_stdin_queue_its_memory_back_once_written() {
+    let d = temp_dir("inbuf");
+    let mut r = bare_reactor(&d);
+    let spawned = r.request(&json!({
+        "op": "spawn", "kind": "pipes", "cmd": "/bin/sh", "args": ["-c", "cat >/dev/null"], "cwd": "/tmp",
+        "env": { "PATH": "/usr/bin:/bin" },
+    }));
+    assert_eq!(spawned["ok"], true, "{spawned}");
+    let n = *r.children.keys().next().unwrap();
+    let c = r.children.get_mut(&n).unwrap();
+    // As an attach leaves it after a host sent one 6 MiB line
+    let mut line = vec![b'x'; 6 * 1024 * 1024];
+    line.push(b'\n');
+    c.inbuf = line;
+    let t0 = Instant::now();
+    while !c.inbuf.is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the child did not take its stdin");
+        write_inbuf(c);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let kept = c.inbuf.capacity();
+    let _ = proc::signal(c.pid, libc::SIGKILL, false);
+    assert!(kept <= buffer::KEEP_CAPACITY, "the stdin queue kept {kept} bytes of capacity");
+}
+
+/// A control connection's write queue, once its peer has read a burst, does not keep its size.
+#[test]
+fn a_burst_of_replies_gives_the_write_queue_its_memory_back_once_read() {
+    let d = temp_dir("wbuf");
+    let mut r = bare_reactor(&d);
+    let (mine, peer) = UnixStream::pair().unwrap();
+    mine.set_nonblocking(true).unwrap();
+    let reader = thread::spawn(move || io::copy(&mut &peer, &mut io::sink()).unwrap());
+    // Under CONTROL_OUT_CAP, so the connection is kept while the peer catches up
+    let wbuf = vec![b'x'; 6 * 1024 * 1024];
+    r.conns.insert(1, Conn { stream: mine, role: Role::Control, rbuf: Vec::new(), wbuf });
+    let t0 = Instant::now();
+    while !r.conns[&1].wbuf.is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the peer did not read the queue");
+        assert!(r.flush_conn(1) == Flush::Keep);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let kept = r.conns[&1].wbuf.capacity();
+    r.conns.remove(&1);
+    reader.join().unwrap();
+    assert!(kept <= buffer::KEEP_CAPACITY, "the write queue kept {kept} bytes of capacity");
+}
