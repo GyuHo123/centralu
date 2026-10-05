@@ -117,6 +117,7 @@ impl OutBuf {
         if self.head > 64 * 1024 && self.head * 2 > self.data.len() {
             self.data.drain(..self.head);
             self.head = 0;
+            give_back(&mut self.data);
         }
     }
 
@@ -244,6 +245,25 @@ impl OutBuf {
             eof: st.eof,
             dropped: st.dropped,
         }
+    }
+}
+
+/// Smallest capacity worth keeping: below this, giving memory back costs more than holding it.
+///
+/// Well above the 64 KiB a compaction waits for: at that size a chatty stream shrank on one
+/// compaction and grew again on the next read, every ~64 KiB of output. 1 MiB per buffer is
+/// nothing next to what a burst used to keep.
+pub(crate) const KEEP_CAPACITY: usize = 1024 * 1024;
+
+/// Hands back the capacity a burst left behind (#392).
+///
+/// `Vec::drain` keeps the vector's capacity, so one large line (a 23 MB codex `thread/resume`)
+/// left 32 MiB or more resident behind an emptied buffer for the rest of the child's life, which
+/// under the keeper is days. Shrinking only once the vector is mostly empty keeps a steady stream
+/// from reallocating on every compaction.
+pub(crate) fn give_back(v: &mut Vec<u8>) {
+    if v.capacity() > KEEP_CAPACITY && v.capacity() > v.len() * 4 {
+        v.shrink_to((v.len() * 2).max(KEEP_CAPACITY));
     }
 }
 
@@ -379,6 +399,36 @@ mod tests {
         c.sent(14);
         c.push(b"ee\n");
         assert_eq!(c.sendable(false), b"three\n");
+    }
+
+    #[test]
+    fn a_burst_gives_its_memory_back_once_it_is_sent() {
+        let mut b = OutBuf::new(Policy::Lines { cap: LINES_CAP });
+        let mut line = vec![b'x'; 20 * 1024 * 1024];
+        line.push(b'\n');
+        b.push(&line);
+        let n = b.sendable(false).len();
+        assert_eq!(n, line.len());
+        b.sent(n);
+        assert_eq!(b.len(), 0);
+        assert!(b.data.capacity() <= KEEP_CAPACITY, "kept {} bytes of capacity", b.data.capacity());
+    }
+
+    /// Lines of ordinary size, each compacted away once sent, do not make the buffer shrink only
+    /// to grow again on the next one.
+    #[test]
+    fn a_steady_stream_keeps_its_capacity_between_compactions() {
+        let mut b = OutBuf::new(Policy::Lines { cap: LINES_CAP });
+        let mut line = vec![b'x'; 100 * 1024];
+        line.push(b'\n');
+        for _ in 0..8 {
+            b.push(&line);
+            let n = b.sendable(false).len();
+            b.sent(n);
+            assert_eq!(b.len(), 0, "the line was compacted away");
+            let cap = b.data.capacity();
+            assert!(cap >= line.len(), "shrank to {cap} bytes, too few for the next {}-byte line", line.len());
+        }
     }
 
     #[test]

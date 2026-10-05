@@ -298,3 +298,116 @@ fn a_new_attach_replaces_the_old_reader() {
     read_until(&mut new, "ping\n");
     new.write_all(b"\n").unwrap();
 }
+
+/// A control connection whose peer stopped reading is dropped once its queue passes the cap, even
+/// though the flush never completes (#392). Built by hand rather than through a client that never
+/// reads: how much a unix socket holds before it refuses differs by kernel (one Linux under WSL took
+/// 26 MB), and the queue only grows past what the socket takes.
+#[test]
+fn a_control_queue_past_the_cap_is_dropped_while_the_socket_is_full() {
+    let d = temp_dir("cap");
+    let sock = d.0.join("s");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let (wake_r, wake_w) = UnixStream::pair().unwrap();
+    let shared = Arc::new(Shared { cmds: Mutex::new(Vec::new()), wake: OwnedFd::from(wake_w), sock });
+    let mut r = Reactor::new(listener, OwnedFd::from(wake_r), shared).unwrap();
+
+    let (mine, peer) = UnixStream::pair().unwrap();
+    mine.set_nonblocking(true).unwrap();
+    let chunk = vec![0u8; 64 * 1024];
+    loop {
+        match (&mine).write(&chunk) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let wbuf = vec![b'x'; CONTROL_OUT_CAP + 1];
+    r.conns.insert(1, Conn { stream: mine, role: Role::Control, rbuf: Vec::new(), wbuf: wbuf.clone() });
+    assert!(r.flush_conn(1) == Flush::Lost, "a full queue on a socket nobody reads is kept");
+
+    // Under the cap, the same connection is only waiting for room
+    let (mine, _peer2) = UnixStream::pair().unwrap();
+    mine.set_nonblocking(true).unwrap();
+    while (&mine).write(&chunk).is_ok() {}
+    r.conns.insert(2, Conn { stream: mine, role: Role::Control, rbuf: Vec::new(), wbuf: vec![b'x'; 1024] });
+    assert!(r.flush_conn(2) == Flush::Keep);
+    drop(peer);
+}
+
+/// A reactor nobody connects to, for driving one connection or child by hand.
+fn bare_reactor(d: &Dir) -> Reactor {
+    let sock = d.0.join("s");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let (wake_r, wake_w) = UnixStream::pair().unwrap();
+    let shared = Arc::new(Shared { cmds: Mutex::new(Vec::new()), wake: OwnedFd::from(wake_w), sock });
+    Reactor::new(listener, OwnedFd::from(wake_r), shared).unwrap()
+}
+
+/// A long control line, once answered, does not leave its size behind in the read buffer (#392).
+#[test]
+fn a_long_control_line_gives_its_read_memory_back_once_it_is_answered() {
+    let d = temp_dir("rbuf");
+    let mut r = bare_reactor(&d);
+    let (mine, _peer) = UnixStream::pair().unwrap();
+    mine.set_nonblocking(true).unwrap();
+    // As a read leaves it after a 12 MiB line came in: under LINE_CAP, so the line is answered.
+    let mut line = vec![b'x'; 12 * 1024 * 1024];
+    line.push(b'\n');
+    r.conns.insert(1, Conn { stream: mine, role: Role::Control, rbuf: line, wbuf: Vec::new() });
+    r.read_conn(1);
+    let conn = &r.conns[&1];
+    assert!(conn.rbuf.is_empty() && !conn.wbuf.is_empty(), "the line was taken and answered");
+    let kept = conn.rbuf.capacity();
+    assert!(kept <= buffer::KEEP_CAPACITY, "the read buffer kept {kept} bytes of capacity");
+}
+
+/// A child's stdin queue, once a large request is written, does not keep that request's size (#392).
+#[test]
+fn a_large_request_gives_the_stdin_queue_its_memory_back_once_written() {
+    let d = temp_dir("inbuf");
+    let mut r = bare_reactor(&d);
+    let spawned = r.request(&json!({
+        "op": "spawn", "kind": "pipes", "cmd": "/bin/sh", "args": ["-c", "cat >/dev/null"], "cwd": "/tmp",
+        "env": { "PATH": "/usr/bin:/bin" },
+    }));
+    assert_eq!(spawned["ok"], true, "{spawned}");
+    let n = *r.children.keys().next().unwrap();
+    let c = r.children.get_mut(&n).unwrap();
+    // As an attach leaves it after a host sent one 6 MiB line
+    let mut line = vec![b'x'; 6 * 1024 * 1024];
+    line.push(b'\n');
+    c.inbuf = line;
+    let t0 = Instant::now();
+    while !c.inbuf.is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the child did not take its stdin");
+        write_inbuf(c);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let kept = c.inbuf.capacity();
+    let _ = proc::signal(c.pid, libc::SIGKILL, false);
+    assert!(kept <= buffer::KEEP_CAPACITY, "the stdin queue kept {kept} bytes of capacity");
+}
+
+/// A control connection's write queue, once its peer has read a burst, does not keep its size.
+#[test]
+fn a_burst_of_replies_gives_the_write_queue_its_memory_back_once_read() {
+    let d = temp_dir("wbuf");
+    let mut r = bare_reactor(&d);
+    let (mine, peer) = UnixStream::pair().unwrap();
+    mine.set_nonblocking(true).unwrap();
+    let reader = thread::spawn(move || io::copy(&mut &peer, &mut io::sink()).unwrap());
+    // Under CONTROL_OUT_CAP, so the connection is kept while the peer catches up
+    let wbuf = vec![b'x'; 6 * 1024 * 1024];
+    r.conns.insert(1, Conn { stream: mine, role: Role::Control, rbuf: Vec::new(), wbuf });
+    let t0 = Instant::now();
+    while !r.conns[&1].wbuf.is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the peer did not read the queue");
+        assert!(r.flush_conn(1) == Flush::Keep);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let kept = r.conns[&1].wbuf.capacity();
+    r.conns.remove(&1);
+    reader.join().unwrap();
+    assert!(kept <= buffer::KEEP_CAPACITY, "the write queue kept {kept} bytes of capacity");
+}

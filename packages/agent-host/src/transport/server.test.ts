@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocket } from 'ws'
 import { request, type IncomingHttpHeaders } from 'node:http'
 import { PROTOCOL_VERSION, parseServerFrame, type NormalizedEvent } from '@cc/protocol'
-import { HostServer, parseAllowedOrigins, type HostServerOptions } from './server.js'
+import { HostServer, parseAllowedOrigins, versionMismatchMessage, type HostServerOptions } from './server.js'
 import { deriveHttpSecret, sameSecret, secretError, type HttpRoute } from './http.js'
 
 const TOKEN = 'test-token'
@@ -321,6 +321,25 @@ describe('handshake', () => {
     await c.open()
     c.send({ kind: 'hello', token: TOKEN, protocolVersion: 999 })
     expect(await c.closed()).toBe(4002)
+  })
+
+  it('tells a newer app that the host is the side to update', async () => {
+    const { port } = await start()
+    const c = connect(port)
+    await c.open()
+    c.send({ kind: 'hello', token: TOKEN, protocolVersion: PROTOCOL_VERSION + 1 })
+    expect(await c.closed()).toBe(4002)
+    const refusal = c.frames.find((f) => f.kind === 'res') as { error: { code: string; message: string } } | undefined
+    expect(refusal?.error.code).toBe('version_mismatch')
+    expect(refusal?.error.message).toContain(`host speaks protocol ${PROTOCOL_VERSION}`)
+    expect(refusal?.error.message).toContain('update Centralu where the host runs')
+  })
+
+  it('tells an older app that the app is the side to update, naming the host version', () => {
+    const message = versionMismatchMessage(3, 2, '0.2.0')
+    expect(message).toContain('Centralu 0.2.0 speaks protocol 3, the app speaks protocol 2')
+    expect(message).toContain('update the Centralu app on this computer')
+    expect(message).not.toContain('where the host runs')
   })
 
   it('closes the connection if RPC is sent without authenticating', async () => {
@@ -783,6 +802,36 @@ describe('host lifetime and replay (#82)', () => {
     const c = await greet(port, { afterSeq: 1, streamEpoch: srv.streamEpoch })
     expect(c.frames[0]).toMatchObject({ kind: 'hello_ok', resyncRequired: false })
     expect(events(c).map((f) => f.seq)).toEqual([2, 3])
+    c.ws.close()
+  })
+
+  /*
+   * #392: the buffer is bounded by the replay budget, not by a fixed size of its own. A hello never
+   * replays more than the budget, so an event further back could only ever be answered with a
+   * resync; holding it costs memory and changes nothing a client sees.
+   */
+  it('holds no more than one replay budget of events, and a cursor pushed out gets a resync', async () => {
+    const { server: srv, port } = await start(undefined, { replayBudgetBytes: 4_096 })
+    for (let i = 0; i < 20; i++) srv.broadcast(ev('z'.repeat(1_000)))
+    // Each event is over 1,000 characters serialised, so at most four fit
+    expect(srv.log.currentSeq).toBe(20)
+    expect(srv.log.oldestSeq).toBeGreaterThanOrEqual(17)
+    const c = await greet(port, { afterSeq: 1, streamEpoch: srv.streamEpoch })
+    expect(c.frames[0]).toMatchObject({ kind: 'hello_ok', resyncRequired: true, currentSeq: 20 })
+    expect(events(c)).toEqual([])
+    c.ws.close()
+  })
+
+  it('keeps the newest event even when it alone is over the replay budget', async () => {
+    const { server: srv, port } = await start(undefined, { replayBudgetBytes: 600 })
+    srv.broadcast(ev('small'))
+    srv.broadcast(ev('x'.repeat(5_000)))
+    expect(srv.log.oldestSeq).toBe(2)
+    expect(srv.log.currentSeq).toBe(2)
+    // Too big to replay, so the client resyncs; the socket stays usable
+    const c = await greet(port, { afterSeq: 1, streamEpoch: srv.streamEpoch })
+    expect(c.frames[0]).toMatchObject({ kind: 'hello_ok', resyncRequired: true, currentSeq: 2 })
+    expect(c.ws.readyState).toBe(WebSocket.OPEN)
     c.ws.close()
   })
 })

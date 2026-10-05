@@ -388,7 +388,7 @@ copyDir }`를 들고, 제어 소켓으로 돌려주고, `<data>/keeper.json`(토
 | `{"op":"status"}` | `{"ok":true,"view":…}` — 호스트 상태, 정문의 포트와 토큰(§4.2), 빌드 출처, 백그라운드 모드, 붙은 창 수, 활동, 지금 또는 마지막 교체(`swap`), 교체 때 호스트가 에이전트를 넘겨주는지(`keepsAgents`), 키퍼 자신의 빌드(`keeper.build`, 4단계부터) |
 | `{"op":"attach","protocol":1,"build":…}` | `{"ok":true,"view":…,"sameBuild":bool,"keeperSameBuild":bool,"relaunched":bool}`, 그 뒤 연결이 열려 있는 동안 바뀔 때마다 `{"event":"status","view":…}`. 열린 attach 연결이 곧 "창이 붙어 있다"는 뜻이고, 그것이 닫히는 것이 떨어짐이다. `relaunched`: 이 창이 알린 다시 띄우기로 뜬 창이다(§4.5) |
 | `{"op":"relaunching","graceSecs":n?}` | `{"ok":true,"graceSecs":n}` — 앱이 업데이트를 적용하려고 곧 스스로를 다시 띄운다(#352): `n`초(기본 60, 최대 300) 동안은 붙은 창이 없어도 키퍼가 멈추지 않는다, 백그라운드 모드가 무엇이든. 다음 attach가 이것을 써 버린다 |
-| `{"op":"stop"}` | 호스트와 키퍼를 멈춘다("Quit and stop agents") |
+| `{"op":"stop"}` | 호스트와 키퍼를 멈춘다("Quit completely", 그리고 창이 이어서 자기 빌드의 키퍼를 띄우는 "Restart completely") |
 | `{"op":"switch","source":…,"keeper":{"exe":…}?}` | 그 빌드로 블루그린 교체(§4.2, 빌드 표식은 그 폴더에서 다시 읽는다). 떠 있는 호스트가 없으면 다음 시작이 그 빌드를 돌린다. `keeper`가 있고(앱은 자기 실행 파일을 보낸다) 키퍼가 다른 빌드면, 키퍼가 먼저 그 빌드의 키퍼에게 스스로를 넘기고([architecture.ko.md](architecture.ko.md) §4.4) 그 키퍼가 교체를 한다. 교체 중의 두 번째 `switch`는 거절한다 |
 | `{"op":"upgrade","exe":…,"source":…}` | 호스트는 그대로 두고, 키퍼를 `exe`에 있는 `source` 빌드의 키퍼에게 넘긴다(§4.4) |
 | `{"op":"restart"}` | 호스트가 포기한 뒤의 Retry (교체 중에는 거절) |
@@ -499,7 +499,9 @@ id로 다시 연다: 각 인스턴스는 `open()`처럼 자기 앱을 다시 붙
 자식이 자기 파이프에서 기다린다. 독자에게는 온전한 줄만 가고, 사라진 독자가 일부만 받은 줄은 다음 독자에게 처음부터
 다시 간다. pty: 언제나 비우고, 마지막 256 KiB를 쥐어 새 독자마다 다시 보낸다. 에이전트의 stderr: 256 KiB 꼬리,
 결코 막지 않는다. 호스트의 바이트는 에이전트의 stdin에 온전한 줄로만 들어가므로, 쓰다 죽은 호스트가 찢어진 요청을
-남기지 않는다. 키퍼는 8 MiB까지 쌓은 뒤 호스트를 읽지 않는다.
+남기지 않는다. 키퍼는 8 MiB까지 쌓은 뒤 호스트를 읽지 않는다. 호스트가 읽기를 멈춘 제어 연결은 응답과 종료 이벤트가
+8 MiB 쌓이면 끊기고, 키퍼 로그에 한 줄이 남는다: 그 호스트는 쥐고 있던 자식이 모두 SIGHUP으로 끝난 것으로 보고, 다시
+시작할 때까지 새로 띄우지 못한다. 몰려온 바이트를 다 보내고 나면 이 버퍼들은 모두 1 MiB만 남기고 용량을 돌려준다.
 
 **호스트가 거기서 띄우는 것.** 자식마다 호스트만 읽는 태그가 붙는다(`keeper/tags.ts`): `{kind:"agent", tool,
 sessionId, version?}`(띄운 CLI 버전, #297, §4.6), `{kind:"terminal", id, cwd}`, `{kind:"command", cwd, command, runId, startedAt}`. 새 호스트는 옛 호스트의
@@ -632,6 +634,100 @@ automatically when idle", `updates.setAutoApply`, 저장소의 앱 설정에 `up
 #270은 버전이 바뀌면 도구가 못 하던 것에 대한 탐침을 다시 돌리자고 제안한다. 아직 구현한 것이 없으므로 기본값은
 host.log에 그렇다는 줄 하나를 쓴다. 탐침은 여기에 꽂힌다.
 
+### 4.7 원격 모드 1단계: `centralu serve` (#82)
+
+앱은 다른 머신(SSH 서버, 나중에는 노트북)에 있는 프로젝트를 다룰 수 있다. 그 머신은 자기만의 독립된 호스트를 돌린다:
+자기 저장소, 자기 에이전트 CLI 로그인, 자기 파일과 터미널 (#82, 결정 1). 1단계에서는 사람이 그 호스트를 직접 설치하고
+띄우며, 앱은 SSH 로컬 포워드로 닿는다. 양쪽 어디에서도 공개 인터페이스에 열린 것이 없다: 원격 호스트는 127.0.0.1에
+바인드하고, 사람의 컴퓨터 쪽 포워드도 마찬가지다. 앱이 SSH로 호스트를 설치하는 것은 수명 주기 계약을 쓴 뒤의
+3단계다 (#82, 결정 4).
+
+**원격 머신에서:**
+
+1. Node 22 이상을 설치하고 `npm i -g centralu`. Linux에서는 플랫폼 패키지가 번들 호스트를 AppImage 옆에 풀린 채로
+   싣고 있으므로(`host/`, [releasing.ko.md](releasing.ko.md)) 돌리는 데 디스플레이도 FUSE도 데스크톱 라이브러리도
+   필요 없다.
+2. 그 머신에 Claude Code 및/또는 Codex를 설치하고 로그인한다 (`claude` 후 `/login`, `codex login`). 호스트는 그
+   머신의 로그인을 쓰며, 클라이언트의 것은 결코 쓰지 않는다.
+3. `centralu serve`를 실행한다. 전경에 머물며 stderr에 (그리고 늘 그렇듯 `~/.centralu/host.log`에) 로그를 쓴다.
+   찾을 줄은 `[centralu serve] listening on 127.0.0.1:17175 …`이다.
+4. 이미 쓰는 것으로 계속 돌게 둔다: tmux, `nohup`, 또는 `systemd --user` 유닛 (아래). 진짜 감독, 업데이트 경로,
+   제거는 3단계의 설치기와 함께 온다.
+
+```ini
+# ~/.config/systemd/user/centralu.service
+[Unit]
+Description=Centralu host (centralu serve)
+
+[Service]
+# The launcher serve keeps up to date, so the unit does not depend on npm's PATH
+ExecStart=%h/.centralu/bin/centralu serve
+# SIGTERM to the launcher only; it passes one to the host, which stops its own agents first
+KillMode=mixed
+TimeoutStopSec=30
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+그다음 `systemctl --user daemon-reload && systemctl --user enable --now centralu`, 그리고 한 번
+`loginctl enable-linger $USER`를 해서 로그아웃한 뒤에도 호스트가 돌게 한다. 첫 `centralu serve`는 손으로 실행한다:
+`~/.centralu/bin/centralu`를 쓰는 것이 그것이다.
+
+**명령:**
+
+| 명령 | 하는 일 |
+|---|---|
+| `centralu serve` | 호스트를 전경에서 `127.0.0.1:<port>`로 띄운다. 종료 코드는 호스트의 것 (깨끗이 멈추면 0) |
+| `centralu serve --port <n>` | 같은 것을 그 포트로. 포트는 기록되어, 플래그 없는 다음 `serve`가 그것을 쓴다 |
+| `centralu serve --connection` | JSON 한 줄을 찍고 끝난다 (아래). 토큰이 아직 없으면 만든다 |
+| `centralu serve --rotate-token` | 포트는 두고 토큰을 바꾼다. 돌고 있는 serve는 재시작할 때까지 옛 토큰을 쓴다 |
+| `centralu serve --help` | 위의 것 |
+
+`--connection`은 클라이언트가 `ssh -T -o BatchMode=yes <target> …`로 묻는 단 하나의 질문에 답한다:
+
+```json
+{"v":1,"port":17175,"token":"…","version":"0.1.0-beta.11","protocolVersion":1,"dataDir":"/home/me/.centralu","hostRunning":true}
+```
+
+| 필드 | 뜻 |
+|---|---|
+| `v` | 이 줄의 모양. 그 숫자를 모르는 클라이언트는 어느 쪽을 업데이트할지 말한다 |
+| `port` | 호스트가 원격의 루프백에서 듣는 곳: 마지막 `serve`가 들은 포트, 없으면 17175 |
+| `token` | hello에 쓸 토큰. `--rotate-token` 전까지 재시작해도 같다 |
+| `version`, `protocolVersion` | `hostRunning`이면 돌고 있는 호스트의 것(그 `hello_ok`에서 읽는다), 아니면 설치된 패키지의 것(`host/bundle-info.json`). 호스트를 재시작하지 않은 `npm i -g` 뒤에는 둘이 다르다 |
+| `dataDir` | 호스트가 소유하는 데이터 폴더 |
+| `hostRunning` | 이 토큰을 가진 호스트가 방금 `port`에서 hello에 답했다. TCP 연결만으로는 치지 않는다 |
+
+stdout에는 그 줄만 나가고, 설명할 것은 stderr로 간다. 명령을 찾지 못하면(종료 코드 127) SSH 셸의 PATH에 npm의
+전역 폴더가 없는 것이다(nvm, fnm, volta, `~/.npm-global`은 대화형 셸에서만 그것을 넣는다): `~/.centralu/bin/centralu`를
+쓴다. `serve`와 `--connection`이 이것을 절대 경로로 이 설치와 이 Node에 맞춰 둔다. nvm과 Homebrew에서는 그 경로에
+버전이 들어 있으므로, Node를 올린 뒤에는 대화형 셸에서 `centralu serve`(또는 `--connection`)를 한 번 돌려 다시 쓰기
+전까지 이 런처가 실패한다.
+
+| 결정 | 이유 |
+|---|---|
+| 런처가 번들 호스트를 시스템 Node로 띄운다; 키퍼는 없다 | 앱이 돌리는 것과 같은 `resources/host`이므로, 원격 호스트는 따로 살려 둘 두 번째 빌드가 아니다. 키퍼는 창 밑에서 빌드를 바꾸고 재시작 너머로 에이전트를 쥐려고 있다; 화면 없는 호스트에는 아직 둘 다 필요 없다 |
+| 127.0.0.1에만 바인드하고 SSH 로컬 포워드로 닿는다 | SSH가 이미 사람을 인증하고 연결을 암호화한다. 공개 포트라면 TLS와 우리만의 로그인이 필요하고, 인터넷의 모든 스캐너가 그것을 찾는다 |
+| 토큰은 `<데이터 폴더>/serve.json`에, 첫 바이트부터 0600으로, 어긋나면 다시 좁혀 둔다 | 그 머신의 모든 RPC의 열쇠다. 찍는 것은 `--connection`뿐이다: 토큰을 실은 호스트의 준비 줄은 런처가 읽고 아무 데도 넘기지 않는다 |
+| 토큰은 `--token`이 아니라 `CC_HOST_TOKEN`으로 호스트에 간다 | 머신의 아무 사용자나 남의 명령줄을 읽을 수 있다(`ps`); 프로세스의 환경은 주인만 읽는다. 호스트는 읽은 뒤 그 변수를 지운다 |
+| 토큰과 포트는 한 번 만들고 둔다 | 클라이언트는 그것을 저장해 두고 SSH 왕복 없이 다시 붙는다; hello가 거절될 때만 `--connection`을 다시 돌린다 |
+| 기본 포트 17175 | 모든 OS의 임시 포트 범위보다, 그리고 호스트의 앱별 뷰 origin(20000–32767, `views/origin-ports.ts`)보다 아래 |
+| 호스트는 자기 프로세스 그룹과 `--watch-parent`를 갖는다 | Ctrl+C는 런처에 닿고, 런처가 호스트 하나에만 SIGINT를 한 번 넘기며, 호스트가 에이전트를 순서대로 멈춘다. 런처를 죽이면(SIGKILL이라도) 호스트의 stdin이 닫혀 함께 내려간다: 감독 없이 남겨지는 일이 없다 (`tooling/launcher-serve.test.ts`) |
+| 시작하는 동안 온 시그널은 호스트가 내려갈 수 있을 때까지 쥐고 있는다 | 호스트가 핸들러를 달기 전에는 커널 기본 동작이 적용되어 그 자리에서 끝난다. 측정: 준비 줄을 읽자마자 넘긴 SIGINT가 매번 호스트를 죽였다. 이제는 시작이 끝나면 깨끗이 내려간다; 시작하는 동안 두 번째 시그널이 오면 바로 끝난다 (`main.ts`, `pendingSignal`) |
+| 두 번째 `serve`, 또는 같은 데이터 폴더의 다른 어떤 호스트도 거절된다 | 소유권 잠금(`instance-lock.ts`)이 권위다. `serve`는 먼저 기록해 둔 포트에 물어보므로 이미 떠 있는 serve는 포트와 함께 이름이 나오고, 다른 소유자라면 호스트의 잠금 메시지 뒤에 pid를 대는 줄이 붙는다 |
+| 호스트 환경에 `DISPLAY` / `WAYLAND_DISPLAY`가 없다 | 호스트가 띄우는 무엇도 아무도 보지 못할 창이나 키링 대화상자를 열 수 없다; 물어보려던 도구는 파일 저장소로 물러나거나 로그에 메시지를 남기고 실패한다 |
+| Windows: 자기 그룹 없음, 넘기기 없음 | 거기서 `detached`는 새 콘솔을 뜻한다; 호스트는 런처의 콘솔을 같이 쓰고 Ctrl+C를 직접 받는다. 아직 돌려 보지 않았다 |
+
+**1단계가 다루지 않는 것.** 앱 뷰는 호스트의 HTTP 문 `127.0.0.1:<port>`에서 열리므로, 로컬 포트가 원격 포트와 같은
+포워드를 통해서는 동작한다. 매니페스트가 자기 origin을 요구하는 앱은 따로 포트를 받으며(`views/origin-ports.ts`),
+포워드 하나로는 실리지 않는다. 클라이언트의 호스트 목록, 머신을 가로지르는 검색, 그리드 배치를 클라이언트로 옮기는
+것은 #82의 클라이언트 쪽 몫이다.
+
+호스트는 다른 프로토콜의 클라이언트를 `version_mismatch`와 종료 코드 4002로 거절한다. 메시지는 두 숫자와 어느 쪽이
+더 오래되었는지를 말하므로, 사람은 앱을 업데이트할지 원격을 업데이트할지 안다 ([protocol.ko.md](protocol.ko.md) §1).
+
 ## 5. dev-services (이름과 달리 prod 경로다 — 2026-08-15 정정)
 
 M1.5에서 Node 사이드카가 배포 경로가 되면서, "Tauri 4단계에서 Rust로 옮기고 삭제한다"는 계획은
@@ -680,6 +776,14 @@ M1.5에서 Node 사이드카가 배포 경로가 되면서, "Tauri 4단계에서
    적는다: 먼저 죽은 호스트는 그것을 다음 열기에 남기고, 다음 열기가 제자리에서 돌린다. 그래서 무거운 단계와 깨는
    단계는 나중 단계 뒤에 돌아도 맞아야 하고, 그 단계를 싣는 빌드는 그 단계가 돌기 전에도 동작해야 한다(줄이기 단계는
    규칙 2로, 무거운 단계는 코드가 어느 쪽이든 읽는 데이터만 모양을 바꾸는 것으로 이를 지킨다).
+6. **단계는 자신이 돌았다는 기록과 함께 한 단위로 커밋한다 (#396):** 단계의 문장들, `min_reader_version` 상향,
+   `user_version` 증가(그리고 `deferred_migrations` 목록이 바뀔 때는 그 목록: 스왑이 미뤄 둔 단계가 돌면 줄어들고,
+   스왑이 단계를 미루면 늘어난다)가 한 트랜잭션에 들어간다. 전에는 문장마다
+   따로 커밋되어, v12나 v17의 두 `ALTER` 사이에서 죽은 시작은 첫 열만 남겼고, 다음 시작은 그 열을 보고 단계의 나머지를
+   영영 건너뛰었다. `VACUUM`은 트랜잭션 안에서 돌 수 없으므로 단계는 그것을 커밋 뒤로 미루고, 그 커밋 안에 VACUUM이
+   밀려 있다고 적는다(`app_settings`의 `vacuum_owed` 행, VACUUM이 돌거나 실패하면 지운다; `vacuumAfterStep`). VACUUM
+   도중에 멈춘 호스트는 그 행을 남기고, 다음 열기가, 스왑이면 `runDeferred`가 VACUUM을 돌린다. v10은 트랜잭션
+   안에서는 무시되는 `foreign_keys`를 바꾸므로 스스로 커밋하고(`ownTransaction`), 그 자체로 한 단위다.
 
 | 단계 | 하는 일 | 옛 빌드 |
 |---|---|---|

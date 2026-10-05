@@ -111,6 +111,24 @@ export class DirWatchers {
     this.timers.set(projectId, t)
   }
 
+  /**
+   * Lets go of one project for good (#392). A deleted project's folder stays on disk and could keep firing,
+   * and nothing can unwatch it afterwards: the screen's unwatch names a project the host no longer knows.
+   */
+  drop(projectId: string): void {
+    for (const w of this.byProject.get(projectId)?.values() ?? []) w.close()
+    this.byProject.delete(projectId)
+    const t = this.timers.get(projectId)
+    if (t) clearTimeout(t)
+    this.timers.delete(projectId)
+    this.pending.delete(projectId)
+  }
+
+  /** How many directories of this project are being watched */
+  watchedCount(projectId: string): number {
+    return this.byProject.get(projectId)?.size ?? 0
+  }
+
   close(): void {
     this.closed = true
     for (const m of this.byProject.values()) for (const w of m.values()) w.close()

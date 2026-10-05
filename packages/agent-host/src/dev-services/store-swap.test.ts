@@ -6,7 +6,7 @@
  * is over. These tests rewind a current store's `user_version` so that real steps are pending: v39 and every step
  * after v40 expand, v40 is heavy (fts rebuild + VACUUM), v32 breaks older readers.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -24,6 +24,7 @@ function currentStore(): string {
   return file
 }
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
 })
 
@@ -84,6 +85,26 @@ describe('migrations during a host swap (#280 step 3)', () => {
     const next = new Store(file)
     expect(next.migrationsRun).toBe(1)
     expect(next.deferredSteps).toEqual([])
+    next.close()
+  })
+
+  it('a swap stopped as it leaves a step for later still owes that step (#396)', () => {
+    const file = currentStore()
+    raw(file, (db) => db.pragma('user_version = 38'))
+    // The host is stopped at the moment it writes down the step it leaves for later
+    const proto = Store.prototype as unknown as { writeDeferred: (steps: number[]) => void }
+    vi.spyOn(proto, 'writeDeferred').mockImplementationOnce(() => {
+      throw new Error('stopped here')
+    })
+
+    expect(() => new Store(file, { swap: true })).toThrow('stopped here')
+
+    // Either user_version is still below v40 or the list names it: the next open runs it
+    expect(Store.inspect(file).pending.map((p) => p.to)).toContain(40)
+    vi.restoreAllMocks()
+    const next = new Store(file)
+    expect(next.deferredSteps).toEqual([])
+    expect(next.schemaVersion).toBe(KNOWN)
     next.close()
   })
 

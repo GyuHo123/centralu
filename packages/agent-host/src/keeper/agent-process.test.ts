@@ -96,6 +96,17 @@ describe.skipIf(keeperless)('an agent process the keeper holds', () => {
     expect(keeper.alive(id)).toBe(true)
   })
 
+  it('forgets an exit once the child is released (#392)', async () => {
+    const p = KeeperAgentProcess.spawn(children, echo, tag)
+    await until(() => p.childId !== null)
+    const id = p.childId!
+    const exited = new Promise((r) => p.once('exit', r))
+    p.kill('SIGTERM')
+    await exited
+    await until(() => keeper.ops('release').length === 1)
+    await until(() => children.exitOf(id) === undefined)
+  })
+
   it('a kill before detaching is a keeper signal request', async () => {
     const p = KeeperAgentProcess.spawn(children, echo, tag)
     await until(() => p.childId !== null)

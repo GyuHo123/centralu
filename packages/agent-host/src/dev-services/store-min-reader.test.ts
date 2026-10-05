@@ -137,7 +137,7 @@ describe('which builds can still read the store (#292)', () => {
     raw(file, (db) => expect(floorOf(db)).toBe('32'))
   })
 
-  it('the record is raised before the breaking step runs, so a step that fails leaves older hosts out', () => {
+  it('a breaking step that fails changes nothing, its record included, so older hosts can still open the store (#396)', () => {
     const file = currentStore()
     raw(file, (db) => {
       db.exec(`ALTER TABLE projects ADD COLUMN default_model TEXT; ALTER TABLE projects ADD COLUMN default_effort TEXT`)
@@ -150,7 +150,10 @@ describe('which builds can still read the store (#292)', () => {
     expect(() => new Store(file)).toThrow()
     raw(file, (db) => {
       expect(db.pragma('user_version', { simple: true })).toBe(31)
-      expect(floorOf(db)).toBe('32')
+      // The step, the record and the version commit together: none of them stayed
+      expect(floorOf(db)).toBe('28')
+      const cols = (db.pragma('table_info(projects)') as { name: string }[]).map((c) => c.name)
+      expect(cols).toEqual(expect.arrayContaining(['default_model', 'default_effort']))
     })
   })
 
