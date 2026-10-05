@@ -256,6 +256,27 @@ describe('sidebar folding (#205)', () => {
 
     expect(useStore.getState().foldedProjects).toEqual([])
   })
+
+  it('a deleted project takes what was kept for it and its sessions along', async () => {
+    const mock = new MockPlatform()
+    const a = await mock.projects.add('/tmp/kept-gone')
+    mock.sessions.set('kept-s', sessionInfo('kept-s', { projectId: a.id }))
+    await useStore.getState().attach(mock)
+    useStore.setState((s) => ({
+      gitEpoch: { ...s.gitEpoch, [a.id]: 3 },
+      expandedDirs: { ...s.expandedDirs, [a.id]: ['src'] },
+      drafts: { ...s.drafts, 'kept-s': { text: 'half a thought', attachments: [] } },
+      history: { ...s.history, 'kept-s': { oldestSeq: 1, more: false, loading: false } },
+    }))
+
+    await useStore.getState().deleteProject(a.id, false)
+
+    const st = useStore.getState()
+    expect(st.gitEpoch[a.id]).toBeUndefined()
+    expect(st.expandedDirs[a.id]).toBeUndefined()
+    expect(st.drafts['kept-s']).toBeUndefined()
+    expect(st.history['kept-s']).toBeUndefined()
+  })
 })
 
 /*
@@ -818,6 +839,28 @@ describe('merging the session list on reconnect (U4)', () => {
       expect(s['u4-gone']).toBeUndefined()
       expect(s['u4-s1']!.name).toBe('changed name')
     })
+  })
+
+  it('a session deleted while disconnected leaves nothing behind, the way a deletion does (#163)', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('u4-kept', sessionInfo('u4-kept'))
+    mock.sessions.set('u4-vanished', sessionInfo('u4-vanished'))
+    await useStore.getState().attach(mock)
+    useStore.setState((s) => ({
+      drafts: { ...s.drafts, 'u4-vanished': { text: 'unsent', attachments: [] } },
+      history: { ...s.history, 'u4-vanished': { oldestSeq: 1, more: false, loading: false } },
+      notices: [...s.notices, { sessionId: 'u4-vanished', kind: 'done', name: 'u4-vanished', at: 1 } as never],
+    }))
+
+    mock.sessions.delete('u4-vanished')
+    mock.setConnectionState('disconnected')
+    mock.setConnectionState('connected')
+
+    await vi.waitFor(() => expect(useStore.getState().sessions['u4-vanished']).toBeUndefined())
+    const st = useStore.getState()
+    expect(st.drafts['u4-vanished']).toBeUndefined()
+    expect(st.history['u4-vanished']).toBeUndefined()
+    expect(st.notices.some((n) => n.sessionId === 'u4-vanished')).toBe(false)
   })
 
   it('local derived state (like preview) survives the merge', async () => {

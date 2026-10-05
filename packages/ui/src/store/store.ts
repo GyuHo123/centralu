@@ -374,6 +374,10 @@ export const AUTO_RELOAD_WINDOW_MS = 60_000
 const autoReloads = new Map<string, number[]>()
 
 function allowAutoReload(key: string, now = Date.now()): boolean {
+  // A view that was closed (or a session deleted) never asks again, so its key is swept once its window has passed
+  for (const [k, times] of autoReloads) {
+    if (times.every((t) => now - t >= AUTO_RELOAD_WINDOW_MS)) autoReloads.delete(k)
+  }
   const recent = (autoReloads.get(key) ?? []).filter((t) => now - t < AUTO_RELOAD_WINDOW_MS)
   const ok = recent.length < AUTO_RELOADS
   if (ok) recent.push(now)
@@ -1547,6 +1551,39 @@ export type AppState = {
  * So this number is pushed above every stored item as it is brought in.
  */
 /** A new object with one key removed (never mutates state directly) */
+/**
+ * Everything the store keeps per session, for sessions that are gone. Kept in one place so a deletion and a
+ * reconnect that finds a session missing clear the same things.
+ *
+ * Everything kept per session goes together (#163). A leftover notification card would focus a nonexistent
+ * session on click, showing "Select a project or session." The rest (history cursor, draft, wake error) is dead
+ * weight nobody reads any more. The conversation's views go too — the host has already closed the instance — and
+ * the read position disappears along with the session: the same id will never be reused (#61).
+ */
+function forgetSessions(s: AppState, gone: ReadonlySet<string>): Partial<AppState> {
+  if (gone.size === 0) return {}
+  const keep = <T,>(obj: Record<string, T>): Record<string, T> => {
+    const out: Record<string, T> = {}
+    for (const [id, v] of Object.entries(obj)) if (!gone.has(id)) out[id] = v
+    return out
+  }
+  // Events parked for a session that will now never register would wait forever
+  for (const id of gone) pendingEvents.delete(id)
+  return {
+    chat: keep(s.chat),
+    inlineViews: keep(s.inlineViews),
+    scrollAnchor: keep(s.scrollAnchor),
+    notices: s.notices.filter((n) => !gone.has(n.sessionId)),
+    history: keep(s.history),
+    subagentSteps: keep(s.subagentSteps),
+    drafts: keep(s.drafts),
+    stickToBottom: keep(s.stickToBottom),
+    wakeError: keep(s.wakeError),
+    wakeLocked: keep(s.wakeLocked),
+    focusedSessionId: s.focusedSessionId && gone.has(s.focusedSessionId) ? null : s.focusedSessionId,
+  }
+}
+
 function omitKey<T>(obj: Record<string, T>, key: string): Record<string, T> {
   const next = { ...obj }
   delete next[key]
@@ -3239,30 +3276,8 @@ export const useStore = create<AppState>((set, get) => ({
     if (e.type === 'session_deleted') {
       set((s) => {
         const sessions = { ...s.sessions }
-        const chat = { ...s.chat }
         delete sessions[sessionId]
-        delete chat[sessionId]
-        return {
-          sessions,
-          chat,
-          // That conversation's views go too — the host has already closed the instance
-          inlineViews: omitKey(s.inlineViews, sessionId),
-          // The read position disappears along with the session — the same id will never be reused (#61)
-          scrollAnchor: omitKey(s.scrollAnchor, sessionId),
-          /*
-           * Everything kept per session goes together (#163). A leftover notification card would
-           * focus a nonexistent session on click, showing "Select a project or session." The rest
-           * (history cursor, draft, wake error) is dead weight nobody reads any more.
-           */
-          notices: s.notices.filter((n) => n.sessionId !== sessionId),
-          history: omitKey(s.history, sessionId),
-          subagentSteps: omitKey(s.subagentSteps, sessionId),
-          drafts: omitKey(s.drafts, sessionId),
-          stickToBottom: omitKey(s.stickToBottom, sessionId),
-          wakeError: omitKey(s.wakeError, sessionId),
-          wakeLocked: omitKey(s.wakeLocked, sessionId),
-          focusedSessionId: s.focusedSessionId === sessionId ? null : s.focusedSessionId,
-        }
+        return { sessions, ...forgetSessions(s, new Set([sessionId])) }
       })
       return
     }
@@ -4062,18 +4077,16 @@ export const useStore = create<AppState>((set, get) => ({
         .filter((x) => x.projectId === projectId)
         .map((x) => x.id)
       const sessions = { ...s.sessions }
-      const chat = { ...s.chat }
-      for (const id of doomed) {
-        delete sessions[id]
-        delete chat[id]
-      }
+      for (const id of doomed) delete sessions[id]
       return {
         projects,
         sessions,
-        chat,
+        ...forgetSessions(s, new Set(doomed)),
+        // What was kept per project goes with it: a deleted project's id never comes back to read it
+        gitEpoch: omitKey(s.gitEpoch, projectId),
+        expandedDirs: omitKey(s.expandedDirs, projectId),
+        commandRuns: omitKey(s.commandRuns, projectId),
         focusedProjectId: s.focusedProjectId === projectId ? null : s.focusedProjectId,
-        focusedSessionId:
-          s.focusedSessionId && doomed.includes(s.focusedSessionId) ? null : s.focusedSessionId,
         trustAsk: s.trustAsk === projectId ? null : s.trustAsk,
         foldedProjects: s.foldedProjects.filter((id) => id !== projectId),
         projectPanels: Object.fromEntries(Object.entries(s.projectPanels).filter(([id]) => id !== projectId)),
@@ -5607,16 +5620,17 @@ export const useStore = create<AppState>((set, get) => ({
               ...liveFactsOf(f),
             }
       }
-      // The remains of a deleted session (its conversation, its focus) are cleared along with it
-      const chat: typeof st.chat = {}
-      for (const [id, items] of Object.entries(st.chat)) if (sessions[id]) chat[id] = items
+      /*
+       * The remains of a session deleted while disconnected are cleared the way `session_deleted` clears them: that
+       * event fell into the gap and is never replayed, so this is the only place they can go (#163).
+       */
+      const gone = new Set(Object.keys(st.sessions).filter((id) => !sessions[id]))
       return {
         sessions,
-        chat,
+        ...forgetSessions(st, gone),
         // Same reason as attach: a session may have been working across the gap, and the
         // sessions that vanished should not leave their instants behind (issue #23)
         workingSince: trackWorkingSince(st.workingSince, sessions, Date.now()),
-        focusedSessionId: st.focusedSessionId && sessions[st.focusedSessionId] ? st.focusedSessionId : null,
       }
     })
     // If the merge registered a session for the first time, replay any events held in the pen from before it was registered
