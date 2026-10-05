@@ -10,6 +10,7 @@ import { useOpenLayer } from '../../components/Modal.jsx'
 import { isPlainEnter } from './composerKeys.js'
 import { registerTerminalHttpLinks } from '../../components/terminalLinks.js'
 import { followTheme, terminalStyle } from '../../components/terminalTheme.js'
+import { logReplay } from '../../components/logReplay.js'
 import { useStore } from '../../store/store.js'
 
 const NO_COMMANDS: SavedCommand[] = []
@@ -384,12 +385,10 @@ function LogView({ projectId, command, runId }: { projectId: string; command: st
 
     // All the log so far, in one shot — the stream subscription is set up first so it does not
     // fall out of order with the chunks that follow
-    const pendingChunks: string[] = []
-    let replayed = false
+    const log = logReplay((data) => term.write(data))
     const offOutput = platform.terminal.onOutput((e) => {
       if (e.terminalId !== runId) return
-      if (replayed) term.write(e.data)
-      else pendingChunks.push(e.data)
+      log.chunk(e.data)
     })
     const offExit = platform.terminal.onExit((e) => {
       if (e.terminalId !== runId) return
@@ -398,17 +397,16 @@ function LogView({ projectId, command, runId }: { projectId: string; command: st
     void platform.commands
       .log(projectId, command)
       .then((run) => {
+        if (!run) return log.fail()
         // If a re-run gave it a different runId, this view is about to be replaced anyway — do
         // not render the stale log
-        if (!run || run.runId !== runId) return
-        term.write(run.history)
-        for (const chunk of pendingChunks.splice(0)) term.write(chunk)
-        replayed = true
+        if (run.runId !== runId) return log.drop()
+        log.replay(run.history)
         if (!run.running && run.exitCode !== null) {
           term.write(`\r\n\x1b[2m— exited (${run.exitCode}) —\x1b[0m\r\n`)
         }
       })
-      .catch(() => {})
+      .catch(() => log.fail())
 
     let pending = 0
     const ro = new ResizeObserver(() => {

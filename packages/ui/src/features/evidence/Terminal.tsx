@@ -8,6 +8,7 @@ import { CloseIcon, PlusIcon } from '../../components/icons.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
 import { registerTerminalHttpLinks } from '../../components/terminalLinks.js'
 import { followTheme, terminalStyle } from '../../components/terminalTheme.js'
+import { logReplay } from '../../components/logReplay.js'
 import { useStore } from '../../store/store.js'
 import { TabActions } from './tabActions.jsx'
 
@@ -213,12 +214,10 @@ function CommandLog({ projectId, command, runId }: { projectId: string; command:
     syncSize()
 
     // The whole log so far, at once — the stream subscription is set up first so it does not get out of order with the chunks that follow
-    const pendingChunks: string[] = []
-    let replayed = false
+    const log = logReplay((data) => term.write(data))
     const offOutput = platform.terminal.onOutput((e) => {
       if (e.terminalId !== runId) return
-      if (replayed) term.write(e.data)
-      else pendingChunks.push(e.data)
+      log.chunk(e.data)
     })
     const offExit = platform.terminal.onExit((e) => {
       if (e.terminalId !== runId) return
@@ -227,16 +226,15 @@ function CommandLog({ projectId, command, runId }: { projectId: string; command:
     void platform.commands
       .log(projectId, command)
       .then((run) => {
+        if (!run) return log.fail()
         // If a re-run gave it a different runId, this view is about to be replaced — the old log is not drawn
-        if (!run || run.runId !== runId) return
-        term.write(run.history)
-        for (const chunk of pendingChunks.splice(0)) term.write(chunk)
-        replayed = true
+        if (run.runId !== runId) return log.drop()
+        log.replay(run.history)
         if (!run.running && run.exitCode !== null) {
           term.write(`\r\n\x1b[2m— exited (${run.exitCode}) —\x1b[0m\r\n`)
         }
       })
-      .catch(() => {})
+      .catch(() => log.fail())
 
     let pending = 0
     const ro = new ResizeObserver(() => {
