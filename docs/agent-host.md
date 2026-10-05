@@ -562,7 +562,10 @@ detaching: it is sent the rest of the line it is in, then the stream ends and th
 and the child blocks on its pipe; only whole lines go to a reader, and a line a lost reader got part of is sent
 whole to the next. A pty: drained always, the last 256 KiB kept and replayed to each new reader. An agent's stderr:
 a 256 KiB tail, never blocking. Bytes from a host go to an agent's stdin in whole lines only, so a host that dies
-mid-write never leaves a torn request; up to 8 MiB are queued before the keeper stops reading the host.
+mid-write never leaves a torn request; up to 8 MiB are queued before the keeper stops reading the host. A control
+connection whose host stops reading is dropped once 8 MiB of replies and exit events wait for it, with a line in the
+keeper's log: that host then sees every child it holds exit with SIGHUP and cannot spawn until it restarts. Once a
+burst has been sent, each of these buffers hands back the capacity it left behind, keeping 1 MiB.
 
 **What the host spawns there.** Every child carries a tag only hosts read (`keeper/tags.ts`): `{kind:"agent",
 tool, sessionId, version?}` (the CLI version it was started from, #297, §4.6), `{kind:"terminal", id, cwd}`, `{kind:"command", cwd, command, runId, startedAt}`. A newer host
