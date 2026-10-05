@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Visual system</title>
+<link rel="stylesheet" href="system.css">
+<script>if (location.hash.includes('light')) document.documentElement.dataset.theme = 'light'</script>
+<style>
+  body { background: var(--bg-1); padding: 32px 40px; overflow: hidden; }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.015em; margin-bottom: 4px; }
+  .lead { color: var(--ink-2); font-size: 13.5px; margin-bottom: 26px; max-width: 70ch; }
+  .grid { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 28px; }
+  h2 { font-size: 12px; font-weight: 600; color: var(--ink-3); margin-bottom: 12px; }
+  .sw { display: grid; grid-template-columns: 42px 1fr auto; gap: 10px; align-items: center; margin-bottom: 8px; font-size: 12.5px; }
+  .chip { width: 42px; height: 28px; border-radius: var(--r-sm); border: 1px solid var(--line); }
+  .sw .r { font: 11.5px var(--mono); color: var(--ink-3); }
+  .type div { margin-bottom: 10px; }
+  .type .m { font: 11px var(--mono); color: var(--ink-3); display: block; margin-top: 1px; }
+  .stack { display: grid; gap: 10px; align-content: start; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .card { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-2); padding: 12px; font-size: 12.5px; color: var(--ink-2); }
+  .rule { font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
+  .rule b { color: var(--ink); font-weight: 600; }
+  .focus { outline: 2px solid var(--ink); outline-offset: 2px; }
+</style>
+</head>
+<body>
+  <h1>Centralu, one signal</h1>
+  <p class="lead">Monochrome throughout. The single colour means "this needs you": an approval, a question, a stop. Working, idle and done are told apart by shape and words, so nothing depends on seeing a colour or a shade.</p>
+
+  <div class="grid">
+    <div>
+      <h2>Ink, each against the panel</h2>
+      <div class="sw"><span class="chip" style="background:var(--ink)"></span>Ink, what you read<span class="r">15.5:1</span></div>
+      <div class="sw"><span class="chip" style="background:var(--ink-2)"></span>Ink 2, secondary<span class="r">9.1:1</span></div>
+      <div class="sw"><span class="chip" style="background:var(--ink-3)"></span>Ink 3, metadata and quiet controls<span class="r">5.7:1</span></div>
+      <div class="sw"><span class="chip" style="background:var(--ink-4)"></span>Ink 4, decoration only<span class="r">2.9:1</span></div>
+      <div class="sw"><span class="chip" style="background:var(--attn)"></span>Attention, the only hue<span class="r">8.9:1</span></div>
+      <h2 style="margin-top:18px">Surfaces</h2>
+      <div class="row">
+        <span class="chip" style="background:var(--bg-0)"></span><span class="chip" style="background:var(--bg-1)"></span><span class="chip" style="background:var(--bg-2)"></span><span class="chip" style="background:var(--bg-3)"></span>
+        <span class="ink-3" style="font-size:12px">floor, panel, raised, selected</span>
+      </div>
+    </div>
+
+    <div class="type">
+      <h2>Type: Pretendard and JetBrains Mono</h2>
+      <div style="font-size:18px;font-weight:650">Session title 18 / semibold<span class="m">screens and dialogs</span></div>
+      <div style="font-size:14.5px;line-height:1.68">대화 본문은 14.5px, 행간 1.68로 읽습니다. Conversation body.<span class="m">conversation, 72ch column</span></div>
+      <div style="font-size:13px">Interface text 13 / regular<span class="m">sidebar, panels, buttons</span></div>
+      <div style="font-size:11.5px;color:var(--ink-3)">Metadata 11.5 / ink 3<span class="m">times, counts, paths</span></div>
+      <div class="mono">kill -TERM 40321<span class="m">code, commands, paths: 12px</span></div>
+    </div>
+
+    <div class="stack">
+      <h2>States: shape and word</h2>
+      <div class="row">
+        <span class="state attn"><span class="glyph"></span>Needs you</span>
+        <span class="state working"><i class="ph ph-circle-notch"></i>Working</span>
+        <span class="state done"><span class="glyph"></span>Done</span>
+        <span class="state idle"><span class="glyph"></span>Idle</span>
+        <span class="state error"><span class="glyph"></span>Failed</span>
+      </div>
+      <h2 style="margin-top:8px">Controls: one radius each</h2>
+      <div class="row">
+        <span class="btn attn">Allow <span class="kbd">Y</span></span>
+        <span class="btn primary">Commit</span>
+        <span class="btn">Deny <span class="kbd">N</span></span>
+        <span class="btn quiet">Cancel</span>
+        <span class="btn focus">Focused</span>
+      </div>
+      <div class="card">Cards and panels: 10px. Buttons, inputs, chips: 6px. Status pills are the only full rounds.</div>
+      <p class="rule"><b>Rules.</b> A control is never drawn below ink 3. Ink 4 never carries words. The attention hue is never used for decoration, branding or focus.</p>
+    </div>
+  </div>
+</body>
+</html>

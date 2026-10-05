@@ -1,0 +1,113 @@
+/*
+ * Centralu redesign proposal (2026-10) - the visual system the mockups share.
+ *
+ * One rule above the rest: the only colour on screen means "this needs you".
+ * Everything else is a monochrome ladder; state is carried by shape and words, never by brightness alone.
+ */
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css");
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap");
+@import url("https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css");
+@import url("https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css");
+
+:root {
+  /* surfaces, darkest first */
+  --bg-0: #0e0f11;   /* the floor behind everything */
+  --bg-1: #141518;   /* panels: sidebar, conversation, context */
+  --bg-2: #1b1c20;   /* raised: cards, inputs, menus */
+  --bg-3: #24262b;   /* selected, hover */
+  --line: #26282d;
+  --line-strong: #363940;
+
+  /* ink: four steps, every one readable */
+  --ink: #ececee;     /* 15.5:1 on bg-1 */
+  --ink-2: #b4b7be;   /* 9.1:1  secondary text */
+  --ink-3: #8c9099;   /* 5.7:1  metadata, quiet controls */
+  --ink-4: #5d616a;   /* 2.9:1  decoration only, never text you must read */
+
+  /* the one accent: needs you */
+  --attn: #f0a63a;
+  --attn-ink: #1c1206;
+  --attn-soft: rgb(240 166 58 / 0.12);
+  --attn-line: rgb(240 166 58 / 0.45);
+
+  /* semantic, used only for what they mean */
+  --danger: #ef6b5e;
+  --add: #4fb37a;
+  --del: #e0675b;
+
+  --r-sm: 6px;   /* controls, chips */
+  --r-md: 10px;  /* cards, panels */
+  --font: "Pretendard Variable", Pretendard, -apple-system, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg-0: #e9eaec;
+  --bg-1: #f5f5f6;
+  --bg-2: #fcfcfc;
+  --bg-3: #e6e7ea;
+  --line: #dcdde1;
+  --line-strong: #c4c6cb;
+  --ink: #16171a;
+  --ink-2: #3f424a;
+  --ink-3: #5f636c;
+  --ink-4: #a3a6ad;
+  --attn: #9c5700;
+  --attn-ink: #ffffff;
+  --attn-soft: rgb(156 87 0 / 0.10);
+  --attn-line: rgb(156 87 0 / 0.45);
+  --danger: #c23a2e;
+  --add: #1f7a46;
+  --del: #b53328;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg-0);
+  color: var(--ink);
+  font: 13px/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.005em;
+}
+.mono { font-family: var(--mono); font-size: 12px; letter-spacing: 0; }
+.ink-2 { color: var(--ink-2); }
+.ink-3 { color: var(--ink-3); }
+.ph, .ph-fill { font-size: 16px; line-height: 1; }
+
+/* ---------- buttons: one shape rule, radius sm everywhere ---------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong); background: var(--bg-2); color: var(--ink);
+  font: 500 12.5px var(--font); white-space: nowrap;
+}
+.btn.quiet { background: transparent; border-color: transparent; color: var(--ink-2); }
+.btn.primary { background: var(--ink); color: var(--bg-1); border-color: var(--ink); }
+.btn.attn { background: var(--attn); color: var(--attn-ink); border-color: var(--attn); }
+.btn.danger { color: var(--danger); }
+.kbd {
+  display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px;
+  border-radius: 4px; border: 1px solid var(--line-strong); background: var(--bg-1);
+  font: 500 11px var(--mono); color: var(--ink-2);
+}
+.btn.attn .kbd { background: rgb(0 0 0 / 0.15); border-color: rgb(0 0 0 / 0.2); color: var(--attn-ink); }
+.btn.primary .kbd { background: rgb(0 0 0 / 0.08); border-color: rgb(0 0 0 / 0.15); color: var(--bg-1); }
+
+/* ---------- state: shape + word, colour only for "needs you" ---------- */
+.state { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.state .glyph { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--ink-3); }
+.state.working .glyph { border-color: var(--ink); border-right-color: transparent; }
+.state.attn { color: var(--attn); font-weight: 600; }
+.state.attn .glyph { border: none; background: var(--attn); border-radius: 2px; transform: rotate(45deg); width: 7px; height: 7px; }
+.state.done .glyph { border: none; background: var(--ink-3); }
+.state.error { color: var(--danger); }
+.state.error .glyph { border: none; background: var(--danger); border-radius: 1px; }
+.state.idle .glyph { border-style: dotted; }
+
+.tool-mark {
+  display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 5px;
+  font: 700 10px var(--mono); color: var(--ink-2); background: var(--bg-3); flex: none;
+}

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Narrow window</title>
+<link rel="stylesheet" href="system.css">
+<script>if (location.hash.includes('light')) document.documentElement.dataset.theme = 'light'</script>
+<style>
+  body { display: grid; grid-template-columns: 56px 1fr; height: 100vh; overflow: hidden; }
+  .rail { background: var(--bg-1); border-right: 1px solid var(--line); display: grid; grid-auto-rows: max-content; justify-items: center; gap: 6px; padding: 10px 0; }
+  .rb { position: relative; width: 36px; height: 36px; border-radius: var(--r-sm); display: grid; place-items: center; color: var(--ink-2); }
+  .rb.sel { background: var(--bg-3); color: var(--ink); }
+  .rb .tool-mark { width: 22px; height: 22px; }
+  .rb.need::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; background: var(--attn); transform: rotate(45deg); border-radius: 1px; }
+  .rb .n { position: absolute; bottom: 1px; right: 0; font: 700 9.5px var(--font); color: var(--attn-ink); background: var(--attn); border-radius: 999px; padding: 0 4px; line-height: 13px; }
+  .sep { width: 24px; height: 1px; background: var(--line); margin: 4px 0; }
+
+  .conv { position: relative; display: grid; grid-template-rows: 48px 1fr auto; background: var(--bg-1); min-width: 0; }
+  .conv-h { display: flex; align-items: center; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+  .conv-h h1 { font-size: 14.5px; font-weight: 650; }
+  .conv-h .sp { flex: 1; }
+  .stream { padding: 20px 0; overflow: hidden; }
+  .col { width: calc(100% - 40px); max-width: 720px; margin: 0 auto; display: grid; gap: 16px; }
+  .you { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; font-size: 14.5px; line-height: 1.6; }
+  .say { font-size: 14.5px; line-height: 1.68; }
+  .say code { font: 12.5px var(--mono); background: var(--bg-3); padding: 1px 5px; border-radius: 4px; }
+  .act-h { display: flex; align-items: center; gap: 8px; padding: 9px 12px; color: var(--ink-2); font-size: 12.5px; border: 1px solid var(--line); border-radius: var(--r-md); }
+  .act-h b { color: var(--ink); }
+  .composer { width: calc(100% - 40px); max-width: 720px; margin: 0 auto 16px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--bg-2); }
+  .composer .input { padding: 12px 14px 6px; color: var(--ink-3); font-size: 14px; min-height: 42px; }
+  .composer .bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px 8px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: var(--r-sm); color: var(--ink-2); font-size: 12px; border: 1px solid var(--line); }
+  .composer .sp { flex: 1; }
+  .send { width: 28px; height: 28px; border-radius: var(--r-sm); display: grid; place-items: center; background: var(--ink); color: var(--bg-1); }
+
+  /* the context drawer slides over the conversation instead of squeezing it */
+  .scrim { position: absolute; inset: 0; background: rgb(0 0 0 / 0.35); }
+  :root[data-theme="light"] .scrim { background: rgb(20 20 24 / 0.18); }
+  .drawer { position: absolute; top: 0; right: 0; bottom: 0; width: 380px; background: var(--bg-1); border-left: 1px solid var(--line-strong);
+    box-shadow: -24px 0 48px -24px rgb(0 0 0 / 0.5); display: grid; grid-template-rows: 48px 40px 1fr; }
+  .dr-h { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  .dr-h .sp { flex: 1; }
+  .tabs { display: flex; gap: 2px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  .tab { padding: 4px 10px; border-radius: var(--r-sm); color: var(--ink-2); font-size: 12.5px; display: flex; gap: 6px; align-items: center; }
+  .tab.sel { background: var(--bg-3); color: var(--ink); font-weight: 600; }
+  .tab .c { font-size: 11px; color: var(--ink-3); }
+  .files { padding: 8px; display: grid; gap: 2px; align-content: start; }
+  .f { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; align-items: center; padding: 6px 8px; border-radius: var(--r-sm); font-size: 12.5px; }
+  .f .p { font: 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .f .s { font: 600 11px var(--mono); }
+  .f.sel { background: var(--bg-3); }
+  .plus { color: var(--add); } .minus { color: var(--del); }
+  .commit { margin: 10px 8px 0; display: grid; gap: 8px; }
+  .commit .in { height: 30px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--bg-2); padding: 0 10px; display: flex; align-items: center; color: var(--ink-3); font-size: 12.5px; }
+  .commit .row { display: flex; gap: 8px; }
+</style>
+</head>
+<body>
+  <nav class="rail">
+    <span class="rb"><i class="ph ph-list"></i></span>
+    <span class="rb need sel"><span class="tool-mark">X</span></span>
+    <span class="rb need"><span class="tool-mark">C</span></span>
+    <span class="rb need"><span class="tool-mark">C</span></span>
+    <span class="sep"></span>
+    <span class="rb"><span class="tool-mark">C</span></span>
+    <span class="rb"><span class="tool-mark">X</span></span>
+    <span class="sep"></span>
+    <span class="rb"><i class="ph ph-crown-simple"></i></span>
+    <span class="rb"><i class="ph ph-squares-four"></i></span>
+  </nav>
+
+  <section class="conv">
+    <div class="conv-h">
+      <span class="tool-mark">X</span><h1>Orphaned process cleanup</h1><span class="sp"></span>
+      <span class="state attn"><span class="glyph"></span>Approval</span>
+      <span class="btn quiet"><i class="ph ph-git-diff"></i>3</span>
+    </div>
+    <div class="stream">
+      <div class="col">
+        <div class="you">Run a script that finds only the orphaned processes and stops them. Show me the list before you kill anything.</div>
+        <div class="act-h"><i class="ph ph-caret-right"></i><b>Looked around</b> read 3 files, ran 2 commands</div>
+        <div class="say">Two processes have no living parent and are not held by the keeper: <code>40321</code> (a <code>vite</code> dev server started 3 days ago) and <code>40388</code> (its esbuild child).</div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="input">Reply, or type / for commands</div>
+      <div class="bar"><span class="chip"><i class="ph ph-cpu"></i>gpt-5-codex</span><span class="sp"></span><span class="send"><i class="ph ph-arrow-up"></i></span></div>
+    </div>
+
+    <div class="scrim"></div>
+    <aside class="drawer">
+      <div class="dr-h"><i class="ph ph-git-branch"></i>fix/orphans<span class="sp"></span><span class="btn quiet"><i class="ph ph-x"></i></span></div>
+      <div class="tabs">
+        <span class="tab sel">Changes <span class="c">3</span></span><span class="tab">History</span><span class="tab">Files</span><span class="tab">Terminal</span>
+      </div>
+      <div>
+        <div class="files">
+          <div class="f sel"><span class="s plus">M</span><span class="p">scripts/strays.ts</span><span class="mono"><span class="plus">+14</span> <span class="minus">−3</span></span></div>
+          <div class="f"><span class="s plus">A</span><span class="p">scripts/strays.test.ts</span><span class="mono"><span class="plus">+41</span></span></div>
+          <div class="f"><span class="s minus">D</span><span class="p">docs/old-notes.md</span><span class="mono"><span class="minus">−22</span></span></div>
+        </div>
+        <div class="commit">
+          <div class="in">Commit message</div>
+          <div class="row"><span class="btn primary">Commit 3 files</span><span class="btn">Push</span></div>
+        </div>
+      </div>
+    </aside>
+  </section>
+</body>
+</html>

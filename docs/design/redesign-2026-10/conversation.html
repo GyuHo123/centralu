@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Conversation turn</title>
+<link rel="stylesheet" href="system.css">
+<script>if (location.hash.includes('light')) document.documentElement.dataset.theme = 'light'</script>
+<style>
+  body { background: var(--bg-1); padding: 28px 0; overflow: hidden; }
+  .col { width: 760px; margin: 0 auto; display: grid; gap: 16px; }
+  .who { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-3); margin-bottom: 6px; font-weight: 500; }
+  .you { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; font-size: 14.5px; line-height: 1.6; }
+  .say { font-size: 14.5px; line-height: 1.68; }
+  .say code { font: 12.5px var(--mono); background: var(--bg-3); padding: 1px 5px; border-radius: 4px; }
+  .note { font-size: 11px; color: var(--ink-3); font-weight: 600; letter-spacing: 0.02em; margin: 6px 0 -8px; }
+
+  .plan { border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; display: grid; gap: 6px; }
+  .plan-h { font-size: 12px; font-weight: 600; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
+  .step { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--ink-2); }
+  .step .ph { font-size: 15px; }
+  .step.done { color: var(--ink-3); text-decoration: line-through; text-decoration-color: var(--ink-4); }
+  .step.now { color: var(--ink); font-weight: 500; }
+
+  .act { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+  .act-h { display: flex; align-items: center; gap: 8px; padding: 9px 12px; color: var(--ink-2); font-size: 12.5px; }
+  .act-h b { color: var(--ink); font-weight: 600; }
+  .act-h .sp { flex: 1; }
+
+  .diff { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+  .diff-h { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12.5px; border-bottom: 1px solid var(--line); }
+  .diff-h .p { font: 12px var(--mono); }
+  .diff-h .sp { flex: 1; }
+  .plus { color: var(--add); font: 12px var(--mono); }
+  .minus { color: var(--del); font: 12px var(--mono); }
+  .hunk { font: 12px/1.7 var(--mono); background: var(--bg-0); }
+  .hunk div { padding: 0 12px; white-space: pre; }
+  .hunk .a { background: rgb(79 179 122 / 0.10); color: var(--ink); }
+  .hunk .d { background: rgb(224 103 91 / 0.10); color: var(--ink-2); }
+  .hunk .c { color: var(--ink-3); }
+
+  .ask { border: 1px solid var(--attn-line); background: var(--attn-soft); border-radius: var(--r-md); padding: 12px 14px; display: grid; gap: 10px; }
+  .ask-h { display: flex; gap: 8px; align-items: center; color: var(--attn); font-weight: 650; font-size: 12.5px; }
+  .ask-q { font-size: 14.5px; font-weight: 600; }
+  .opt { display: grid; grid-template-columns: 22px 1fr; gap: 2px 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-2); }
+  .opt .kbd { grid-row: span 2; align-self: start; margin-top: 1px; }
+  .opt b { font-size: 13.5px; font-weight: 600; }
+  .opt span { font-size: 12px; color: var(--ink-3); }
+  .opt.pick { border-color: var(--attn-line); }
+  .ask-a { display: flex; gap: 8px; align-items: center; }
+  .ask-a .sp { flex: 1; }
+
+  .err { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-md); border: 1px solid rgb(239 107 94 / 0.35); }
+  .err .ph { color: var(--danger); font-size: 17px; }
+  .err b { font-weight: 600; font-size: 13px; }
+  .err p { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+
+  .live { display: flex; align-items: center; gap: 10px; color: var(--ink-2); font-size: 12.5px; padding: 2px 0; }
+  .spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--ink-3); border-right-color: var(--ink); }
+  .live .sp { flex: 1; }
+</style>
+</head>
+<body>
+  <div class="col">
+    <div class="you">
+      <div class="who"><i class="ph ph-user"></i>You</div>
+      히어로 문구 후보를 몇 개 뽑아서, 하나 고르게 해 줘. 고른 걸로 바로 반영하고 테스트까지.
+    </div>
+
+    <div class="plan">
+      <div class="plan-h"><i class="ph ph-list-checks"></i>Plan, 2 of 4 done</div>
+      <div class="step done"><i class="ph ph-check-circle"></i>Read the current hero and its tests</div>
+      <div class="step done"><i class="ph ph-check-circle"></i>Draft three lines that fit two lines at 1280px</div>
+      <div class="step now"><i class="ph ph-arrow-circle-right"></i>Ask which line to ship</div>
+      <div class="step"><i class="ph ph-circle"></i>Apply it and run the hero test</div>
+    </div>
+
+    <div class="act">
+      <div class="act-h"><i class="ph ph-caret-right"></i><b>Looked around</b> read 4 files, searched twice<span class="sp"></span><span class="ink-3" style="font-size:11.5px">12s</span></div>
+    </div>
+
+    <div class="ask">
+      <div class="ask-h"><i class="ph-fill ph-diamond"></i>Claude is asking</div>
+      <div class="ask-q">Which hero line should we ship?</div>
+      <div class="opt pick"><span class="kbd">1</span><b>Stop watching. Start steering.</b><span>Leads with what changes for you</span></div>
+      <div class="opt"><span class="kbd">2</span><b>Many agents, one window.</b><span>Says what the product is</span></div>
+      <div class="opt"><span class="kbd">3</span><b>Every session, one glance away.</b><span>Leads with the overview</span></div>
+      <div class="ask-a">
+        <span class="btn attn">Answer with 1 <span class="kbd">↵</span></span>
+        <span class="btn quiet">Write my own</span>
+        <span class="sp"></span>
+        <span class="ink-3" style="font-size:11.5px">The turn waits for you</span>
+      </div>
+    </div>
+
+    <div class="note">AFTER YOU ANSWER</div>
+
+    <div class="diff">
+      <div class="diff-h"><i class="ph ph-pencil-simple"></i><span class="p">src/sections/Hero.tsx</span><span class="sp"></span><span class="plus">+2</span><span class="minus">−2</span><i class="ph ph-arrows-out-simple ink-3"></i></div>
+      <div class="hunk">
+        <div class="c">  &lt;h1 className="hero-title"&gt;</div>
+        <div class="d">-   Every coding agent, in one place</div>
+        <div class="a">+   Stop watching. Start steering.</div>
+        <div class="c">  &lt;/h1&gt;</div>
+      </div>
+    </div>
+
+    <div class="err">
+      <i class="ph ph-warning-octagon"></i>
+      <div><b>hero.spec.ts failed, 1 of 6</b><p>The title wraps to three lines at 1024px. Claude is shortening the subtitle and running it again.</p></div>
+    </div>
+
+    <div class="live"><span class="spin"></span>Working, editing <span class="mono">src/sections/Hero.tsx</span><span class="sp"></span><span class="ink-3">38s</span><span class="btn quiet">Stop <span class="kbd">Esc</span></span></div>
+  </div>
+</body>
+</html>

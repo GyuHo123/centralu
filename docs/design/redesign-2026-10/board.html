@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Board</title>
+<link rel="stylesheet" href="system.css">
+<script>if (location.hash.includes('light')) document.documentElement.dataset.theme = 'light'</script>
+<style>
+  body { height: 100vh; overflow: hidden; display: grid; grid-template-rows: 48px 1fr; }
+  .bar { display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+  .bar h1 { font-size: 15px; font-weight: 650; margin-right: 8px; }
+  .f { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: var(--r-sm); color: var(--ink-2); font-size: 12.5px; border: 1px solid transparent; }
+  .f.sel { background: var(--bg-3); color: var(--ink); font-weight: 600; }
+  .f.attn { color: var(--attn); }
+  .f .c { color: var(--ink-3); font-size: 11.5px; }
+  .bar .sp { flex: 1; }
+  .wrap { padding: 18px 20px; display: grid; gap: 18px; align-content: start; overflow: hidden; }
+  .lane-h { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
+  .lane-h.attn { color: var(--attn); }
+
+  .needs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .card { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; display: grid; gap: 9px; align-content: start; }
+  .card.need { border-color: var(--attn-line); box-shadow: inset 0 2px 0 var(--attn); }
+  .card-h { display: flex; align-items: center; gap: 8px; }
+  .card-h b { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card-h .sp { flex: 1; }
+  .card-h .t { font-size: 11px; color: var(--ink-3); }
+  .proj { font-size: 11.5px; color: var(--ink-3); }
+  .q { font-size: 13px; color: var(--ink); }
+  .cmd { font: 12px var(--mono); background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 7px 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .opt { font-size: 12px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 5px 8px; color: var(--ink-2); display: flex; gap: 6px; align-items: center; background: var(--bg-2); }
+  .fail { font: 12px var(--mono); color: var(--ink-2); line-height: 1.6; }
+  .fail .x { color: var(--danger); }
+
+  .working { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; }
+  .panel { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--r-md); display: grid; grid-template-rows: 40px 1fr 34px; height: 232px; overflow: hidden; }
+  .panel-h { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--line); }
+  .panel-h b { font-size: 13px; font-weight: 600; }
+  .panel-h .sp { flex: 1; }
+  .tail { padding: 10px 14px; display: grid; gap: 8px; align-content: end; overflow: hidden; font-size: 13px; line-height: 1.6; color: var(--ink-2); }
+  .tail .line { display: flex; gap: 8px; align-items: center; font-size: 12.5px; }
+  .tail .line .mono { color: var(--ink); }
+  .tail .say { color: var(--ink); }
+  .panel-f { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 11.5px; }
+  .panel-f .sp { flex: 1; }
+  .spin { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--ink-3); border-right-color: var(--ink); }
+  .plus { color: var(--add); } .minus { color: var(--del); }
+
+  .idle { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-1); font-size: 12.5px; color: var(--ink-2); }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <h1>Board</h1>
+    <span class="f sel">All <span class="c">7</span></span>
+    <span class="f attn"><i class="ph-fill ph-diamond"></i>Needs you <span class="c">3</span></span>
+    <span class="f">Working <span class="c">2</span></span>
+    <span class="f">Idle <span class="c">2</span></span>
+    <span class="sp"></span>
+    <span class="btn quiet"><i class="ph ph-funnel-simple"></i>All projects</span>
+    <span class="btn"><i class="ph ph-plus"></i>New session</span>
+  </div>
+
+  <div class="wrap">
+    <div class="lane-h attn"><i class="ph-fill ph-diamond"></i>Needs you, oldest first</div>
+    <div class="needs">
+      <div class="card need">
+        <div class="card-h"><span class="tool-mark">C</span><b>결제 웹훅 재시도</b><span class="sp"></span><span class="t">11m</span></div>
+        <div class="proj">payments-api, stopped after a failed check</div>
+        <div class="fail"><span class="x">✕</span> retry.spec.ts › backs off after 3 failures<br><span class="x">✕</span> retry.spec.ts › keeps the idempotency key</div>
+        <div class="acts"><span class="btn">Open</span><span class="btn quiet">Ask it to fix</span></div>
+      </div>
+      <div class="card need">
+        <div class="card-h"><span class="tool-mark">C</span><b>Hero copy options</b><span class="sp"></span><span class="t">6m</span></div>
+        <div class="proj">landing-site, asking</div>
+        <div class="q">Which hero line should we ship?</div>
+        <div class="acts"><span class="opt"><span class="kbd">1</span>Stop watching. Start steering.</span><span class="opt"><span class="kbd">2</span>Many agents, one window.</span><span class="opt"><span class="kbd">3</span>Every session…</span></div>
+      </div>
+      <div class="card need">
+        <div class="card-h"><span class="tool-mark">X</span><b>Orphaned process cleanup</b><span class="sp"></span><span class="t">2m</span></div>
+        <div class="proj">centralu, wants to run a command</div>
+        <div class="cmd">kill -TERM 40321</div>
+        <div class="acts"><span class="btn attn">Allow <span class="kbd">Y</span></span><span class="btn">Deny <span class="kbd">N</span></span></div>
+      </div>
+    </div>
+
+    <div class="lane-h"><i class="ph ph-circle-notch"></i>Working</div>
+    <div class="working">
+      <div class="panel">
+        <div class="panel-h"><span class="tool-mark">C</span><b>Collapsed composer polish</b><span class="proj">centralu</span><span class="sp"></span><span class="state working"><i class="ph ph-circle-notch"></i>4m</span></div>
+        <div class="tail">
+          <div class="line"><i class="ph ph-file-text"></i>Read <span class="mono">packages/ui/src/styles/index.css</span></div>
+          <div class="line"><i class="ph ph-terminal"></i>Ran <span class="mono">pnpm exec playwright test -g "rainbow ring"</span></div>
+          <div class="say">All three pass. I also confirmed the first one fails with the ring removed, so the test really is watching that line.</div>
+          <div class="line"><span class="spin"></span>Editing <span class="mono">SessionView.tsx</span></div>
+        </div>
+        <div class="panel-f"><i class="ph ph-git-diff"></i><span class="plus">+38</span><span class="minus">−12</span><span class="sp"></span>Context 41%</div>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><span class="tool-mark">X</span><b>WebP image pipeline</b><span class="proj">landing-site</span><span class="sp"></span><span class="state working"><i class="ph ph-circle-notch"></i>19m</span></div>
+        <div class="tail">
+          <div class="line"><i class="ph ph-pencil-simple"></i>Edited <span class="mono">scripts/images.mjs</span></div>
+          <div class="say">Converted 46 images; the hero shot went from 1.8 MB to 212 KB.</div>
+          <div class="line"><span class="spin"></span>Running <span class="mono">pnpm test</span></div>
+        </div>
+        <div class="panel-f"><i class="ph ph-git-diff"></i><span class="plus">+120</span><span class="minus">−8</span><span class="sp"></span>Context 63%</div>
+      </div>
+    </div>
+
+    <div class="lane-h"><i class="ph ph-moon"></i>Idle</div>
+    <div class="idle">
+      <span class="pill"><span class="tool-mark">C</span>Release notes for beta.11<span class="state done"><span class="glyph"></span>Done</span></span>
+      <span class="pill"><span class="tool-mark">X</span>Keeper handoff review<span class="state idle"><span class="glyph"></span>Idle 2h</span></span>
+    </div>
+  </div>
+</body>
+</html>
