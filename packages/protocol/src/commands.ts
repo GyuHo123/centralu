@@ -25,6 +25,8 @@ import {
   GridPanel,
   ModelOption,
   PermissionPreset,
+  ProjectConsent,
+  ProjectConsentKind,
   Question,
   QuestionAnswer,
   SessionActivity,
@@ -295,6 +297,17 @@ export const SessionInfo = z.object({
    * link remains and the relationship is restored.
    */
   parentSessionId: z.string().nullable().default(null),
+  /**
+   * The session that asked for this one through ask_project (#371 part B) — a session in another project. Null for
+   * every session a person or an app started.
+   *
+   * The delegated session is an ordinary session of its own project, so the person can watch it and step in; this
+   * line is what marks it "asked by" and links back to the caller. On the row (store v45), so the mark survives a
+   * restart, and the caller's next ask reuses the session it already asked. The caller may since have been deleted:
+   * the id then names a session that is no longer listed. Optional rather than defaulted so a frame or a fixture
+   * that predates it needs no change: absent and null read the same.
+   */
+  askedBy: z.string().nullable().optional(),
   /**
    * **Facts valid only while the process is alive** — these come from the host's memory, not
    * the database.
@@ -1386,6 +1399,17 @@ export const RpcMethods = {
    */
   'apps.answerQuestion': {
     params: z.object({ questionId: z.string(), decision: z.enum(['allow', 'deny']) }),
+    result: z.object({ ok: z.literal(true) }),
+  },
+  /**
+   * Every remembered cross-project consent (#371): which project may reach which, and how ('delegate' — ask_project
+   * starts a session there; 'apps' — its apps attach to the caller). Listed in Settings, newest first, with the
+   * project names as they are now. Refetched whenever `project_consents_changed` arrives.
+   */
+  'projectConsents.list': { params: z.object({}), result: z.array(ProjectConsent) },
+  /** Revokes one remembered consent (#371) — the next reach from that project to that one asks again */
+  'projectConsents.revoke': {
+    params: z.object({ fromProjectId: ProjectId, toProjectId: ProjectId, kind: ProjectConsentKind }),
     result: z.object({ ok: z.literal(true) }),
   },
   /** The remembered capability answers for one app (M4 D-4) — shown next to the run history panel (B-7) and can be forgotten there */

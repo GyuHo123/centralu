@@ -7,6 +7,7 @@ import { buildHandoffRecord } from './handoff-record.js'
 import { SessionAppsHub } from './session-apps.js'
 import type { AgentRunRequest, AgentRunResult, AppCheckReport, AppRef, BrokerHost, CapabilityQuestion, ExternalApps, HostCapability } from '../apps/external/runtime.js'
 import { AgentRunWait, finalAnswer } from './app-agents.js'
+import { ASK_WAIT_MS, askFrame, clipAnswer, pathsIn, readableGrants, taskLine, underGrant } from './ask-project.js'
 import { builderRole } from './app-builder.js'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -16,6 +17,8 @@ import type {
   AppQuestion,
   AppReach,
   ApprovalDetail,
+  ProjectConsent,
+  ProjectConsentKind,
   ModelOption,
   ApprovalDecision,
   CommandInfo,
@@ -55,7 +58,7 @@ import {
   sessionLiveDefaults,
   withoutToolRecord,
 } from '@cc/protocol'
-import type { AgentAdapter, AgentProcess, AgentSpawnSpec, CreateSessionOpts, EventSink, OrchestratorTools, HistoryMessage, ProcessSource, SessionApps, SessionHandle } from '../adapters/contract.js'
+import type { AgentAdapter, AgentProcess, AgentSpawnSpec, AskProjectResult, CreateSessionOpts, EventSink, OrchestratorTools, HistoryMessage, ProcessSource, SessionApps, SessionHandle } from '../adapters/contract.js'
 
 /**
  * Where agent processes live when not with this host (#280 step 2 — the keeper). `spawn` starts a
@@ -460,13 +463,24 @@ export class SessionManager {
    */
   private agentRuns = new Map<string, AgentRunWait>()
   /**
-   * Capability question standing in as a session's approval card (M4 D-4) — requestId -> question.
-   * It uses the same slot as the adapter's card (the session's `pendingApproval`), so if the
-   * adapter's card is already up, this one is raised only after that one closes
-   * (`raiseCapabilityAsks`). The answer (`respondApproval`) never reaches the adapter — it is
-   * resolved right here.
+   * A card the host raises in a session's approval slot — requestId -> question: an app's capability question (M4
+   * D-4), or one project reaching another (#371). It uses the same slot as the adapter's card (the session's
+   * `pendingApproval`), so if the adapter's card is already up, this one is raised only after that one closes
+   * (`raiseHostAsks`). The answer (`respondApproval`) never reaches the adapter — it is resolved right here.
    */
-  private capabilityAsks = new Map<string, { requestId: string; sessionId: string; detail: Extract<ApprovalDetail, { kind: 'capability' }>; shown: boolean; resolve: (d: 'allow' | 'deny' | null) => void }>()
+  private hostAsks = new Map<string, HostAsk>()
+  /**
+   * ask_project's delegations still owed to their caller (#371 part B) — `<caller session>><target project>` -> the
+   * delegation. One per pair at a time: a second task while the first runs is refused, and a call with no task waits
+   * on this one. Removed once the caller has read the outcome; an outcome nobody comes back for goes with the caller.
+   */
+  private delegations = new Map<string, Delegation>()
+  /**
+   * What a session may read beyond its folder because another project handed it back (#371 part B) — session id ->
+   * resolved paths (files, or output folders). Live only: the grant lasts while this host serves the session, and a
+   * restart asks again (the caller's agent then raises its own card for a read outside its folder).
+   */
+  private readGrants = new Map<string, Set<string>>()
   /**
    * requestId of an approval response that reached the adapter (#158) — request id -> session id. If
    * a second response arrives for the same request (double key press, or the card and the rail both
@@ -1213,6 +1227,8 @@ export class SessionManager {
        * tool: the tool the app picked is not the person's choice.
        */
       appAgent?: { outputSchema?: Record<string, unknown> }
+      /** The session in another project that asked for this one (#371 part B) — filled only by `askProject` */
+      askedBy?: string
     },
   ): Promise<SessionInfo> {
     const adapter = this.adapters.get(params.tool)
@@ -1320,6 +1336,7 @@ export class SessionManager {
       id, projectId: params.projectId, kind: params.kind ?? 'worker', tool: params.tool, externalId: null,
       scopeSessionIds: params.scopeSessionIds ?? null, roleAppend: params.roleAppend ?? null,
       appId: params.appId ?? null,
+      ...(params.askedBy ? { askedBy: params.askedBy } : {}),
       name:
         namedByBranch ??
         (params.initialPrompt ? truncate(params.initialPrompt) : (worktree?.branch ?? 'New session')),
@@ -1371,6 +1388,8 @@ export class SessionManager {
           // Reads an inherited note without asking (#142). No marker exists yet — it is stamped once this
           // session comes up
           ...this.handoffReadDirs(params.projectId, !!params.handoff?.fromSessionId),
+          // Paths another project handed back to this session (#371), asked on every read
+          mayRead: (path: string) => this.mayRead(id, path, cwd),
           // An orchestrator gets all of them; a worktree manager (#69) gets a subset. A freshly
           // created session has no children, so it cannot be a manager right here — becoming a
           // manager happens the next time it wakes, after its first child is attached (the check on
@@ -1986,6 +2005,7 @@ export class SessionManager {
           // An inherited note must still be readable after waking up (#142) — the first message still points
           // at that path
           ...this.handoffReadDirs(m.projectId, this.store.inheritsHandoff(sessionId)),
+          mayRead: (path: string) => this.mayRead(sessionId, path, cwd),
           /*
            * **Tool and role must carry over on resume too.**
            *
@@ -2280,11 +2300,20 @@ export class SessionManager {
       agentRun.deleted = true
       agentRun.fail(new Error('the person deleted the agent session before it answered'))
     }
+    // What this session asked other projects to do (#371): nobody is left to read the answer. The delegated session
+    // keeps its turn — it is that project's own session now, and the person may want what it is doing — but the wait
+    // and the grants go
+    for (const [key, d] of this.delegations) {
+      if (d.callerId !== sessionId) continue
+      this.delegations.delete(key)
+      if (this.agentRuns.get(d.sessionId) === d.wait) this.agentRuns.delete(d.sessionId)
+    }
+    this.readGrants.delete(sessionId)
     // A capability question raised on this session has nowhere left to be answered (D-4) — it is ended with
     // no answer (the window does not remember it, just declines)
-    for (const ask of [...this.capabilityAsks.values()]) {
+    for (const ask of [...this.hostAsks.values()]) {
       if (ask.sessionId !== sessionId) continue
-      this.capabilityAsks.delete(ask.requestId)
+      this.hostAsks.delete(ask.requestId)
       ask.resolve(null)
     }
     const handle = this.handles.get(sessionId)
@@ -2781,7 +2810,7 @@ export class SessionManager {
     if (e.sessionId) this.agentRuns.get(e.sessionId)?.onEvent(e)
     // The card slot is now empty — if a capability question was waiting, it is raised (D-4). Either the
     // adapter's card just closed, or a card that had been hiding ours just closed
-    if (e.type === 'approval_resolved' && e.sessionId) this.raiseCapabilityAsks(e.sessionId)
+    if (e.type === 'approval_resolved' && e.sessionId) this.raiseHostAsks(e.sessionId)
     // Applies a setting that changed mid-turn now (#164) — if it was reverted in between there is no drift,
     // so nothing happens
     if (endedTurn && e.sessionId && this.restartAfterTurn.delete(e.sessionId) && this.settingsDrifted(e.sessionId) && this.handles.has(e.sessionId)) {
@@ -3437,13 +3466,13 @@ export class SessionManager {
   ): void {
     const m = this.meta.get(sessionId)
 
-    // A card standing in for a capability question (M4 D-4) — the adapter has never heard of this
-    // card, so it is resolved right here. "Always allow" is treated as allow (the answer gets remembered
-    // regardless)
-    const ask = this.capabilityAsks.get(requestId)
+    // A card the host raised (M4 D-4, #371) — the adapter has never heard of this card, so it is resolved right here.
+    // For a capability question "always allow" is treated as allow (the answer gets remembered regardless); a
+    // cross-project consent keeps all three (always is the pair remembered)
+    const ask = this.hostAsks.get(requestId)
     if (ask && ask.sessionId === sessionId) {
-      this.capabilityAsks.delete(requestId)
-      const answer = decision === 'deny' ? 'deny' : 'allow'
+      this.hostAsks.delete(requestId)
+      const answer = ask.detail.kind === 'capability' && decision === 'always' ? 'allow' : decision
       this.onEvent({ type: 'approval_resolved', sessionId, requestId, decision: answer })
       ask.resolve(answer)
       // The agent is still inside that tool call — if there are no other pending questions, it is working
@@ -4250,6 +4279,8 @@ export class SessionManager {
 
   interrupt(sessionId: string): void {
     this.requireHandle(sessionId).interrupt()
+    // Stop on a caller stops what it asked another project to do (#371): the call it is waiting in ends with it
+    for (const d of this.delegations.values()) if (d.callerId === sessionId) d.stop('the person stopped the session that asked')
     // The person stopped an agent an app had asked for (M4 D-1) — this turn's ending is not an answer. The
     // app is told it was stopped
     const run = this.agentRuns.get(sessionId)
@@ -4306,6 +4337,8 @@ export class SessionManager {
       listSessions: async () => (off() ? [] : view.listSessions()),
       readSession: async (...a) => (off() ? { ok: false, error: offError } : view.readSession(...a)),
       recall: async (...a) => (off() ? { hits: [] } : view.recall(...a)),
+      // The one reach outside its project (#371 part B) — behind the person's consent for the pair, inside askProject
+      askProject: async (opts, signal) => (off() ? { ok: false, error: offError } : this.askProject(sessionId, opts, signal)),
       sendToSession: refuse,
       deleteWorktreeSession: refuse,
       createSession: refuse,
@@ -4545,6 +4578,10 @@ export class SessionManager {
           lines: picked.map((l) => (l.length > 2000 ? l.slice(0, 2000) + '…' : l)),
         }
       },
+
+      // Only an ordinary session asks another project (#371): the orchestrator, managers and coordinators already
+      // direct sessions with send_to_session, inside their own view
+      askProject: async () => ({ ok: false, error: 'Only an ordinary project session can ask another project' }),
 
       sendToSession: async (sessionId, text, reportBack) => {
         /*
@@ -4914,28 +4951,310 @@ export class SessionManager {
    * requesting app's own slot instead. If the signal fires (timed out, canceled), the card or question
    * is torn down and this ends with null.
    */
+  /**
+   * Whether a session of one project may reach another (#371) — the one gate for both parts: 'delegate'
+   * (ask_project) and 'apps' (another project's app tools). Same project needs no consent. A remembered "always" for
+   * the pair and kind passes at once; otherwise a card stands in the calling session (the same slot as an approval,
+   * so it waits behind one already up) until the person answers or `signal` fires.
+   *
+   *   allow once   passes this call only
+   *   always       remembered for (caller's project, target, kind) — listed and revoked in Settings
+   *   deny         refused, and not remembered: the next call asks again, like a denied approval
+   *
+   * The refusal is worded for the model that called: what happened and that it should not retry on its own.
+   */
+  async ensureProjectAccess(
+    callerSessionId: string,
+    toProjectId: string,
+    access: ProjectConsentKind,
+    what: { text: string; app?: { appId: string; name: string } },
+    signal?: AbortSignal,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const caller = this.meta.get(callerSessionId)
+    if (!caller) return { ok: false, error: 'The calling session is gone' }
+    const fromId = caller.projectId
+    if (!fromId) return { ok: false, error: 'This session belongs to no project, so it cannot reach another project' }
+    if (fromId === toProjectId) return { ok: true }
+    const projects = this.store.listProjects()
+    const from = projects.find((p) => p.id === fromId)
+    const to = projects.find((p) => p.id === toProjectId)
+    if (!from || !to) return { ok: false, error: 'That project is no longer registered' }
+    if (this.store.getProjectConsent(fromId, toProjectId, access)) return { ok: true }
+    const decision = await new Promise<HostAskAnswer>((resolve) => {
+      if (signal?.aborted) return resolve(null)
+      const requestId = `xp-${randomUUID()}`
+      const ask: HostAsk = {
+        requestId,
+        sessionId: callerSessionId,
+        detail: {
+          kind: 'project_access',
+          access,
+          from: { id: from.id, name: from.name },
+          to: { id: to.id, name: to.name },
+          text: what.text,
+          ...(what.app ? { app: what.app } : {}),
+        },
+        shown: false,
+        resolve,
+      }
+      this.hostAsks.set(requestId, ask)
+      signal?.addEventListener('abort', () => {
+        if (!this.hostAsks.delete(requestId)) return
+        // An unanswerable card is never left behind
+        const m = this.meta.get(callerSessionId)
+        if (m?.pendingApproval?.requestId === requestId) this.onEvent({ type: 'approval_resolved', sessionId: callerSessionId, requestId, decision: 'deny' })
+        resolve(null)
+      }, { once: true })
+      this.raiseHostAsks(callerSessionId)
+    })
+    if (decision === 'always') {
+      this.store.setProjectConsent(fromId, toProjectId, access)
+      this.emit({ type: 'project_consents_changed' })
+      return { ok: true }
+    }
+    if (decision === 'allow') return { ok: true }
+    if (decision === 'deny') {
+      return { ok: false, error: `The person did not allow ${from.name} to reach ${to.name} this way. Do not ask again unless they tell you to.` }
+    }
+    return { ok: false, error: `The question to the person was withdrawn before they answered, so ${to.name} was not reached.` }
+  }
+
+  /** Every remembered cross-project consent, with the projects' names as they are now (#371, Settings) */
+  projectConsents(): ProjectConsent[] {
+    const names = new Map(this.store.listProjects().map((p) => [p.id, p.name]))
+    return this.store.listProjectConsents().map((c) => ({
+      ...c,
+      fromName: names.get(c.fromProjectId) ?? '(project no longer exists)',
+      toName: names.get(c.toProjectId) ?? '(project no longer exists)',
+    }))
+  }
+
+  /** Revokes one remembered consent (#371) — the next reach asks again. A delegation already running is left to finish */
+  revokeProjectConsent(fromProjectId: string, toProjectId: string, kind: ProjectConsentKind): void {
+    if (this.store.forgetProjectConsent(fromProjectId, toProjectId, kind)) this.emit({ type: 'project_consents_changed' })
+  }
+
+  /** Whether a session may read this path because another project handed it back (#371, `CreateSessionOpts.mayRead`) */
+  private mayRead(sessionId: string, path: string, cwd: string): boolean {
+    const grants = this.readGrants.get(sessionId)
+    return !!grants && grants.size > 0 && underGrant(path, grants, cwd)
+  }
+
+  /**
+   * ask_project (#371 part B): a session in one project asks another project to do a task, and gets its answer back.
+   *
+   *   1. The target is another registered project, named by name or id. Its own project is refused (do it here),
+   *      and a session that was itself asked by another project cannot ask a third: depth one, so two projects
+   *      that consented to each other cannot bounce a task between them without a person.
+   *   2. The person's consent for the pair (`ensureProjectAccess`, kind 'delegate').
+   *   3. A session in the target: the idle one this caller asked there before, else a new one with that project's
+   *      folder, instructions and default tool, under the `normal` preset — what a session the person opens there
+   *      gets, so its own approvals stand as cards in that session, where the person sees them. Marked `askedBy`.
+   *   4. The task goes in a frame (`askFrame`) marked as sent by the caller, and the call waits for the turn, up to
+   *      `ASK_WAIT_MS`. Past it the answer is "still working" and a call with no task waits again.
+   *   5. The final answer comes back cut to size, and the paths it names inside the target project become readable
+   *      to the caller (`readableGrants`).
+   *
+   * Stop on the caller, the call's own signal, or the person deleting either session ends the wait; the first two
+   * stop the delegated turn as well.
+   */
+  async askProject(callerId: string, opts: { project: string; task?: string }, signal?: AbortSignal): Promise<AskProjectResult> {
+    const caller = this.meta.get(callerId)
+    if (!caller?.projectId) return { ok: false, error: 'This session belongs to no project, so it cannot ask another one' }
+    if (caller.askedBy) {
+      return { ok: false, error: 'This session was itself asked by another project, so it cannot ask a third — say in your answer what is needed instead.' }
+    }
+    const projects = this.store.listProjects()
+    const wanted = opts.project.trim()
+    const target =
+      projects.find((p) => p.id === wanted) ??
+      projects.find((p) => p.name === wanted) ??
+      projects.find((p) => p.name.toLowerCase() === wanted.toLowerCase())
+    if (!target) {
+      const others = projects.filter((p) => p.id !== caller.projectId).map((p) => p.name)
+      return {
+        ok: false,
+        error: others.length
+          ? `No project named "${wanted}". The other projects are: ${others.join(', ')}.`
+          : `No project named "${wanted}" — this is the only project in Centralu.`,
+      }
+    }
+    if (target.id === caller.projectId) return { ok: false, error: `${target.name} is this session's own project — do the work here.` }
+
+    const key = `${callerId}>${target.id}`
+    const pending = this.delegations.get(key)
+    if (pending && !opts.task) return this.awaitDelegation(key, pending, signal)
+    if (pending && !pending.settled) {
+      return {
+        ok: false,
+        error: `${target.name} is still working on your last task in the session "${this.meta.get(pending.sessionId)?.name ?? pending.sessionId}". Call ask_project with project "${target.name}" and no task to wait for it.`,
+      }
+    }
+    // An answer the caller never came back for gives way to the new task
+    if (pending) this.delegations.delete(key)
+    if (!opts.task) return { ok: false, error: `Give a task: what ${target.name} should do.` }
+
+    const consent = await this.ensureProjectAccess(callerId, target.id, 'delegate', { text: taskLine(opts.task) }, signal)
+    if (!consent.ok) return consent
+
+    // The idle session this caller asked there before keeps its context: the second ask ("now fix the one that
+    // came out wrong") builds on the first. Busy means the person took it over; a new one is opened instead
+    const reuse = [...this.meta.values()]
+      // Done with its turn (waiting_input) or at rest (idle); working or waiting on an approval is busy
+      .filter((s) => s.askedBy === callerId && s.projectId === target.id && s.kind === 'worker' && (s.state === 'idle' || s.state === 'waiting_input') && !this.agentRuns.has(s.id))
+      .sort((a, b) => b.createdAt - a.createdAt)[0]
+    let delegatedId: string
+    if (reuse) {
+      delegatedId = reuse.id
+    } else {
+      const tool = target.defaultTool && this.adapters.has(target.defaultTool) ? target.defaultTool : this.firstTool()
+      const adapter = this.adapters.get(tool)!
+      const found = await adapter.detect()
+      if (!found.installed || !found.loggedIn) {
+        return { ok: false, error: `${target.name}'s agent (${adapter.descriptor.label}) cannot take the task: ${found.detail}` }
+      }
+      try {
+        // The model and effort a session the person opens there would start on (the project's remembered choice, #107)
+        const remembered = this.store.projectToolDefaults(target.id)[tool]
+        const info = await this.createSession({
+          projectId: target.id,
+          cwd: target.path,
+          tool,
+          ...(remembered?.model ? { model: remembered.model } : {}),
+          ...(remembered?.effort ? { effort: remembered.effort } : {}),
+          permissionPreset: 'normal',
+          askedBy: callerId,
+        })
+        delegatedId = info.id
+      } catch (e) {
+        return { ok: false, error: `Could not open a session in ${target.name}: ${(e as Error).message}` }
+      }
+      const callerProject = projects.find((p) => p.id === caller.projectId)?.name ?? 'another project'
+      this.rename(delegatedId, `Asked by ${callerProject} · ${new Date().toTimeString().slice(0, 5)}`)
+    }
+
+    const d = this.startDelegation(key, callerId, delegatedId, target)
+    const callerProject = projects.find((p) => p.id === caller.projectId)?.name ?? 'another project'
+    try {
+      await this.deliver(delegatedId, askFrame(callerProject, opts.task), undefined, { sessionId: callerId, name: this.labelOf(caller) }, false)
+    } catch (e) {
+      this.delegations.delete(key)
+      if (this.agentRuns.get(delegatedId) === d.wait) this.agentRuns.delete(delegatedId)
+      return { ok: false, error: `Could not hand the task to ${target.name}: ${(e as Error).message}` }
+    }
+    return this.awaitDelegation(key, d, signal)
+  }
+
+  /** Registers the wait on the delegated session's turn (the same watcher an app's agent uses, `AgentRunWait`) */
+  private startDelegation(key: string, callerId: string, sessionId: string, target: { id: string; name: string; path: string }): Delegation {
+    let notice: string | undefined
+    const wait = new AgentRunWait((message) => (notice = message), () => this.meta.get(sessionId)?.name ?? 'the session')
+    const d: Delegation = {
+      callerId,
+      sessionId,
+      target,
+      wait,
+      settled: false,
+      notice: () => notice,
+      outcome: wait.done.then(
+        () => ({ ok: true as const }),
+        (e: Error) => ({ ok: false as const, error: e.message }),
+      ),
+      stop: (why) => {
+        if (d.settled) return
+        try {
+          this.handles.get(sessionId)?.interrupt()
+        } catch {
+          // The session has already gone down — there is nothing left to stop
+        }
+        wait.fail(new Error(`${why}, so the delegated turn was stopped`))
+      },
+    }
+    void d.outcome.then(() => {
+      d.settled = true
+      if (this.agentRuns.get(sessionId) === wait) this.agentRuns.delete(sessionId)
+    })
+    this.agentRuns.set(sessionId, wait)
+    this.delegations.set(key, d)
+    return d
+  }
+
+  /** Waits for a delegation up to the bound, and turns its outcome into what the caller reads */
+  private async awaitDelegation(key: string, d: Delegation, signal?: AbortSignal): Promise<AskProjectResult> {
+    const sessionName = () => this.meta.get(d.sessionId)?.name ?? d.sessionId
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let onAbort: (() => void) | undefined
+    const bound = new Promise<'bound'>((resolve) => (timer = setTimeout(() => resolve('bound'), ASK_WAIT_MS)))
+    const aborted = new Promise<'aborted'>((resolve) => {
+      if (!signal) return
+      onAbort = () => resolve('aborted')
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      const r = await Promise.race([d.outcome, bound, aborted])
+      if (r === 'aborted') {
+        d.stop('the call that asked was cancelled')
+        await d.outcome
+        this.delegations.delete(key)
+        return { ok: false, error: `The call was cancelled, so ${d.target.name}'s session "${sessionName()}" was stopped.` }
+      }
+      if (r === 'bound') {
+        const notice = d.notice()
+        return { ok: true, state: 'working', project: d.target.name, sessionId: d.sessionId, sessionName: sessionName(), ...(notice ? { notice } : {}) }
+      }
+      if (this.delegations.get(key) === d) this.delegations.delete(key)
+      if (!r.ok) {
+        return {
+          ok: false,
+          error: `${d.target.name}'s session "${sessionName()}" [${d.sessionId}] did not finish: ${r.error}. Tell the person, or ask again with a clearer task.`,
+        }
+      }
+      const answer = finalAnswer(this.store.loadMessages(d.sessionId, 50))
+      const { granted, outside } = readableGrants(pathsIn(answer), d.target.path)
+      if (granted.length) {
+        const set = this.readGrants.get(d.callerId) ?? new Set<string>()
+        for (const g of granted) set.add(g)
+        this.readGrants.set(d.callerId, set)
+      }
+      return {
+        ok: true,
+        state: 'done',
+        project: d.target.name,
+        sessionId: d.sessionId,
+        sessionName: sessionName(),
+        answer: clipAnswer(answer, sessionName()),
+        readable: granted,
+        outside,
+      }
+    } finally {
+      clearTimeout(timer)
+      if (onAbort) signal?.removeEventListener('abort', onAbort)
+    }
+  }
+
   private askCapability(q: CapabilityQuestion, signal: AbortSignal): Promise<'allow' | 'deny' | null> {
     return new Promise((resolve) => {
       if (signal.aborted) return resolve(null)
       const app = { appId: q.app.appId, projectId: q.app.projectId, name: q.appName }
       if (q.origin.kind === 'session' && this.meta.has(q.origin.sessionId)) {
         const requestId = `cap-${randomUUID()}`
-        const ask = {
+        const ask: HostAsk = {
           requestId,
           sessionId: q.origin.sessionId,
           detail: { kind: 'capability' as const, app, capability: q.capability, text: q.text },
           shown: false,
-          resolve,
+          resolve: (d) => resolve(d === 'always' ? 'allow' : d),
         }
-        this.capabilityAsks.set(requestId, ask)
+        this.hostAsks.set(requestId, ask)
         signal.addEventListener('abort', () => {
-          if (!this.capabilityAsks.delete(requestId)) return
+          if (!this.hostAsks.delete(requestId)) return
           // If the card is still showing, it is closed — an unanswerable card is never left behind
           const m = this.meta.get(ask.sessionId)
           if (m?.pendingApproval?.requestId === requestId) this.onEvent({ type: 'approval_resolved', sessionId: ask.sessionId, requestId, decision: 'deny' })
           resolve(null)
         }, { once: true })
-        this.raiseCapabilityAsks(ask.sessionId)
+        this.raiseHostAsks(ask.sessionId)
         return
       }
       const origin = q.origin.kind === 'view' ? q.origin.app : q.app
@@ -4960,10 +5279,10 @@ export class SessionManager {
    * and then closes, ours is raised **again** — but without recording it a second time (so the
    * conversation never ends up with the same card as two separate lines).
    */
-  private raiseCapabilityAsks(sessionId: string): void {
+  private raiseHostAsks(sessionId: string): void {
     const m = this.meta.get(sessionId)
     if (!m || m.pendingApproval) return
-    const next = [...this.capabilityAsks.values()].find((a) => a.sessionId === sessionId)
+    const next = [...this.hostAsks.values()].find((a) => a.sessionId === sessionId)
     if (!next) return
     const e = { type: 'approval_request' as const, sessionId, requestId: next.requestId, detail: next.detail }
     if (!next.shown) {
@@ -6014,8 +6333,8 @@ export class SessionManager {
     this.watchers.close()
     this.appsHub?.rt.attachBrokerHost(null)
     for (const run of [...this.agentRuns.values()]) run.fail(new Error('Centralu is shutting down'))
-    for (const ask of [...this.capabilityAsks.values()]) ask.resolve(null)
-    this.capabilityAsks.clear()
+    for (const ask of [...this.hostAsks.values()]) ask.resolve(null)
+    this.hostAsks.clear()
     for (const q of [...this.appQuestions.values()]) q.resolve(null)
     this.appQuestions.clear()
     this.appsHub?.dispose()
@@ -6051,8 +6370,8 @@ export class SessionManager {
     this.watchers.close()
     this.appsHub?.rt.attachBrokerHost(null)
     for (const run of [...this.agentRuns.values()]) run.fail(new Error('Centralu is restarting'))
-    for (const ask of [...this.capabilityAsks.values()]) ask.resolve(null)
-    this.capabilityAsks.clear()
+    for (const ask of [...this.hostAsks.values()]) ask.resolve(null)
+    this.hostAsks.clear()
     for (const q of [...this.appQuestions.values()]) q.resolve(null)
     this.appQuestions.clear()
     this.appsHub?.dispose()
@@ -6094,4 +6413,32 @@ function externalMissingReason(label: string, cwd: string): string {
 function truncate(s: string, max = 40): string {
   const oneLine = s.replace(/\s+/g, ' ').trim()
   return oneLine.length > max ? oneLine.slice(0, max) + '…' : oneLine
+}
+
+/** The answer to a card the host raised: the three of an approval, or null when it was withdrawn unanswered */
+type HostAskAnswer = 'allow' | 'always' | 'deny' | null
+
+/** A card the host raised in a session's approval slot (M4 D-4, #371) — see `SessionManager.hostAsks` */
+type HostAsk = {
+  requestId: string
+  sessionId: string
+  detail: Extract<ApprovalDetail, { kind: 'capability' | 'project_access' }>
+  shown: boolean
+  resolve: (d: HostAskAnswer) => void
+}
+
+/** One ask_project call's work in the target project (#371 part B) — see `SessionManager.delegations` */
+type Delegation = {
+  callerId: string
+  /** The delegated session, in the target project */
+  sessionId: string
+  target: { id: string; name: string; path: string }
+  wait: AgentRunWait
+  /** The turn's outcome, never rejecting */
+  outcome: Promise<{ ok: true } | { ok: false; error: string }>
+  settled: boolean
+  /** What the delegated session waits on, when it waits on the person */
+  notice(): string | undefined
+  /** Stops the delegated turn and ends the wait with the reason */
+  stop(why: string): void
 }

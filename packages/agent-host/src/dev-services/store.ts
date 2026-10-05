@@ -1501,6 +1501,59 @@ export class Store {
           if (!cols.has('span_rows')) this.db.exec(`ALTER TABLE grid_layout ADD COLUMN span_rows INTEGER`)
         },
       },
+      {
+        to: 44,
+        breaksOlderReaders: false,
+        /**
+         * The person's consent for one project to reach another (#371) — `project_consents`, one row per
+         * (from, to, kind) the person allowed "always".
+         *
+         *   from_project_id  the project whose session asks
+         *   to_project_id    the project it reaches
+         *   kind             what it may do there: 'delegate' (ask_project starts a session in the target, part B) or
+         *                    'apps' (the target's apps attach to the caller's session, part A). One table for both, so
+         *                    Settings lists every cross-project consent in one place and revoking reads the same row
+         *   decided_at       when the person said "always"
+         *
+         * Only "always" is stored: "once" lives for that call, and a denial is not remembered (the next call asks
+         * again, the same as a denied approval). Both project ids are foreign keys with CASCADE (better-sqlite3 turns
+         * the pragma on for every connection), so a project deleted takes its consents with it either way round, and a
+         * folder registered again is asked again.
+         *
+         * **Expand only (#292's rule).** A new table; an older host never reads it.
+         */
+        run: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS project_consents (
+              from_project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              to_project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              kind            TEXT NOT NULL,
+              decided_at      INTEGER NOT NULL,
+              PRIMARY KEY (from_project_id, to_project_id, kind)
+            )
+          `)
+        },
+      },
+      {
+        to: 45,
+        breaksOlderReaders: false,
+        /**
+         * The session that asked for this one (#371 part B) — `sessions.asked_by_session_id`, set when another
+         * project's session started it through ask_project. On the row, like `parent_session_id`, because the mark
+         * must outlive the process: the person reads "asked by" on the session and follows the link back after a
+         * restart, and the next ask from the same caller reuses the session it already asked.
+         *
+         * Not a foreign key: the caller can go to the trash or be deleted for good while the delegated session stays,
+         * and the mark then names a session no longer here (the screen says so) rather than vanishing.
+         *
+         * **Expand only (#292's rule).** A nullable column; an older host's upsert does not name it and leaves it as
+         * it was.
+         */
+        run: () => {
+          const cols = this.db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[]
+          if (!cols.some((c) => c.name === 'asked_by_session_id')) this.db.exec(`ALTER TABLE sessions ADD COLUMN asked_by_session_id TEXT`)
+        },
+      },
     ]
   }
 
@@ -1955,8 +2008,8 @@ export class Store {
   upsertSession(s: SessionInfo): void {
     this.db
       .prepare(
-        `INSERT INTO sessions (id, project_id, tool, external_id, name, auto_named, state, is_orchestrator, last_read_seq, waiting_since, created_at, model, effort, verbosity, service_tier, permission_preset, imported_from, worktree_path, worktree_branch, worktree_base, parent_session_id, scope_session_ids, role_append, app_id, context_used, context_window, context_exactness)
-         VALUES (@id, @projectId, @tool, @externalId, @name, @autoNamed, @state, @isOrchestrator, @lastReadSeq, @waitingSince, @createdAt, @model, @effort, @verbosity, @serviceTier, @permissionPreset, @importedFrom, @worktreePath, @worktreeBranch, @worktreeBase, @parentSessionId, @scopeSessionIds, @roleAppend, @appId, @contextUsed, @contextWindow, @contextExactness)
+        `INSERT INTO sessions (id, project_id, tool, external_id, name, auto_named, state, is_orchestrator, last_read_seq, waiting_since, created_at, model, effort, verbosity, service_tier, permission_preset, imported_from, worktree_path, worktree_branch, worktree_base, parent_session_id, scope_session_ids, role_append, app_id, asked_by_session_id, context_used, context_window, context_exactness)
+         VALUES (@id, @projectId, @tool, @externalId, @name, @autoNamed, @state, @isOrchestrator, @lastReadSeq, @waitingSince, @createdAt, @model, @effort, @verbosity, @serviceTier, @permissionPreset, @importedFrom, @worktreePath, @worktreeBranch, @worktreeBase, @parentSessionId, @scopeSessionIds, @roleAppend, @appId, @askedBy, @contextUsed, @contextWindow, @contextExactness)
          ON CONFLICT(id) DO UPDATE SET
            tool = excluded.tool,
            external_id = excluded.external_id, name = excluded.name, auto_named = excluded.auto_named,
@@ -1972,6 +2025,7 @@ export class Store {
            scope_session_ids = excluded.scope_session_ids,
            role_append = excluded.role_append,
            app_id = excluded.app_id,
+           asked_by_session_id = excluded.asked_by_session_id,
            context_used = excluded.context_used, context_window = excluded.context_window,
            context_exactness = excluded.context_exactness`,
       )
@@ -1992,6 +2046,7 @@ export class Store {
         scopeSessionIds: s.scopeSessionIds ? JSON.stringify(s.scopeSessionIds) : null,
         roleAppend: s.roleAppend ?? null,
         appId: s.appId ?? null,
+        askedBy: s.askedBy ?? null,
         /*
          * Context rides the ordinary upsert (issue #48), which the manager already runs after
          * every event — so a reading is on disk the instant it arrives, with no second write
@@ -2129,6 +2184,7 @@ export class Store {
                 s.worktree_base as worktreeBase,
                 s.parent_session_id as parentSessionId,
                 s.scope_session_ids as scopeSessionIdsJson, s.role_append as roleAppend, s.app_id as appId,
+                s.asked_by_session_id as askedBy,
                 s.context_used as contextUsed, s.context_window as contextWindow,
                 s.context_exactness as contextExactness,
                 COALESCE((SELECT MAX(seq) FROM messages m WHERE m.session_id = s.id), 0) as lastSeq
@@ -3085,7 +3141,51 @@ export class Store {
       )
       .all(appKey) as AppPermissionRecord[]
   }
+
+  // ── The person's "always" for one project reaching another (#371) — see migration v44 ──
+
+  getProjectConsent(fromProjectId: string, toProjectId: string, kind: ProjectConsentKind): ProjectConsent | null {
+    const row = this.db
+      .prepare(
+        `SELECT from_project_id as fromProjectId, to_project_id as toProjectId, kind, decided_at as decidedAt
+           FROM project_consents WHERE from_project_id = ? AND to_project_id = ? AND kind = ?`,
+      )
+      .get(fromProjectId, toProjectId, kind) as ProjectConsent | undefined
+    return row ?? null
+  }
+
+  setProjectConsent(fromProjectId: string, toProjectId: string, kind: ProjectConsentKind): void {
+    this.db
+      .prepare(
+        `INSERT INTO project_consents (from_project_id, to_project_id, kind, decided_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(from_project_id, to_project_id, kind) DO UPDATE SET decided_at = excluded.decided_at`,
+      )
+      .run(fromProjectId, toProjectId, kind, Date.now())
+  }
+
+  forgetProjectConsent(fromProjectId: string, toProjectId: string, kind: ProjectConsentKind): boolean {
+    return (
+      this.db
+        .prepare(`DELETE FROM project_consents WHERE from_project_id = ? AND to_project_id = ? AND kind = ?`)
+        .run(fromProjectId, toProjectId, kind).changes > 0
+    )
+  }
+
+  listProjectConsents(): ProjectConsent[] {
+    return this.db
+      .prepare(
+        `SELECT from_project_id as fromProjectId, to_project_id as toProjectId, kind, decided_at as decidedAt
+           FROM project_consents ORDER BY decided_at DESC`,
+      )
+      .all() as ProjectConsent[]
+  }
 }
+
+/** What a remembered cross-project consent allows (#371): 'delegate' is part B's ask_project, 'apps' part A's app tools */
+export type ProjectConsentKind = 'delegate' | 'apps'
+
+/** One remembered "always" from one project to another (#371, migration v44) */
+export type ProjectConsent = { fromProjectId: string; toProjectId: string; kind: ProjectConsentKind; decidedAt: number }
 
 /**
  * What a session in the trash remembers (`sessions.trash`, #204).

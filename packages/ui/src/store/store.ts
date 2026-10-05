@@ -30,6 +30,7 @@ import {
   countWaiting,
   notificationFor,
   suggestMatcher,
+  projectAccessQuestion,
   DEFAULT_NOTIFY_POLICY,
   type NotifyPolicy,
   bumpSeq,
@@ -786,6 +787,8 @@ export type AppState = {
   appQuestions: AppQuestion[]
   /** How many times the questions changed — the signal for wherever remembered answers are shown (the runs panel) to re-read */
   appQuestionsVersion: number
+  /** How many times a remembered cross-project consent was added or revoked (#371) — Settings re-reads its list on it */
+  projectConsentsVersion: number
   refreshAppQuestions(): Promise<void>
   /** Answers a capability question — a failure (the question is already closed) is reported as a toast and the list is re-read */
   answerAppQuestion(questionId: string, decision: 'allow' | 'deny'): Promise<void>
@@ -2433,6 +2436,7 @@ export const useStore = create<AppState>((set, get) => ({
   lastGoodThemes: {} as Record<string, ThemeFileEntry>,
   appQuestions: [] as AppQuestion[],
   appQuestionsVersion: 0,
+  projectConsentsVersion: 0,
   skillProposals: [] as { name: string; content: string; why?: string }[],
   history: {},
   subagentSteps: {},
@@ -2602,6 +2606,7 @@ export const useStore = create<AppState>((set, get) => ({
             projectId: s.projectId,
             kind: s.kind,
             appId: s.appId,
+            askedBy: s.askedBy ?? null,
             name: s.name,
             tool: s.tool,
             model: s.model,
@@ -2972,6 +2977,12 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
 
+    // A cross-project consent was remembered or revoked (#371) — Settings' list re-reads on the version
+    if (e.type === 'project_consents_changed') {
+      set((s) => ({ projectConsentsVersion: s.projectConsentsVersion + 1 }))
+      return
+    }
+
     // A capability question was created or closed (M4 D-4) — same coarseness, the whole list is re-read
     if (e.type === 'external_app_questions_changed') {
       void get().refreshAppQuestions()
@@ -3128,6 +3139,7 @@ export const useStore = create<AppState>((set, get) => ({
                 projectId: s.projectId,
                 kind: s.kind,
                 appId: s.appId,
+                askedBy: s.askedBy ?? null,
                 name: s.name,
                 tool: s.tool,
                 model: s.model,
@@ -4511,10 +4523,14 @@ export const useStore = create<AppState>((set, get) => ({
        * anything at all.
        */
       if (decision === 'always') {
+        const access = pending?.detail.kind === 'project_access' ? pending.detail : null
         set({
-          toast: matcher
-            ? `Always allow in ${scope === 'project' ? 'this project' : 'this session'}: ${matcher}`
-            : 'Allowed once — this kind of request cannot be always-allowed yet',
+          toast: access
+            ? // A cross-project consent is remembered by the host for the pair, not by a matcher (#371)
+              `Always allowed: ${access.from.name} → ${access.to.name}. Revoke it in Settings.`
+            : matcher
+              ? `Always allow in ${scope === 'project' ? 'this project' : 'this session'}: ${matcher}`
+              : 'Allowed once — this kind of request cannot be always-allowed yet',
         })
       }
       /*
@@ -5888,7 +5904,9 @@ function appendChat(items: ChatItem[], e: NormalizedEvent): ChatItem[] {
                 ? e.detail.path
                 : e.detail.kind === 'capability'
                   ? `${e.detail.app.name} wants to ${e.detail.text}`
-                  : e.detail.raw,
+                  : e.detail.kind === 'project_access'
+                    ? projectAccessQuestion(e.detail)
+                    : e.detail.raw,
         },
       ]
     case 'approval_resolved':
