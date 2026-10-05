@@ -134,11 +134,6 @@ function withTimeout<T>(p: Promise<T>, ms: number, label = 'A call'): Promise<T>
   ])
 }
 
-/** Pre-trust status reads may inspect names, but may not run repository-configured helpers. */
-function projectGitStatusOptions(trusted: boolean) {
-  return trusted ? {} : { disableFsmonitor: true, ignoreSubmodules: true }
-}
-
 /**
  * Maximum number of lines of conversation to load. The older side is cut off first.
  * Pushing a session with hundreds of turns in whole makes the first render noticeably slow,
@@ -961,7 +956,7 @@ export class SessionManager {
      * noticed (2026-08-27, caught by a test while adding the remember-tool feature).
      */
     const row = this.store.listProjects().find((p) => p.id === id)
-    const git = await gitSummary(path, projectGitStatusOptions(row?.trusted ?? false))
+    const git = await gitSummary(path, { trusted: row?.trusted ?? false })
     const stored = row?.defaultTool
     return {
       id, path, name: basename(path), defaultTool: stored === 'codex' ? 'codex' : 'claude',
@@ -1270,7 +1265,7 @@ export class SessionManager {
      */
     let worktree: Worktree | null = null
     if (params.worktree && params.projectId) {
-      const summary = await gitSummary(params.cwd, projectGitStatusOptions(this.projectTrusted(params.projectId)))
+      const summary = await gitSummary(params.cwd, this.gitTrust(params.projectId))
       if (!summary.isRepo || summary.denied) {
         throw Object.assign(
           new Error(
@@ -1459,7 +1454,7 @@ export class SessionManager {
          * failure. Since `-b` fails if the name already exists, any branch that got this far was just
          * created by this call, and has not a single commit on it.
          */
-        await gitBranchDelete(params.cwd, worktree.branch).catch(() => {})
+        await gitBranchDelete(params.cwd, worktree.branch, this.gitTrust(params.projectId)).catch(() => {})
       }
       const msg = (err as Error).message
       throw Object.assign(new Error(`Could not start ${params.tool} session: ${msg}`), { code: 'internal' })
@@ -3925,7 +3920,7 @@ export class SessionManager {
   ): Promise<{ path: string; branch: string; dirty: boolean; changedFiles: number } | null> {
     const m = this.meta.get(sessionId)
     if (!m?.worktree) return null
-    const { dirty, changedFiles } = await gitWorktreeDirty(m.worktree.path).catch(() => ({
+    const { dirty, changedFiles } = await gitWorktreeDirty(m.worktree.path, this.gitTrust(m.projectId)).catch(() => ({
       dirty: false,
       changedFiles: 0,
     }))
@@ -4089,11 +4084,20 @@ export class SessionManager {
     return p.path
   }
 
+  /**
+   * The project's trust as a git read needs it (#407): before trust, a read runs none of the
+   * repository's hooks, filters, textconv or fsmonitor (`git-exec.ts`). Read fresh on every call,
+   * like `projectTrusted`.
+   */
+  gitTrust(projectId: string | null): { trusted: boolean } {
+    return { trusted: this.projectTrusted(projectId) }
+  }
+
   gitStatusFiles(projectId: string) {
-    return gitStatusFiles(this.cwdOf(projectId), projectGitStatusOptions(this.projectTrusted(projectId)))
+    return gitStatusFiles(this.cwdOf(projectId), this.gitTrust(projectId))
   }
   gitDiff(projectId: string, path: string, staged?: boolean) {
-    return gitDiff(this.cwdOf(projectId), path, { staged })
+    return gitDiff(this.cwdOf(projectId), path, { staged, ...this.gitTrust(projectId) })
   }
   async gitLog(projectId: string, limit?: number) {
     const commits = await gitLog(this.cwdOf(projectId), limit)
@@ -4105,17 +4109,17 @@ export class SessionManager {
     )
   }
   gitCommitDetail(projectId: string, sha: string) {
-    return gitCommitDetail(this.cwdOf(projectId), sha)
+    return gitCommitDetail(this.cwdOf(projectId), sha, this.gitTrust(projectId))
   }
   gitBranches(projectId: string) {
     return gitBranches(this.cwdOf(projectId))
   }
   /** Things a fresh worktree will not have (#76) — used to point out candidates to copy */
   gitIgnoredEntries(projectId: string) {
-    return gitIgnoredEntries(this.cwdOf(projectId))
+    return gitIgnoredEntries(this.cwdOf(projectId), undefined, this.gitTrust(projectId))
   }
   gitCheckout(projectId: string, branch: string, dryRun?: boolean) {
-    return gitCheckout(this.cwdOf(projectId), branch, { dryRun })
+    return gitCheckout(this.cwdOf(projectId), branch, { dryRun, ...this.gitTrust(projectId) })
   }
   gitStage(projectId: string, paths: string[], unstage?: boolean) {
     return gitStage(this.cwdOf(projectId), paths, unstage)
@@ -4129,7 +4133,7 @@ export class SessionManager {
 
   // ── File tree/viewer (C-1) ──
   listDir(projectId: string, path: string) {
-    return listDir(this.cwdOf(projectId), path)
+    return listDir(this.cwdOf(projectId), path, this.gitTrust(projectId))
   }
 
   /**
@@ -4663,7 +4667,7 @@ export class SessionManager {
 
         // Gate 1: uncommitted changes — anything not in any commit simply disappears if deleted.
         // A failed measurement is also treated as dirty: not knowing is never treated as the safe side.
-        const wt = await gitWorktreeDirty(path).catch(() => ({ dirty: true, changedFiles: -1 }))
+        const wt = await gitWorktreeDirty(path, this.gitTrust(target.projectId)).catch(() => ({ dirty: true, changedFiles: -1 }))
         if (wt.dirty) {
           const n = wt.changedFiles >= 0 ? `${wt.changedFiles} ` : ''
           return { ok: false, error: `There are ${n}uncommitted changes — have that session commit (or discard) them, then call this again` }
@@ -4706,7 +4710,7 @@ export class SessionManager {
         await gitWorktreeRemove(cwd, path, true).catch(() => {})
         // Never rolled back on failure: a leftover branch ref costs nothing but a stray badge — it is not a
         // loss
-        await gitBranchDelete(cwd, branch).catch(() => {})
+        await gitBranchDelete(cwd, branch, this.gitTrust(target.projectId)).catch(() => {})
         console.error(`[worktree] manager cleaned up ${branch} (tip ${tip?.slice(0, 8) ?? '?'}, proof: ${proof})`)
         return { ok: true }
       },
@@ -5377,14 +5381,14 @@ export class SessionManager {
         }
         const project = this.store.listProjects().find((p) => p.id === app.projectId)
         if (!project) throw new Error('the project of this app is gone')
-        const summary = await gitSummary(project.path, projectGitStatusOptions(project.trusted))
+        const summary = await gitSummary(project.path, { trusted: project.trusted })
         if (summary.denied) throw new Error("Centralu cannot read this project's folder (the system denied access)")
         if (!summary.isRepo) return { isRepo: false, branch: null, changedFiles: 0, files: [] }
         return {
           isRepo: true,
           branch: summary.branch,
           changedFiles: summary.changedFiles,
-          files: await gitStatusFiles(project.path, projectGitStatusOptions(project.trusted)),
+          files: await gitStatusFiles(project.path, { trusted: project.trusted }),
         }
       }
     }

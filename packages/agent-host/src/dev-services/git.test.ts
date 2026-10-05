@@ -106,12 +106,12 @@ describe('untrusted repository status', () => {
     chmodSync(hook, 0o755)
     git('config', 'core.fsmonitor', hook)
 
-    const untrusted = { disableFsmonitor: true, ignoreSubmodules: true }
+    const untrusted = { trusted: false }
     expect((await gitSummary(d, untrusted)).isRepo).toBe(true)
     expect(await gitStatusFiles(d, untrusted)).toEqual(expect.any(Array))
     expect(existsSync(marker)).toBe(false)
 
-    expect((await gitSummary(d)).isRepo).toBe(true)
+    expect((await gitSummary(d, { trusted: true })).isRepo).toBe(true)
     expect(existsSync(marker)).toBe(true)
   })
 })

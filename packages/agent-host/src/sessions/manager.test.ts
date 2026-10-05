@@ -24,6 +24,7 @@ import type { AdapterCapabilities, ApprovalDecision, GridPanel, NormalizedEvent,
 import { NormalizedEvent as NormalizedEventSchema, sessionLiveDefaults } from '@cc/protocol'
 import type { AgentAdapter, CreateSessionOpts, EventSink, HistoryMessage, OrchestratorTools, SessionHandle } from '../adapters/contract.js'
 import { Store } from '../dev-services/store.js'
+import { plantedRepo } from '../dev-services/planted-repo.test-helpers.js'
 import { SessionManager } from './manager.js'
 import { normalizeNotification } from '../adapters/codex/normalize.js'
 import { createRpcHandler } from '../rpc.js'
@@ -213,27 +214,35 @@ describe('projects', () => {
     await expect(rpc('projects.gitStatus', { projectId: 'nope' })).rejects.toThrow(/Project not found/)
   })
 
-  it.skipIf(process.platform === 'win32')('does not run repository fsmonitor before project trust', async () => {
-    const path = mkdtempSync(join(tmpdir(), 'cc-untrusted-git-'))
+  /*
+   * #407: adding a folder is enough for the host to read it, so every read a project's screens make
+   * must run none of the repository's programs until the person trusts it. The reads themselves are
+   * covered one by one in git-untrusted.test.ts; this is the wiring — each door passes the
+   * project's trust, read fresh, rather than a default.
+   */
+  it('runs none of the repository’s programs before project trust, through every door that reads it', async () => {
+    const planted = plantedRepo()
     try {
-      execFileSync('git', ['init', '-q'], { cwd: path })
-      const marker = join(path, 'fsmonitor-ran')
-      const hook = join(path, 'fsmonitor.sh')
-      writeFileSync(hook, `#!/bin/sh\nprintf ran >> "${marker}"\nprintf '2\\n'\n`)
-      chmodSync(hook, 0o755)
-      execFileSync('git', ['config', 'core.fsmonitor', hook], { cwd: path })
-
-      const project = (await rpc('projects.add', { path })) as { id: string }
+      const project = (await rpc('projects.add', { path: planted.dir })) as { id: string }
+      const projectId = project.id
       await rpc('projects.list', {})
-      await rpc('projects.gitStatus', { projectId: project.id })
-      await rpc('git.status', { projectId: project.id })
-      expect(existsSync(marker)).toBe(false)
+      await rpc('projects.gitStatus', { projectId })
+      await rpc('git.status', { projectId })
+      await rpc('git.diff', { projectId, path: 'a.txt' })
+      await rpc('git.diff', { projectId, path: 'new.txt' })
+      await rpc('git.log', { projectId })
+      await rpc('git.commitDetail', { projectId, sha: planted.signed })
+      await rpc('git.ignoredEntries', { projectId })
+      await rpc('git.checkout', { projectId, branch: 'main', dryRun: true })
+      await rpc('fs.listDir', { projectId, path: '' })
+      await rpc('files.search', { projectId, query: 'new' })
+      expect(planted.ran()).toEqual([])
 
-      await rpc('projects.setTrusted', { projectId: project.id, trusted: true })
-      await rpc('projects.gitStatus', { projectId: project.id })
-      expect(existsSync(marker)).toBe(true)
+      await rpc('projects.setTrusted', { projectId, trusted: true })
+      await rpc('projects.gitStatus', { projectId })
+      expect(planted.ran()).toContain('fsmonitor')
     } finally {
-      rmSync(path, { recursive: true, force: true })
+      rmSync(planted.root, { recursive: true, force: true, maxRetries: 5 })
     }
   })
 
