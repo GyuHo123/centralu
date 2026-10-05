@@ -10,6 +10,7 @@ import type { AgentRunRequest, AgentRunResult, AppCheckReport, AppRef, BrokerHos
 import { AgentRunWait, finalAnswer } from './app-agents.js'
 import { ASK_WAIT_MS, askFrame, clipAnswer, pathsIn, readableGrants, taskLine, underGrant } from './ask-project.js'
 import { builderRole } from './app-builder.js'
+import { remember } from './folder-cache.js'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
@@ -360,25 +361,6 @@ const SKILL_MAX_CHARS = 2_000
  */
 
 /**
- * How many tool-and-folder keys the per-folder caches keep (`commandCache`, `externalIndex`).
- *
- * Both are keyed by the session's folder, and a worktree session has a folder of its own, so every worktree ever
- * opened added an entry (a slash-command list can run to tens of KB with skill descriptions) and none was ever
- * removed (#392). Both are memos: the commands are on disk, the index is re-read after 30 s.
- */
-const FOLDER_CACHE_KEYS = 32
-
-/** Sets a key as the most recently used and lets the least recently used go past `cap` */
-export function remember<K, V>(map: Map<K, V>, key: K, value: V, cap = FOLDER_CACHE_KEYS): void {
-  map.delete(key)
-  map.set(key, value)
-  for (const oldest of map.keys()) {
-    if (map.size <= cap) break
-    map.delete(oldest)
-  }
-}
-
-/**
  * Session lifecycle plus persistence. Adapters hold no state (docs/agent-host.md §2), so all state
  * tracking and storage happens here.
  */
@@ -425,7 +407,10 @@ export class SessionManager {
    * sessionId).
    */
   private watchers = new DirWatchers((projectId, dirs) => this.emit({ type: 'fs_changed', projectId, dirs }))
-  /** Slash-command cache per tool and directory (so a list can be returned even before a session is ready) */
+  /**
+   * Slash-command cache per tool and directory (so a list can be returned even before a session is ready). Written
+   * only through `remember`, like `externalIndex`, so it keeps the most recently used keys (folder-cache.ts)
+   */
   private commandCache = new Map<string, CommandInfo[]>()
   /**
    * Conversation a tool holds -> when it was last changed (a short-lived cache).
