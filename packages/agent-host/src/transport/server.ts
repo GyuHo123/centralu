@@ -125,7 +125,8 @@ function wireBytes(frame: string): number {
 }
 
 export class HostServer {
-  readonly log = new EventLog()
+  /** Bounded by the replay budget as well as by count: an event no replay can reach is held for nothing (#392) */
+  readonly log: EventLog
   private wss: WebSocketServer
   private http: Server
   private clients = new Set<WebSocket>()
@@ -170,6 +171,7 @@ export class HostServer {
       replayBudgetBytes: Math.min(opts.replayBudgetBytes ?? TRANSPORT_LIMITS.replayBudgetBytes, maxBufferedBytes),
       closeGraceMs: opts.closeGraceMs ?? TRANSPORT_LIMITS.closeGraceMs,
     }
+    this.log = new EventLog(2000, this.limits.replayBudgetBytes)
     this.http = createServer(createHttpHandler(opts.http))
     this.wss = new WebSocketServer({
       server: this.http,

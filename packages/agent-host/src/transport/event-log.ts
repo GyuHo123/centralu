@@ -8,16 +8,6 @@ import type { NormalizedEvent } from '@cc/protocol'
  */
 export type LoggedEvent = { seq: number; event: NormalizedEvent }
 
-/**
- * How much the buffer may hold, measured in serialised characters, whatever the event count.
- *
- * The count cap alone did not bound memory: a `message_image` event carries its whole base64 image
- * (up to ~11 MB), so 2000 of a screenshot-heavy session's events could pin hundreds of MB for as long
- * as the host stayed quiet afterwards (#392). Past this, the oldest events go first; a client whose
- * cursor falls out is told to resync, exactly as when the count cap pushes it out.
- */
-export const EVENT_LOG_MAX_CHARS = 64 * 1024 * 1024
-
 export class EventLog {
   private buf: LoggedEvent[] = []
   /** Serialised size of each entry in `buf`, index for index */
@@ -39,9 +29,23 @@ export class EventLog {
    */
   readonly streamEpoch: string = randomUUID()
 
+  /**
+   * `maxChars` bounds what the buffer holds, in serialised characters, whatever the event count.
+   *
+   * The count cap alone did not bound memory: a `message_image` event carries its whole base64
+   * image, so 2000 of a screenshot-heavy session's events could pin hundreds of MB for as long as
+   * the host stayed quiet afterwards (#392). Past the cap the oldest events go first, the newest
+   * always stays, and a client whose cursor falls out is told to resync, exactly as when the count
+   * cap pushes it out.
+   *
+   * The host passes its replay budget (`HostServer`): a hello never replays more than that, so an
+   * event further back could only ever be answered with a resync. A character never encodes to
+   * fewer UTF-8 bytes than one (`JSON.stringify` escapes a lone surrogate), so every window that
+   * fits the budget on the wire is still held here. Unbounded when not given.
+   */
   constructor(
     private capacity = 2000,
-    private maxChars = EVENT_LOG_MAX_CHARS,
+    private maxChars = Number.POSITIVE_INFINITY,
   ) {}
 
   get currentSeq(): number {

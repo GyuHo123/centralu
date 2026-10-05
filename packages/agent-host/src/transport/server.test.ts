@@ -785,6 +785,36 @@ describe('host lifetime and replay (#82)', () => {
     expect(events(c).map((f) => f.seq)).toEqual([2, 3])
     c.ws.close()
   })
+
+  /*
+   * #392: the buffer is bounded by the replay budget, not by a fixed size of its own. A hello never
+   * replays more than the budget, so an event further back could only ever be answered with a
+   * resync; holding it costs memory and changes nothing a client sees.
+   */
+  it('holds no more than one replay budget of events, and a cursor pushed out gets a resync', async () => {
+    const { server: srv, port } = await start(undefined, { replayBudgetBytes: 4_096 })
+    for (let i = 0; i < 20; i++) srv.broadcast(ev('z'.repeat(1_000)))
+    // Each event is over 1,000 characters serialised, so at most four fit
+    expect(srv.log.currentSeq).toBe(20)
+    expect(srv.log.oldestSeq).toBeGreaterThanOrEqual(17)
+    const c = await greet(port, { afterSeq: 1, streamEpoch: srv.streamEpoch })
+    expect(c.frames[0]).toMatchObject({ kind: 'hello_ok', resyncRequired: true, currentSeq: 20 })
+    expect(events(c)).toEqual([])
+    c.ws.close()
+  })
+
+  it('keeps the newest event even when it alone is over the replay budget', async () => {
+    const { server: srv, port } = await start(undefined, { replayBudgetBytes: 600 })
+    srv.broadcast(ev('small'))
+    srv.broadcast(ev('x'.repeat(5_000)))
+    expect(srv.log.oldestSeq).toBe(2)
+    expect(srv.log.currentSeq).toBe(2)
+    // Too big to replay, so the client resyncs; the socket stays usable
+    const c = await greet(port, { afterSeq: 1, streamEpoch: srv.streamEpoch })
+    expect(c.frames[0]).toMatchObject({ kind: 'hello_ok', resyncRequired: true, currentSeq: 2 })
+    expect(c.ws.readyState).toBe(WebSocket.OPEN)
+    c.ws.close()
+  })
 })
 
 describe('bounded outbound work (#82)', () => {
