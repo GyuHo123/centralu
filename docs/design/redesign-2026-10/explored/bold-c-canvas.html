@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Direction C: Canvas</title>
+<style>
+  @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css");
+  @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");
+  @import url("https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css");
+  @import url("https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css");
+  :root {
+    --bg: #17181b; --dot: #2a2c31; --card: #202226; --card2: #26282d; --line: #33363c; --line2: #44474e;
+    --ink: #eeeff1; --ink2: #b1b5bd; --ink3: #858a94;
+    --attn: #ff6a3d; --attn-soft: rgb(255 106 61 / 0.14);
+    --add: #4cc27d; --del: #ef6359;
+    --sans: "Pretendard Variable", Pretendard, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg) radial-gradient(var(--dot) 1px, transparent 1.2px) 0 0 / 22px 22px; color: var(--ink);
+    font: 13px/1.45 var(--sans); height: 100vh; overflow: hidden; position: relative; -webkit-font-smoothing: antialiased; }
+  .ph, .ph-fill { font-size: 15px; }
+
+  .region { position: absolute; border: 1px dashed var(--line2); border-radius: 22px; }
+  .region > .rl { position: absolute; top: -12px; left: 18px; background: var(--bg); padding: 2px 10px; font: 600 12px var(--mono); color: var(--ink2); letter-spacing: 0.04em; display: flex; gap: 8px; align-items: center; }
+  .rl .c { color: var(--ink3); font-weight: 400; }
+
+  svg.links { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+  .card { position: absolute; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; display: grid; gap: 6px;
+    box-shadow: 0 18px 40px -24px rgb(0 0 0 / 0.7); }
+  .ch { display: flex; gap: 8px; align-items: center; }
+  .ch b { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ch .sp { flex: 1; }
+  .tm { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--card2); font: 700 10px var(--mono); color: var(--ink2); flex: none; }
+  .line1 { font-size: 12px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .line1 .m { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
+  .st { font-size: 11px; color: var(--ink3); display: flex; gap: 5px; align-items: center; white-space: nowrap; }
+  .spin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line2); border-top-color: var(--ink); }
+  .card.need { border-color: var(--attn); box-shadow: 0 0 0 4px var(--attn-soft), 0 18px 40px -24px rgb(0 0 0 / 0.7); }
+  .card.need .st { color: var(--attn); font-weight: 700; }
+  .card.dim { opacity: 0.55; }
+  .orch { border-radius: 18px; background: linear-gradient(180deg, #2a2c31, var(--card)); }
+
+  /* one card zoomed to working size: the conversation lives inside the canvas */
+  .focus { padding: 0; overflow: hidden; display: grid; grid-template-rows: 44px 1fr auto; }
+  .focus .ch { padding: 0 14px; border-bottom: 1px solid var(--line); }
+  .fb { padding: 14px 16px; display: grid; gap: 10px; align-content: start; font-size: 13.5px; line-height: 1.6; }
+  .fb .you { color: var(--ink2); }
+  .fb code { font: 11.5px var(--mono); background: var(--card2); padding: 1px 4px; border-radius: 4px; }
+  .acts { font: 11.5px var(--mono); color: var(--ink3); }
+  .dec { margin: 0 12px 12px; padding: 12px; border-radius: 10px; background: var(--attn-soft); border: 1px solid var(--attn); display: grid; gap: 9px; }
+  .dec .h { color: var(--attn); font-weight: 700; font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  .dec .cmd { font: 500 13px var(--mono); }
+  .row { display: flex; gap: 6px; }
+  .b { height: 30px; padding: 0 11px; border-radius: 8px; display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 12.5px; border: 1px solid var(--line2); background: var(--card2); }
+  .b.p { background: var(--attn); border-color: var(--attn); color: #1d0b04; }
+  .b kbd { font: 600 10px var(--mono); opacity: 0.75; }
+
+  /* an app sits on the canvas like any session */
+  .app .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 2px; }
+  .app .col { background: var(--card2); border-radius: 8px; padding: 6px; display: grid; gap: 4px; align-content: start; min-height: 74px; }
+  .app .col i { font-style: normal; font-size: 10px; color: var(--ink3); font-weight: 600; }
+  .app .tk { height: 14px; border-radius: 4px; background: #34373d; }
+
+  .opts { display: grid; gap: 4px; }
+  .o { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 8px; background: var(--card2); font-size: 12.5px; }
+  .o kbd { font: 600 10px var(--mono); color: var(--ink3); border: 1px solid var(--line2); border-radius: 4px; padding: 0 4px; }
+  .tool { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; gap: 4px; align-items: center; padding: 6px; border-radius: 14px; background: rgb(32 34 38 / 0.92); border: 1px solid var(--line); }
+  .tool span { height: 32px; min-width: 32px; padding: 0 10px; border-radius: 9px; display: inline-flex; align-items: center; gap: 7px; color: var(--ink2); font-size: 12.5px; }
+  .tool span.sel { background: var(--card2); color: var(--ink); }
+  .tool .attn { color: var(--attn); font-weight: 700; }
+  .tool .div { width: 1px; min-width: 1px; height: 20px; background: var(--line); padding: 0; }
+  .mini { position: absolute; right: 18px; bottom: 18px; width: 168px; height: 104px; border-radius: 12px; background: rgb(32 34 38 / 0.92); border: 1px solid var(--line); }
+  .mini i { position: absolute; border-radius: 3px; background: #3a3d44; }
+  .mini i.n { background: var(--attn); }
+  .mini .vp { position: absolute; left: 22px; top: 18px; width: 108px; height: 64px; border: 1.5px solid var(--ink2); border-radius: 4px; }
+  .top { position: absolute; left: 18px; top: 16px; display: flex; gap: 10px; align-items: center; }
+  .logo { width: 30px; height: 30px; border-radius: 9px; background: var(--ink); color: var(--bg); display: grid; place-items: center; font-weight: 800; }
+  .search { height: 32px; width: 300px; border-radius: 10px; background: rgb(32 34 38 / 0.92); border: 1px solid var(--line); display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--ink3); }
+  .search kbd { margin-left: auto; font: 600 10.5px var(--mono); }
+</style>
+</head>
+<body>
+  <div class="top"><span class="logo">C</span><span class="search"><i class="ph ph-magnifying-glass"></i>Find or start anything<kbd>⌘K</kbd></span></div>
+
+  <svg class="links" viewBox="0 0 1440 900" preserveAspectRatio="none">
+    <defs><marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#5b5f67"/></marker></defs>
+    <path d="M720 150 C 720 200, 300 190, 300 252" stroke="#44474e" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+    <path d="M720 150 C 760 230, 980 210, 1010 300" stroke="#ff6a3d" stroke-width="1.5" stroke-dasharray="5 5" fill="none" marker-end="url(#ar)"/>
+    <path d="M300 340 C 300 380, 230 390, 230 430" stroke="#44474e" stroke-width="1.5" fill="none"/>
+    <text x="842" y="214" fill="#ff6a3d" font-family="JetBrains Mono" font-size="11">ask_project: payments-api</text>
+    <text x="236" y="404" fill="#858a94" font-family="JetBrains Mono" font-size="11">worktree child</text>
+  </svg>
+
+  <!-- orchestrator -->
+  <div class="card orch" style="left:590px; top:76px; width:260px;">
+    <div class="ch"><i class="ph-fill ph-crown-simple"></i><b>Orchestrator</b><span class="sp"></span><span class="st"><span class="spin"></span>watching 7</span></div>
+    <div class="line1">Asked payments-api to fix the retry backoff</div>
+  </div>
+
+  <!-- centralu region -->
+  <div class="region" style="left:60px; top:224px; width:500px; height:604px;"><span class="rl">centralu <span class="c">4 sessions</span></span></div>
+  <div class="card focus need" style="left:86px; top:252px; width:450px; height:336px;">
+    <div class="ch"><span class="tm">X</span><b>Orphaned process cleanup</b><span class="sp"></span><span class="st"><i class="ph-fill ph-diamond"></i>Approve</span></div>
+    <div class="fb">
+      <div class="you">Find only the orphaned processes and stop them. Show me the list first.</div>
+      <div class="acts">read 3 files · ran 2 commands · edited strays.ts <span style="color:var(--add)">+14</span> <span style="color:var(--del)">−3</span></div>
+      <div>Two have no living parent and no keeper hold: <code>40321</code>, a vite dev server from Oct 2, and its esbuild child <code>40388</code>.</div>
+    </div>
+    <div class="dec">
+      <div class="h"><i class="ph-fill ph-diamond"></i>Codex wants to run</div>
+      <div class="cmd">kill -TERM 40321</div>
+      <div class="row"><span class="b p">Allow <kbd>Y</kbd></span><span class="b">Deny <kbd>N</kbd></span><span class="b">Always here <kbd>A</kbd></span></div>
+    </div>
+  </div>
+  <div class="card" style="left:86px; top:604px; width:214px;">
+    <div class="ch"><span class="tm">C</span><b>Composer polish</b></div>
+    <div class="line1">Editing <span class="m">SessionView.tsx</span></div>
+    <div class="st"><span class="spin"></span>working 4m · <span style="color:var(--add)">+38</span> <span style="color:var(--del)">−12</span></div>
+  </div>
+  <div class="card dim" style="left:322px; top:604px; width:214px;">
+    <div class="ch"><span class="tm">C</span><b>Release notes, beta.11</b></div>
+    <div class="line1">Ready to read</div>
+    <div class="st"><i class="ph ph-check-circle"></i>done 38m ago</div>
+  </div>
+  <div class="card app" style="left:86px; top:700px; width:450px;">
+    <div class="ch"><i class="ph ph-kanban"></i><b>project-board</b><span class="sp"></span><span class="st">app</span></div>
+    <div class="cols"><div class="col"><i>To do 4</i><span class="tk"></span><span class="tk"></span></div><div class="col"><i>Doing 2</i><span class="tk"></span><span class="tk"></span></div><div class="col"><i>Done 9</i><span class="tk"></span></div></div>
+  </div>
+
+  <!-- landing-site region -->
+  <div class="region" style="left:600px; top:470px; width:320px; height:300px;"><span class="rl">landing-site <span class="c">2</span></span></div>
+  <div class="card need" style="left:622px; top:498px; width:276px;">
+    <div class="ch"><span class="tm">C</span><b>Hero copy options</b><span class="sp"></span><span class="st"><i class="ph-fill ph-diamond"></i>Asks</span></div>
+    <div class="line1">Which hero line should we ship?</div>
+    <div class="opts"><span class="o"><kbd>1</kbd>Stop watching. Start steering.</span><span class="o"><kbd>2</kbd>Many agents, one window.</span></div>
+  </div>
+  <div class="card" style="left:622px; top:664px; width:276px;">
+    <div class="ch"><span class="tm">X</span><b>WebP image pipeline</b></div>
+    <div class="line1">Running <span class="m">pnpm test</span></div>
+    <div class="st"><span class="spin"></span>working 19m</div>
+  </div>
+
+  <!-- payments-api region -->
+  <div class="region" style="left:960px; top:270px; width:420px; height:330px;"><span class="rl">payments-api <span class="c">2</span></span></div>
+  <div class="card need" style="left:984px; top:300px; width:370px;">
+    <div class="ch"><span class="tm">C</span><b>결제 웹훅 재시도</b><span class="sp"></span><span class="st"><i class="ph ph-x-circle"></i>Stopped</span></div>
+    <div class="line1" style="font-family:var(--mono);font-size:11.5px;color:var(--del)">✕ retry.spec.ts › backs off after 3 failures</div>
+    <div class="line1" style="font-family:var(--mono);font-size:11.5px;color:var(--del)">✕ retry.spec.ts › keeps the idempotency key</div>
+    <div class="row"><span class="b">Open</span><span class="b">Ask it to fix</span></div>
+  </div>
+  <div class="card dim" style="left:984px; top:480px; width:240px;">
+    <div class="ch"><span class="tm">X</span><b>Keeper handoff review</b></div>
+    <div class="st">idle 2h</div>
+  </div>
+
+  <div class="tool">
+    <span class="sel"><i class="ph ph-cursor"></i></span><span><i class="ph ph-hand"></i></span><span class="div"></span>
+    <span class="attn"><i class="ph-fill ph-diamond"></i>3 need you</span><span class="div"></span>
+    <span><i class="ph ph-minus"></i></span><span>72%</span><span><i class="ph ph-plus"></i></span><span class="div"></span>
+    <span><i class="ph ph-plus-circle"></i>Session</span>
+  </div>
+  <div class="mini">
+    <i style="left:16px;top:22px;width:56px;height:62px"></i><i class="n" style="left:20px;top:26px;width:46px;height:30px"></i>
+    <i style="left:82px;top:52px;width:36px;height:30px"></i><i class="n" style="left:86px;top:56px;width:28px;height:8px"></i>
+    <i style="left:122px;top:28px;width:40px;height:36px"></i><i class="n" style="left:125px;top:31px;width:34px;height:12px"></i>
+    <i style="left:72px;top:8px;width:28px;height:8px"></i>
+    <span class="vp"></span>
+  </div>
+</body>
+</html>

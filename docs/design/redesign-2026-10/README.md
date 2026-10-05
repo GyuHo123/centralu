@@ -5,3 +5,8 @@ Static mockups for the redesign issues (see the umbrella issue linked from each)
 pages rendered at the sizes the issues quote; `before-*.png` are the current UI's `?demo` scenes at the same sizes.
 
 Fonts and icons load from public CDNs (Pretendard, JetBrains Mono, Phosphor), for the mockups only.
+
+## v2: For you and Overview (chosen direction)
+
+`v2/` holds the direction chosen after three bolder ones were explored (`explored/`: A lanes, B triage, C canvas). It is
+B as the home screen and A as the overview, on one set of tokens (`v2/bold.css`). Open with `#dark` for the dark theme.

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>For you</title>
+<link rel="stylesheet" href="bold.css">
+<script>if (location.hash.includes('dark')) document.documentElement.dataset.theme = 'dark'</script>
+<style>
+  body { display: grid; grid-template-columns: 64px 420px 1fr; }
+  .queue { border-right: 1px solid var(--line); background: var(--paper); display: grid; grid-template-rows: auto 1fr auto; min-height: 0; height: 100vh; }
+  .qh { padding: 22px 22px 14px; }
+  .qh h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.03em; }
+  .qh p { color: var(--ink3); margin-top: 2px; font-size: 13px; }
+  .tabs { display: flex; gap: 4px; margin-top: 16px; }
+  .tab { padding: 5px 10px; border-radius: 7px; color: var(--ink3); font-weight: 500; }
+  .tab.sel { background: var(--ink); color: var(--paper); }
+  .items { overflow: hidden; padding: 0 10px; }
+  .it { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; padding: 13px 12px; border-radius: 12px; margin-bottom: 2px; }
+  .kind { display: flex; gap: 6px; align-items: center; font-size: 11.5px; font-weight: 650; color: var(--ink3); }
+  .kind .ph, .kind .ph-fill { font-size: 15px; }
+  .k-act { color: var(--act); }
+  .k-fail { color: var(--danger); }
+  .age { font-size: 11.5px; color: var(--ink3); text-align: right; }
+  .title { grid-column: 1 / 3; font-size: 15px; font-weight: 600; letter-spacing: -0.015em; }
+  .from { grid-column: 1 / 3; font-size: 12.5px; color: var(--ink3); display: flex; gap: 6px; align-items: center; }
+  .it.sel { background: var(--raise); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+  .it.done .title, .it.done .kind { color: var(--ink3); }
+  .sec { padding: 14px 12px 6px; font-size: 11.5px; font-weight: 650; color: var(--ink3); display: flex; justify-content: space-between; }
+  .run { display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; padding: 8px 12px; color: var(--ink2); font-size: 12.5px; }
+  .run .d { color: var(--ink3); font-size: 12px; }
+  .qf { border-top: 1px solid var(--line); padding: 10px 22px; display: flex; gap: 14px; color: var(--ink3); font-size: 11.5px; }
+
+  .stage { padding: 40px 56px; display: grid; grid-template-rows: auto auto auto auto auto 1fr; gap: 22px; min-height: 0; overflow: hidden; height: 100vh; }
+  .crumbs { display: flex; gap: 8px; align-items: center; color: var(--ink3); font-size: 12.5px; }
+  .crumbs b { color: var(--ink); font-weight: 600; }
+  .crumbs .open { margin-left: auto; }
+  .big { font-size: 34px; line-height: 1.18; font-weight: 700; letter-spacing: -0.035em; max-width: 21ch; }
+  .big em { font-style: normal; color: var(--act); }
+  .cmd { font: 500 17px var(--mono); background: var(--code-bg); color: var(--code-ink); border-radius: 12px; padding: 18px 20px; display: flex; gap: 14px; align-items: center; max-width: 720px; }
+  .cmd .d { color: var(--code-dim); font-size: 13px; }
+  .ctx { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; max-width: 720px; }
+  .card { background: var(--raise); border-radius: 12px; padding: 16px 18px; box-shadow: 0 0 0 1px var(--line); }
+  .card h3 { font-size: 11.5px; font-weight: 650; color: var(--ink3); margin-bottom: 8px; }
+  .card p { font-size: 14px; line-height: 1.6; color: var(--ink2); }
+  .card code { font: 12.5px var(--mono); background: var(--sel); padding: 1px 5px; border-radius: 4px; color: var(--ink); }
+  .touch { font: 12.5px/1.9 var(--mono); color: var(--ink2); }
+  .touch b { color: var(--ink); font-weight: 600; }
+  .acts { display: flex; gap: 10px; align-items: center; max-width: 720px; }
+  .acts .sp { flex: 1; }
+  .next { color: var(--ink3); font-size: 12.5px; display: flex; gap: 6px; align-items: center; }
+  .tail { align-self: start; max-width: 720px; display: grid; gap: 10px; border-top: 1px solid var(--line); }
+  .tail h3 { font-size: 11.5px; font-weight: 650; color: var(--ink3); padding-top: 14px; }
+  .tl { display: grid; grid-template-columns: 52px 1fr; gap: 10px; font-size: 13.5px; line-height: 1.6; color: var(--ink2); }
+  .tl .t { font: 12px var(--mono); color: var(--ink3); padding-top: 2px; }
+  .tl b { color: var(--ink); font-weight: 600; margin-right: 4px; }
+  .tl .mut { color: var(--ink3); font-size: 12.5px; }
+</style>
+</head>
+<body>
+  <nav class="rail">
+    <span class="logo">C</span>
+    <span class="nb sel" title="For you"><i class="ph ph-tray"></i><span class="c">3</span></span>
+    <span class="nb" title="Overview"><i class="ph ph-chart-bar-horizontal"></i></span>
+    <span class="nb" title="Sessions"><i class="ph ph-chats-circle"></i></span>
+    <span class="nb" title="Orchestrator"><i class="ph ph-crown-simple"></i></span>
+    <span class="nb" title="Apps"><i class="ph ph-puzzle-piece"></i></span>
+    <span class="nb foot" title="Settings"><i class="ph ph-gear-six"></i></span>
+  </nav>
+
+  <section class="queue">
+    <div class="qh">
+      <h1>For you</h1>
+      <p>3 waiting, 2 running, 1 finished since 14:40</p>
+      <div class="tabs"><span class="tab sel">Waiting 3</span><span class="tab">Finished 1</span><span class="tab">All sessions</span></div>
+    </div>
+    <div class="items">
+      <div class="it sel">
+        <span class="kind k-act"><i class="ph-fill ph-hand"></i>Approval</span><span class="age">2 min</span>
+        <span class="title">Run kill -TERM 40321</span>
+        <span class="from"><span class="tm">X</span>Orphaned process cleanup, centralu</span>
+      </div>
+      <div class="it">
+        <span class="kind k-act"><i class="ph-fill ph-question"></i>Question</span><span class="age">6 min</span>
+        <span class="title">Which hero line should we ship?</span>
+        <span class="from"><span class="tm">C</span>Hero copy options, landing-site</span>
+      </div>
+      <div class="it">
+        <span class="kind k-fail"><i class="ph-fill ph-x-circle"></i>Stopped</span><span class="age">11 min</span>
+        <span class="title">2 of 31 tests fail in retry.spec.ts</span>
+        <span class="from"><span class="tm">C</span>결제 웹훅 재시도, payments-api</span>
+      </div>
+      <div class="it done">
+        <span class="kind"><i class="ph ph-check-circle"></i>Finished</span><span class="age">38 min</span>
+        <span class="title">Release notes for beta.11 are ready to read</span>
+        <span class="from"><span class="tm">C</span>Release notes, centralu</span>
+      </div>
+      <div class="sec"><span>Running</span><span>2</span></div>
+      <div class="run"><span class="spin"></span>Collapsed composer polish<span class="d">editing SessionView.tsx</span></div>
+      <div class="run"><span class="spin"></span>WebP image pipeline<span class="d">pnpm test, 19m</span></div>
+    </div>
+    <div class="qf"><span><kbd>J</kbd> <kbd>K</kbd> move</span><span><kbd>Y</kbd> <kbd>N</kbd> answer</span><span><kbd>E</kbd> done</span><span><kbd>↵</kbd> open session</span></div>
+  </section>
+
+  <main class="stage">
+    <div class="crumbs"><span class="tm">X</span><b>Orphaned process cleanup</b><span>centralu / fix/orphans</span><span>asked 2 min ago</span><span class="btn sm q open">Open session <kbd>↵</kbd></span></div>
+    <div class="big">Codex wants to <em>stop a process</em> it found running without a parent.</div>
+    <div class="cmd"><i class="ph ph-terminal"></i>kill -TERM 40321<span class="d">in ~/code/centralu</span></div>
+    <div class="ctx">
+      <div class="card"><h3>Why, in its words</h3><p><code>40321</code> is a <code>vite</code> dev server started 3 days ago with no living parent and no keeper hold. Its esbuild child exits with it.</p></div>
+      <div class="card"><h3>What it touches</h3><div class="touch"><b>vite</b> pid 40321, since Oct 2<br><b>esbuild</b> pid 40388, child<br>No files, no network</div></div>
+    </div>
+    <div class="acts">
+      <span class="btn p">Allow <kbd>Y</kbd></span>
+      <span class="btn">Deny <kbd>N</kbd></span>
+      <span class="btn q">Always allow kill here <kbd>A</kbd></span>
+      <span class="sp"></span>
+      <span class="next">Next: Which hero line? <kbd>J</kbd></span>
+    </div>
+    <section class="tail">
+      <h3>Earlier in this session</h3>
+      <div class="tl"><span class="t">15:12</span><span><b>You</b> Run a script that finds only the orphaned processes and stops them. Show me the list before you kill anything.</span></div>
+      <div class="tl"><span class="t">15:13</span><span class="mut">Read scripts/strays.ts, ran ps, edited strays.ts <span class="add">+14</span> <span class="del">−3</span></span></div>
+      <div class="tl"><span class="t">15:16</span><span>Two processes have no living parent and are not held by the keeper. I will stop the dev server first; its child exits with it.</span></div>
+    </section>
+  </main>
+</body>
+</html>

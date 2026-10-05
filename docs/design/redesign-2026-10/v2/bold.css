@@ -1,0 +1,96 @@
+/*
+ * Centralu redesign, direction "For you + Overview" (2026-10).
+ *
+ * One hue, cobalt, means two things that are really one: "this is waiting for you" and "the action that answers it".
+ * Red means a failure and nothing else. Everything else is neutral.
+ */
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css");
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+@import url("https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css");
+@import url("https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css");
+
+:root {
+  --bg: #f3f4f6;      /* the stage */
+  --paper: #fbfbfc;   /* the queue, the rail */
+  --raise: #ffffff;   /* cards, the selected item */
+  --sel: #e8ebf1;
+  --line: #e1e3e8;
+  --line2: #cfd2d9;
+  --ink: #0e1013;
+  --ink2: #3d424b;
+  --ink3: #5d636e;
+  --ink4: #a5aab3;    /* decoration only */
+  --act: #2346d9;
+  --act-soft: #e7ecfd;
+  --act-ink: #ffffff;
+  --danger: #c0392f;
+  --add: #1d7a45;
+  --del: #c0392f;
+  --code-bg: #0e1013;
+  --code-ink: #f1f2f4;
+  --code-dim: #8b919b;
+  --lane-read: #d9dce2;
+  --lane-edit: #3d424b;
+  --lane-run-a: #9aa0aa;
+  --lane-run-b: #d9dce2;
+  --lane-think: #b9bdc5;
+  --shadow: 0 1px 3px rgb(14 16 19 / 0.08);
+  --sans: "Pretendard Variable", Pretendard, -apple-system, "Apple SD Gothic Neo", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #0b0c0e;
+  --paper: #111316;
+  --raise: #181a1e;
+  --sel: #22252a;
+  --line: #23262b;
+  --line2: #33373d;
+  --ink: #eceef1;
+  --ink2: #aeb3bb;
+  --ink3: #8a909a;
+  --ink4: #4a4f57;
+  --act: #8aa2ff;
+  --act-soft: rgb(138 162 255 / 0.13);
+  --act-ink: #0b0f24;
+  --danger: #f0645a;
+  --add: #46c37b;
+  --del: #f0645a;
+  --code-bg: #050607;
+  --code-ink: #eceef1;
+  --code-dim: #7d838d;
+  --lane-read: #2b3036;
+  --lane-edit: #c9ced6;
+  --lane-run-a: #6c737d;
+  --lane-run-b: #3a4048;
+  --lane-think: #3a4048;
+  --shadow: 0 1px 0 rgb(255 255 255 / 0.03);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 13px/1.45 var(--sans); -webkit-font-smoothing: antialiased; letter-spacing: -0.01em; overflow: hidden; }
+.ph, .ph-fill { font-size: 18px; line-height: 1; }
+.mono { font-family: var(--mono); letter-spacing: 0; }
+kbd { font: 600 10.5px var(--mono); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--ink2); background: var(--raise); letter-spacing: 0; }
+
+/* rail: the five places, and where the waiting count lives */
+.rail { display: grid; grid-auto-rows: max-content; justify-items: center; gap: 6px; padding: 14px 0; border-right: 1px solid var(--line); background: var(--paper); height: 100vh; }
+.rail .logo { width: 30px; height: 30px; border-radius: 9px; background: var(--ink); color: var(--paper); display: grid; place-items: center; font-weight: 800; margin-bottom: 14px; }
+.rail .nb { position: relative; width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; color: var(--ink3); }
+.rail .nb.sel { background: var(--raise); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+.rail .nb .c { position: absolute; top: 3px; right: 2px; min-width: 16px; height: 16px; border-radius: 8px; background: var(--act); color: var(--act-ink); font: 700 10px var(--sans); display: grid; place-items: center; padding: 0 4px; }
+.rail .foot { margin-top: auto; }
+
+.tm { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; background: var(--sel); font: 700 9.5px var(--mono); color: var(--ink2); flex: none; }
+
+.btn { height: 40px; padding: 0 16px; border-radius: 10px; display: inline-flex; gap: 10px; align-items: center; font-size: 14px; font-weight: 600; background: var(--raise); color: var(--ink); box-shadow: 0 0 0 1px var(--line2); white-space: nowrap; }
+.btn.sm { height: 30px; padding: 0 11px; font-size: 12.5px; border-radius: 8px; gap: 8px; }
+.btn.p { background: var(--act); color: var(--act-ink); box-shadow: none; }
+.btn.p kbd { background: rgb(255 255 255 / 0.18); border-color: rgb(255 255 255 / 0.35); color: inherit; }
+:root[data-theme="dark"] .btn.p kbd { background: rgb(0 0 0 / 0.15); border-color: rgb(0 0 0 / 0.25); }
+.btn.q { background: transparent; box-shadow: none; color: var(--ink2); font-weight: 500; }
+
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--line2); border-top-color: var(--ink); flex: none; }
+.add { color: var(--add); } .del { color: var(--del); }

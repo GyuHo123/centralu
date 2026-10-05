@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Overview</title>
+<link rel="stylesheet" href="bold.css">
+<script>if (location.hash.includes('dark')) document.documentElement.dataset.theme = 'dark'</script>
+<style>
+  body { display: grid; grid-template-columns: 64px 1fr; }
+  .main { display: grid; grid-template-rows: 56px 1fr 330px; height: 100vh; min-width: 0; }
+
+  .head { display: grid; grid-template-columns: 248px 1fr; align-items: stretch; border-bottom: 1px solid var(--line); background: var(--paper); }
+  .title { display: flex; align-items: center; gap: 10px; padding: 0 18px; }
+  .title h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+  .title .w { margin-left: auto; color: var(--act); font-weight: 650; font-size: 12px; display: flex; gap: 5px; align-items: center; }
+  .title .w .ph-fill { font-size: 14px; }
+  .ruler { position: relative; border-left: 1px solid var(--line); }
+  .tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); color: var(--ink3); font: 10.5px var(--mono); padding: 21px 0 0 6px; }
+  .now { position: absolute; top: 0; bottom: 0; right: 0; width: 2px; background: var(--ink); }
+  .now span { position: absolute; right: 6px; top: 18px; font: 700 10.5px var(--mono); color: var(--paper); background: var(--ink); padding: 2px 6px; border-radius: 4px; }
+  .range { position: absolute; left: 50%; transform: translateX(-50%); top: 14px; display: flex; gap: 2px; background: var(--raise); box-shadow: 0 0 0 1px var(--line); border-radius: 8px; padding: 2px; }
+  .range span { font-size: 11.5px; padding: 3px 9px; border-radius: 6px; color: var(--ink3); font-weight: 500; }
+  .range span.sel { background: var(--ink); color: var(--paper); }
+
+  .board { display: grid; grid-template-columns: 248px 1fr; overflow: hidden; background: var(--bg); }
+  .labels { border-right: 1px solid var(--line); background: var(--paper); }
+  .grp { height: 28px; display: flex; align-items: center; padding: 0 18px; font: 600 10.5px var(--mono); letter-spacing: 0.08em; color: var(--ink3); border-bottom: 1px solid var(--line); text-transform: lowercase; }
+  .lab { height: 46px; display: grid; grid-template-columns: 18px 1fr auto; gap: 0 10px; align-items: center; padding: 0 18px; border-bottom: 1px solid var(--line); }
+  .lab .n { font-size: 13px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lab .s { font-size: 11.5px; color: var(--ink3); white-space: nowrap; }
+  .lab.need .s { color: var(--act); font-weight: 650; }
+  .lab.stopped .s { color: var(--danger); font-weight: 650; }
+  .lab.sel { background: var(--raise); box-shadow: inset 2px 0 0 var(--ink); }
+  .lanes { position: relative; overflow: hidden;
+    background: repeating-linear-gradient(90deg, transparent 0 calc(12.82% - 1px), var(--line) calc(12.82% - 1px) 12.82%); }
+  .lg { height: 28px; border-bottom: 1px solid var(--line); }
+  .lane { position: relative; height: 46px; border-bottom: 1px solid var(--line); }
+  .lane.sel { background: color-mix(in srgb, var(--raise) 60%, transparent); }
+  .b { position: absolute; top: 15px; height: 16px; border-radius: 3px; }
+  .b.read { background: var(--lane-read); }
+  .b.edit { background: var(--lane-edit); }
+  .b.run { background: repeating-linear-gradient(135deg, var(--lane-run-a) 0 3px, var(--lane-run-b) 3px 6px); }
+  .b.think { border: 1px dashed var(--lane-think); }
+  .idle { position: absolute; top: 22px; height: 2px; background: repeating-linear-gradient(90deg, var(--line2) 0 4px, transparent 4px 8px); }
+  .end { position: absolute; top: 13px; width: 2px; height: 20px; background: var(--ink3); }
+  .flag { position: absolute; top: 8px; display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px 0 9px; background: var(--act); color: var(--act-ink);
+    border-radius: 7px; font: 600 11.5px var(--mono); white-space: nowrap; box-shadow: 0 0 0 4px var(--act-soft); }
+  .flag .ph-fill { font-size: 13px; }
+  .fail { position: absolute; top: 10px; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border: 1px solid var(--danger); color: var(--danger); border-radius: 7px; font: 600 11.5px var(--mono); white-space: nowrap; background: var(--raise); }
+  .fail .ph { font-size: 14px; }
+  .legend { position: absolute; right: 16px; bottom: 10px; display: flex; gap: 14px; color: var(--ink3); font-size: 11px; }
+  .legend span { display: flex; gap: 6px; align-items: center; }
+  .legend i { display: inline-block; width: 14px; height: 8px; border-radius: 2px; }
+
+  .detail { border-top: 1px solid var(--line2); display: grid; grid-template-columns: 1fr 460px; background: var(--paper); min-height: 0; }
+  .conv { padding: 18px 26px; display: grid; gap: 10px; align-content: start; border-right: 1px solid var(--line); overflow: hidden; }
+  .conv-h { display: flex; gap: 10px; align-items: center; }
+  .conv-h b { font-size: 15px; font-weight: 650; }
+  .conv-h .m { color: var(--ink3); font-size: 12px; }
+  .conv-h .open { margin-left: auto; }
+  .msg { font-size: 14px; line-height: 1.65; max-width: 76ch; }
+  .msg.you { color: var(--ink2); }
+  .msg code { font: 12px var(--mono); background: var(--sel); padding: 1px 5px; border-radius: 4px; }
+  .steps { font: 12px/1.8 var(--mono); color: var(--ink3); }
+  .decide { padding: 18px 22px; display: grid; gap: 12px; align-content: start; }
+  .dh { font-size: 11.5px; color: var(--act); display: flex; gap: 6px; align-items: center; font-weight: 650; }
+  .dh .ph-fill { font-size: 15px; }
+  .ask { font-size: 22px; line-height: 1.25; font-weight: 700; letter-spacing: -0.025em; }
+  .cmd { font: 500 15px var(--mono); padding: 12px 14px; background: var(--code-bg); color: var(--code-ink); border-radius: 10px; }
+  .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+  <nav class="rail">
+    <span class="logo">C</span>
+    <span class="nb" title="For you"><i class="ph ph-tray"></i><span class="c">3</span></span>
+    <span class="nb sel" title="Overview"><i class="ph ph-chart-bar-horizontal"></i></span>
+    <span class="nb" title="Sessions"><i class="ph ph-chats-circle"></i></span>
+    <span class="nb" title="Orchestrator"><i class="ph ph-crown-simple"></i></span>
+    <span class="nb" title="Apps"><i class="ph ph-puzzle-piece"></i></span>
+    <span class="nb foot" title="Settings"><i class="ph ph-gear-six"></i></span>
+  </nav>
+
+  <div class="main">
+    <header class="head">
+      <div class="title"><h1>Overview</h1><span class="w"><i class="ph-fill ph-hand"></i>3 waiting</span></div>
+      <div class="ruler">
+        <span class="tick" style="left:0%">14:00</span><span class="tick" style="left:12.82%">14:10</span><span class="tick" style="left:25.64%">14:20</span>
+        <span class="tick" style="left:38.46%">14:30</span><span class="tick" style="left:51.28%">14:40</span><span class="tick" style="left:64.10%">14:50</span>
+        <span class="tick" style="left:76.92%">15:00</span><span class="tick" style="left:89.74%">15:10</span>
+        <span class="range"><span>30m</span><span class="sel">1h 20m</span><span>Today</span></span>
+        <span class="now"><span>now 15:18</span></span>
+      </div>
+    </header>
+
+    <section class="board">
+      <div class="labels">
+        <div class="grp">centralu</div>
+        <div class="lab need sel"><span class="tm">X</span><span class="n">Orphaned processes</span><span class="s">approve</span></div>
+        <div class="lab"><span class="tm">C</span><span class="n">Collapsed composer polish</span><span class="s">4m</span></div>
+        <div class="lab"><span class="tm">C</span><span class="n">Release notes, beta.11</span><span class="s">done</span></div>
+        <div class="grp">landing-site</div>
+        <div class="lab need"><span class="tm">C</span><span class="n">Hero copy options</span><span class="s">asks</span></div>
+        <div class="lab"><span class="tm">X</span><span class="n">WebP image pipeline</span><span class="s">19m</span></div>
+        <div class="grp">payments-api</div>
+        <div class="lab stopped"><span class="tm">C</span><span class="n">결제 웹훅 재시도</span><span class="s">stopped</span></div>
+        <div class="lab"><span class="tm">X</span><span class="n">Keeper handoff review</span><span class="s">idle 2h</span></div>
+      </div>
+      <div class="lanes">
+        <div class="lg"></div>
+        <div class="lane sel">
+          <span class="b read" style="left:52%;width:4%"></span><span class="b run" style="left:56.5%;width:3%"></span>
+          <span class="b read" style="left:60%;width:6%"></span><span class="b edit" style="left:66.5%;width:5%"></span>
+          <span class="b run" style="left:72%;width:3%"></span><span class="b think" style="left:75.5%;width:3%"></span>
+          <span class="flag" style="left:79.5%"><i class="ph-fill ph-hand"></i>kill -TERM 40321 ?</span>
+        </div>
+        <div class="lane">
+          <span class="b read" style="left:9%;width:7%"></span><span class="b edit" style="left:16.5%;width:9%"></span><span class="b run" style="left:26%;width:6%"></span>
+          <span class="b think" style="left:33%;width:5%"></span><span class="b edit" style="left:38.5%;width:14%"></span><span class="b run" style="left:53%;width:4%"></span>
+          <span class="b read" style="left:72%;width:5%"></span><span class="b run" style="left:77.5%;width:8%"></span><span class="b edit" style="left:86%;width:13.6%"></span>
+        </div>
+        <div class="lane">
+          <span class="b read" style="left:2%;width:10%"></span><span class="b think" style="left:12.5%;width:6%"></span><span class="b edit" style="left:19%;width:11%"></span>
+          <span class="end" style="left:30.5%"></span><span class="idle" style="left:31%;width:69%"></span>
+        </div>
+        <div class="lg"></div>
+        <div class="lane">
+          <span class="b read" style="left:47%;width:6%"></span><span class="b think" style="left:53.5%;width:10%"></span><span class="b edit" style="left:64%;width:9%"></span>
+          <span class="flag" style="left:74%"><i class="ph-fill ph-question"></i>which hero line? 1 / 2 / 3</span>
+        </div>
+        <div class="lane">
+          <span class="b read" style="left:20%;width:4%"></span><span class="b edit" style="left:24.5%;width:18%"></span><span class="b run" style="left:43%;width:22%"></span>
+          <span class="b edit" style="left:65.5%;width:6%"></span><span class="b run" style="left:72%;width:27.6%"></span>
+        </div>
+        <div class="lg"></div>
+        <div class="lane">
+          <span class="b read" style="left:30%;width:8%"></span><span class="b edit" style="left:38.5%;width:16%"></span><span class="b run" style="left:55%;width:12%"></span>
+          <span class="fail" style="left:68%"><i class="ph ph-x-circle"></i>2 / 31 tests failed</span>
+        </div>
+        <div class="lane"><span class="end" style="left:0.5%"></span><span class="idle" style="left:1%;width:99%"></span></div>
+        <div class="legend"><span><i style="background:var(--lane-read)"></i>read</span><span><i style="background:var(--lane-edit)"></i>edit</span><span><i style="background:repeating-linear-gradient(135deg,var(--lane-run-a) 0 3px,var(--lane-run-b) 3px 6px)"></i>run</span><span><i style="border:1px dashed var(--lane-think)"></i>think</span></div>
+      </div>
+    </section>
+
+    <section class="detail">
+      <div class="conv">
+        <div class="conv-h"><span class="tm">X</span><b>Orphaned process cleanup</b><span class="m">centralu / fix/orphans, gpt-5-codex, context 37%</span><span class="btn sm q open">Open session <kbd>↵</kbd></span></div>
+        <div class="msg you">Run a script that finds only the orphaned processes and stops them. Show me the list before you kill anything.</div>
+        <div class="steps">read scripts/strays.ts   ran ps -eo pid,ppid,pgid,comm   edited scripts/strays.ts <span class="add">+14</span> <span class="del">−3</span></div>
+        <div class="msg">Two processes have no living parent and are not held by the keeper: <code>40321</code>, a <code>vite</code> dev server started 3 days ago, and <code>40388</code>, its esbuild child. I will stop the dev server first; its child exits with it.</div>
+      </div>
+      <div class="decide">
+        <div class="dh"><i class="ph-fill ph-hand"></i>Waiting on you, 2 min</div>
+        <div class="ask">Codex wants to stop a process</div>
+        <div class="cmd">kill -TERM 40321</div>
+        <div class="acts"><span class="btn p">Allow <kbd>Y</kbd></span><span class="btn">Deny <kbd>N</kbd></span><span class="btn q">Always here <kbd>A</kbd></span></div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
