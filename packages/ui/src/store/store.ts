@@ -2192,6 +2192,43 @@ const HISTORY_PAGE = 100
 /** How many recent messages a non-focused session keeps — reopening it loads more from the store */
 const WINDOW_SIZE = 50
 
+/**
+ * Cuts a conversation down to its last `WINDOW_SIZE` rows, or returns null when there is nothing to cut.
+ *
+ * **Shrinking the window moves the cursor along with it** (dogfooding, 2026-09-09: "older
+ * conversation does not load above").
+ *
+ * This used to trim only `chat`. That left the top of the screen at the freshly trimmed spot
+ * while the cursor (`oldestSeq`) stayed at its old value, so "load earlier conversation"
+ * prepended **a range that does not connect to the screen** — the trimmed-away gap was never
+ * seen again. The trim point is now the new cursor.
+ *
+ * The cursor is the top row's **stored number** (#79). Back when the render key was used, if
+ * the top of the 50 kept rows was a live row, the cursor received a number shared across every
+ * session. The window never starts at an unnumbered row (an image, a message before
+ * confirmation) — it has no number to set, and that row lives in the store anyway, so
+ * `loadOlder` brings it back. If there is no numbered row at all, nothing is trimmed: trimming
+ * with no cursor would leave no way back into the trimmed gap.
+ */
+function trimWindow(items: ChatItem[]): { items: ChatItem[]; oldestSeq: number } | null {
+  if (items.length <= WINDOW_SIZE) return null
+  let top = items.length - WINDOW_SIZE
+  while (top < items.length && items[top]!.storedSeq === undefined) top++
+  const oldestSeq = items[top]?.storedSeq
+  return oldestSeq === undefined ? null : { items: items.slice(top), oldestSeq }
+}
+
+/**
+ * How long an off-screen conversation may grow before it is cut back to the window.
+ *
+ * Losing focus is not the only way a conversation grows out of sight: a worker the orchestrator
+ * started, a session an app asked for, a grid panel that is not the focused one — none of them is
+ * ever focused and then left, so the trim in `focusSession` never reached them, and every event
+ * (screenshots included, base64 and all) stayed in memory for the life of the window. Twice the
+ * window leaves slack, so the cut happens once per window's worth of rows rather than on every event.
+ */
+const OFFSCREEN_TRIM_AT = WINDOW_SIZE * 2
+
 /** A holding pen for events belonging to a session not yet registered in the store (replayed right after registration) */
 const pendingEvents = new Map<string, NormalizedEvent[]>()
 
@@ -3304,12 +3341,35 @@ export const useStore = create<AppState>((set, get) => ({
 
     set((st) => {
       const sessions = { ...st.sessions, [sessionId]: withSeq }
+      // An off-screen conversation is cut back to the window (OFFSCREEN_TRIM_AT), never while a page of history is
+      // still on its way: that page is merged against the rows it was asked for
+      const trimmed =
+        chat !== undefined &&
+        chat.length > OFFSCREEN_TRIM_AT &&
+        !st.history[sessionId]?.loading &&
+        !isOnScreen(st.view, sessionId, {
+          focusedSessionId: st.focusedSessionId,
+          orchestratorId: st.orchestratorId,
+          gridSessions: gridSessionIds(st.gridPanels),
+          builderPaneSessionId: st.builderPaneSessionId,
+          projectScreen: projectScreenSessions(st),
+        })
+          ? trimWindow(chat)
+          : null
       return {
         sessions,
         ...(lockedLate !== null
           ? { wakeError: { ...st.wakeError, [sessionId]: lockedLate }, wakeLocked: { ...st.wakeLocked, [sessionId]: true } }
           : {}),
-        chat: chat === undefined ? st.chat : { ...st.chat, [sessionId]: chat },
+        ...(trimmed
+          ? {
+              history: {
+                ...st.history,
+                [sessionId]: { oldestSeq: trimmed.oldestSeq, more: trimmed.oldestSeq > 1, loading: false },
+              },
+            }
+          : {}),
+        chat: chat === undefined ? st.chat : { ...st.chat, [sessionId]: trimmed ? trimmed.items : chat },
         // A turn begins because an event arrived — this is where its start instant is
         // recorded, so the elapsed line survives remounting (issue #23)
         workingSince: trackWorkingSince(st.workingSince, sessions, Date.now()),
@@ -3454,35 +3514,15 @@ export const useStore = create<AppState>((set, get) => ({
     // The summary (state, unread, preview) stays intact, so the sidebar and inbox remain accurate.
     if (prev && prev !== id) {
       const items = get().chat[prev]
-      if (items && items.length > WINDOW_SIZE) {
-        /*
-         * **Shrinking the window moves the cursor along with it** (dogfooding, 2026-09-09: "older
-         * conversation does not load above").
-         *
-         * This used to trim only `chat`. That left the top of the screen at the freshly trimmed spot
-         * while the cursor (`oldestSeq`) stayed at its old value, so "load earlier conversation"
-         * prepended **a range that does not connect to the screen** — the trimmed-away gap was never
-         * seen again. The trim point is now the new cursor.
-         *
-         * The cursor is the top row's **stored number** (#79). Back when the render key was used, if
-         * the top of the 50 kept rows was a live row, the cursor received a number shared across every
-         * session. The window never starts at an unnumbered row (an image, a message before
-         * confirmation) — it has no number to set, and that row lives in the store anyway, so
-         * `loadOlder` brings it back. If there is no numbered row at all, nothing is trimmed: trimming
-         * with no cursor would leave no way back into the trimmed gap.
-         */
-        let top = items.length - WINDOW_SIZE
-        while (top < items.length && items[top]!.storedSeq === undefined) top++
-        const cursor = items[top]?.storedSeq
-        if (cursor !== undefined) {
-          set((s) => ({
-            chat: { ...s.chat, [prev]: items.slice(top) },
-            history: {
-              ...s.history,
-              [prev]: { oldestSeq: cursor, more: cursor > 1, loading: false },
-            },
-          }))
-        }
+      const trimmed = items && trimWindow(items)
+      if (trimmed) {
+        set((s) => ({
+          chat: { ...s.chat, [prev]: trimmed.items },
+          history: {
+            ...s.history,
+            [prev]: { oldestSeq: trimmed.oldestSeq, more: trimmed.oldestSeq > 1, loading: false },
+          },
+        }))
       }
     }
 

@@ -764,6 +764,37 @@ describe('the cursor for a session where an event arrives before history (#79)',
     useStore.getState().focusSession('t79')
     expect(await readAll('t79')).toEqual(L(180))
   })
+
+  it('a session that is never on screen does not keep every event it receives', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('off-bg', sessionInfo('off-bg'))
+    mock.sessions.set('off-seen', sessionInfo('off-seen'))
+    await useStore.getState().attach(mock)
+    useStore.getState().focusSession('off-seen')
+
+    // A worker nobody opens — the trim on losing focus never reaches it
+    for (let i = 1; i <= 300; i++) {
+      mock.emit({ sessionId: 'off-bg', type: 'tool_call', callId: `c${i}`, summary: { tool: 'Read', title: `L${i}`, readOnly: true } } as never)
+    }
+    expect(useStore.getState().chat['off-bg']!.length).toBeLessThanOrEqual(100)
+
+    // Nothing is lost: opening it reads the cut rows back from the store
+    useStore.getState().focusSession('off-bg')
+    expect(await readAll('off-bg')).toEqual(L(300))
+  })
+
+  it('the conversation on screen is never cut while it is being read', async () => {
+    const mock = new MockPlatform()
+    mock.sessions.set('off-focused', sessionInfo('off-focused'))
+    await useStore.getState().attach(mock)
+    useStore.getState().focusSession('off-focused')
+    await vi.waitFor(() => expect(useStore.getState().history['off-focused']).toBeDefined())
+
+    for (let i = 1; i <= 300; i++) {
+      mock.emit({ sessionId: 'off-focused', type: 'tool_call', callId: `c${i}`, summary: { tool: 'Read', title: `L${i}`, readOnly: true } } as never)
+    }
+    expect(useStore.getState().chat['off-focused']).toHaveLength(300)
+  })
 })
 
 describe('merging the session list on reconnect (U4)', () => {
