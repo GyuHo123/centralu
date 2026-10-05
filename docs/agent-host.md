@@ -857,6 +857,15 @@ step against:
    host that dies first leaves it to the next open, which runs it in its place. So a heavy or breaking step must
    be correct when it runs after later steps, and the build that ships it must work before it has run (a contract
    step keeps this by rule 2; a heavy step by only reshaping data the code reads either way).
+6. **A step commits as one unit with the record that it ran (#396):** its statements, the `min_reader_version` raise
+   and the `user_version` bump (with the `deferred_migrations` list when it changes: shortened when a step a swap left
+   for later runs, lengthened when a swap leaves one) go in one transaction.
+   Each statement used to commit on its own, so a start killed between two `ALTER`s of v12 or v17 left the first
+   column, and the next start, finding it, skipped the rest of the step for good. `VACUUM` cannot run in a
+   transaction, so a step queues it for after its commit and records in that commit that it is owed (a `vacuum_owed`
+   row in `app_settings`, deleted once the vacuum has run or failed; `vacuumAfterStep`). A host stopped during the
+   vacuum leaves the row, and the next open vacuums, or, in a swap, `runDeferred` does. v10 switches `foreign_keys`,
+   which SQLite ignores inside a transaction, and commits on its own (`ownTransaction`), as one unit by itself.
 
 | Steps | What they do | Older build |
 |---|---|---|

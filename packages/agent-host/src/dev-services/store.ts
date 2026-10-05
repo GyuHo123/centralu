@@ -43,6 +43,14 @@ const MIN_READER_KEY = 'min_reader_version'
  */
 const DEFERRED_KEY = 'deferred_migrations'
 
+/**
+ * The `app_settings` key present while a `VACUUM` a migration step queued has not run yet (#396). Written in the step's
+ * own transaction and deleted once the vacuum is over, so a host stopped during the vacuum (which SQLite rolls back
+ * whole) leaves it for the next open. The step's version has already committed by then: without the row, nothing would
+ * vacuum again and the file would keep its free pages for good.
+ */
+const VACUUM_OWED_KEY = 'vacuum_owed'
+
 export type StoreOptions = {
   /**
    * Opened by a host that is taking over from another one (#280 step 3, a blue-green swap). Only the steps the
@@ -72,6 +80,11 @@ interface MigrationStep {
   breaksOlderReaders: boolean
   /** Rewrites or re-indexes every message, or `VACUUM`s the file: too long to run while another host waits (#280) */
   heavy?: true
+  /**
+   * The step commits on its own instead of inside the runner's transaction: it switches `foreign_keys`, which SQLite
+   * ignores inside a transaction. Such a step must be one unit by itself, and safe to run again.
+   */
+  ownTransaction?: true
   run: () => void
 }
 
@@ -134,6 +147,22 @@ export class Store {
        */
       this.refuseIfTooNew()
       this.db.pragma('journal_mode = WAL')
+      /*
+       * Set here rather than left to how better-sqlite3 happens to be built (#396). CASCADE on project and session
+       * deletion depends on `foreign_keys`, which plain SQLite (and rusqlite, the planned replacement) leaves off.
+       * `synchronous = FULL` is what better-sqlite3's build already gave in WAL mode, kept on purpose: NORMAL can lose
+       * the last commits on power loss or an OS crash, and those are conversations, the data the store must not lose.
+       * `busy_timeout` is the library's default made visible.
+       */
+      this.db.pragma('foreign_keys = ON')
+      this.db.pragma('synchronous = FULL')
+      this.db.pragma('busy_timeout = 5000')
+      /*
+       * A checkpoint that resets the WAL also cuts the file back to this. Without a limit the WAL keeps the size of the
+       * largest transaction it ever held until the next TRUNCATE, at open or close: after a swap's deferred VACUUM
+       * (146 MB measured) that was the rest of a host's life, and under the keeper a host lives for days.
+       */
+      this.db.pragma(`journal_size_limit = ${WAL_SIZE_LIMIT}`)
       this.db.exec(readFileSync(SCHEMA_PATH, 'utf8'))
       this.migrate()
     } catch (e) {
@@ -155,12 +184,28 @@ export class Store {
     this.checkpoint()
   }
 
-  /** Folds the WAL into the main database and truncates the file to zero. A failure here is not fatal, so it is swallowed. */
-  checkpoint(): void {
+  /**
+   * Folds the WAL into the main database and truncates the file to zero. Returns whether it did: a failure is not
+   * fatal, and it is tried again at the next open or close.
+   *
+   * It never waits. With another connection reading, a TRUNCATE checkpoint waits out the whole busy timeout (5 s,
+   * measured) on the event loop and then reports busy rather than throwing, which is longer than the 3 s a host has to
+   * shut down (#396).
+   *
+   * On a closed store it does nothing and says so: a shutdown path that closes the store twice must not throw on the
+   * second close, where it would hide why the shutdown went wrong.
+   */
+  checkpoint(): boolean {
+    if (!this.db.open) return false
+    const wait = this.db.pragma('busy_timeout', { simple: true }) as number
     try {
-      this.db.pragma('wal_checkpoint(TRUNCATE)')
+      this.db.pragma('busy_timeout = 0')
+      const [row] = this.db.pragma('wal_checkpoint(TRUNCATE)') as { busy: number }[]
+      return row?.busy === 0
     } catch {
-      // TRUNCATE can be deferred while another connection is reading — try again next time
+      return false
+    } finally {
+      this.db.pragma(`busy_timeout = ${wait}`)
     }
   }
 
@@ -204,24 +249,40 @@ export class Store {
      * itself a swap. A host that died before `runDeferred` finished leaves them here for the next one.
      */
     const deferred = new Set(this.storedDeferred())
-    const deferredBefore = deferred.size
     // A swap only ever meets a store an earlier host already built; a new store has nothing heavy to do
     const swap = this.opts.swap === true && current > 0
     for (const step of steps) {
       const due = current < step.to || deferred.has(step.to)
       if (!due) continue
+      const bump = () => {
+        if (step.to > this.schemaVersion) this.db.pragma(`user_version = ${step.to}`)
+      }
       if (swap && (step.heavy || step.breaksOlderReaders)) {
         deferred.add(step.to)
+        /*
+         * The list and the version past the step commit together (#396). The list used to be written once the loop
+         * was over: a start stopped before then left `user_version` past a step no list remembered, and it never ran.
+         */
+        this.db.transaction(() => {
+          this.writeDeferred([...deferred])
+          bump()
+        })()
       } else {
-        floor = this.runStep(step, floor)
-        deferred.delete(step.to)
+        floor = this.runStep(step, floor, () => {
+          bump()
+          // A step an earlier swap left for later is crossed off in its own commit, as `runDeferred` does
+          if (deferred.delete(step.to)) this.writeDeferred([...deferred])
+        })
       }
-      if (step.to > this.schemaVersion) this.db.pragma(`user_version = ${step.to}`)
     }
-    if (deferred.size > 0 || deferredBefore > 0) this.writeDeferred([...deferred])
     if (deferred.size > 0 && this.dbPath !== ':memory:') {
       console.error(`[store] left for after the swap: v${[...deferred].sort((a, b) => a - b).join(', v')}`)
     }
+    /*
+     * A vacuum a stopped host left owed (#396) runs now. In a swap it waits for `runDeferred` with the heavy steps: it
+     * holds the file for as long as they do.
+     */
+    if (!swap && this.vacuumOwed) this.runOwedVacuum('a host stopped during it left it owed')
     /*
      * If migrations ran, **say so** (a lesson from a dogfooding incident: beta.4 silently
      * reworked a 151k-message database for over ten seconds, and with neither the UI nor the
@@ -246,18 +307,95 @@ export class Store {
   /**
    * Runs one step, raising `min_reader_version` first when the step breaks older readers. Returns the new floor.
    *
-   * Raised **before** the step runs. A start killed between the two then leaves a store that turns away an older host
-   * it could still have served, which costs an update; the other order leaves a store an older host opens and breaks
-   * on, which is what the record exists to prevent.
+   * Raised **before** the step runs, in the same commit. A store an older host opens and breaks on is what the record
+   * exists to prevent; since the step and the record commit together (#396), a step that fails takes the raise back
+   * with it and the store stays one any older host could read. A step that commits on its own (`ownTransaction`) keeps
+   * the old order: the record first, then the step.
    */
-  private runStep(step: MigrationStep, floor: number): number {
-    if (step.breaksOlderReaders && step.to > floor) {
-      floor = step.to
-      this.writeMinReader(floor)
+  private runStep(step: MigrationStep, floor: number, record: () => void): number {
+    const raise = step.breaksOlderReaders && step.to > floor
+    const apply = () => {
+      if (raise) this.writeMinReader(step.to)
+      step.run()
+      record()
     }
-    step.run()
+    /*
+     * **A step and the record that it ran commit together (#396).** Each statement used to commit on its own, and the
+     * version a moment later: a start killed between two ALTERs of one step left the first column added and the next
+     * start, finding that column, skipped the step for good, so every later query on the missing column failed. A
+     * swap makes that kill likelier: the keeper stops a host that has not finished activating. What cannot run inside a
+     * transaction (VACUUM) waits for the commit (`afterStep`), and the step records in its commit that the vacuum is
+     * owed (`vacuumAfterStep`): one that is cut off is run again by the next open.
+     */
+    if (step.ownTransaction) {
+      apply()
+    } else {
+      this.pendingAfterStep = []
+      let later: (() => void)[]
+      try {
+        this.db.transaction(apply)()
+      } finally {
+        later = this.pendingAfterStep
+        this.pendingAfterStep = null
+      }
+      for (const work of later) work()
+    }
     this.migrationsRun += 1
-    return floor
+    return raise ? step.to : floor
+  }
+
+  /** Work a migration step leaves for after its commit; outside a step it runs at once */
+  private pendingAfterStep: (() => void)[] | null = null
+  private afterStep(work: () => void): void {
+    if (this.pendingAfterStep) this.pendingAfterStep.push(work)
+    else work()
+  }
+
+  /**
+   * A step's `VACUUM` (#396): recorded as owed inside the step's transaction, run after its commit. `report` is told
+   * what the vacuum did when it ran.
+   */
+  private vacuumAfterStep(report?: (done: VacuumDone) => void): void {
+    this.db.exec(APP_SETTINGS_DDL)
+    this.db
+      .prepare(`INSERT INTO app_settings (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(VACUUM_OWED_KEY)
+    this.afterStep(() => {
+      const done = this.runOwedVacuum()
+      if (done) report?.(done)
+    })
+  }
+
+  /** A `VACUUM` a step queued has not run yet: the host was stopped during it (#396) */
+  get vacuumOwed(): boolean {
+    const table = this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'`).get()
+    return !!table && !!this.db.prepare(`SELECT 1 FROM app_settings WHERE key = ?`).get(VACUUM_OWED_KEY)
+  }
+
+  /**
+   * Runs the owed `VACUUM` and deletes the record of it. `why`, when given, is said in host.log on success.
+   *
+   * A vacuum that fails (no room for its temporary copy, say) is reported and passed over, its record deleted too: the
+   * free pages stay in the file and later writes reuse them, and a store that cannot shrink must neither keep the host
+   * from starting nor make every start try again. Only a host stopped during the vacuum leaves the record behind.
+   */
+  private runOwedVacuum(why?: string): VacuumDone | null {
+    const pageSize = this.db.pragma('page_size', { simple: true }) as number
+    const size = () => (this.db.pragma('page_count', { simple: true }) as number) * pageSize
+    const before = size()
+    const t0 = Date.now()
+    try {
+      this.db.exec('VACUUM')
+    } catch (err) {
+      const free = (this.db.pragma('freelist_count', { simple: true }) as number) * pageSize
+      console.error(`[store] could not vacuum; ${mb(free)} stay free in the file: ${(err as Error).message}`)
+      return null
+    } finally {
+      this.db.prepare(`DELETE FROM app_settings WHERE key = ?`).run(VACUUM_OWED_KEY)
+    }
+    const done = { before, after: size(), ms: Date.now() - t0 }
+    if (why) console.error(`[store] vacuumed ${mb(done.before)} -> ${mb(done.after)} (${done.ms}ms): ${why}`)
+    return done
   }
 
   /** Steps a swap left for later that have not run yet (#280 step 3) */
@@ -272,19 +410,26 @@ export class Store {
    */
   runDeferred(): number {
     const left = new Set(this.storedDeferred())
-    if (left.size === 0) return 0
+    // A swap's open leaves an owed vacuum (#396) here too, so this may have that alone to do
+    const owed = this.vacuumOwed
+    if (left.size === 0 && !owed) return 0
     const t0 = Date.now()
     let floor = this.minReaderVersion
     let ran = 0
     for (const step of this.migrationSteps()) {
       if (!left.has(step.to)) continue
-      floor = this.runStep(step, floor)
-      left.delete(step.to)
-      // One at a time, so a host that dies half way leaves exactly what is still owed
-      this.writeDeferred([...left])
+      // One at a time, and in the step's own commit, so a host that dies half way leaves exactly what is still owed
+      floor = this.runStep(step, floor, () => {
+        left.delete(step.to)
+        this.writeDeferred([...left])
+      })
       ran += 1
     }
+    // Paid by a step above if one vacuumed; otherwise still owed from before the swap
+    if (owed && this.vacuumOwed) this.runOwedVacuum('a host stopped during it left it owed')
     if (this.dbPath !== ':memory:') console.error(`[store] ran ${ran} step(s) left from the swap (${Date.now() - t0}ms)`)
+    // A deferred VACUUM goes through the WAL whole; folded now, not at this host's close days from now
+    this.checkpoint()
     return ran
   }
 
@@ -570,6 +715,7 @@ export class Store {
         to: 10,
         // Same columns, one NOT NULL relaxed: an older build reads and writes it as before. The table is tens of rows
         breaksOlderReaders: false,
+        ownTransaction: true,
         run: () => {
           /*
            * The orchestrator **does not belong to a project.**
@@ -655,10 +801,10 @@ export class Store {
           /*
            * SQLite does not hand back freed space on its own. The room the duplicate rows took
            * up is still sitting in the file, so it is reclaimed once here — measured on the
-           * real database, 165MB to 21MB. (VACUUM does not run inside a transaction, so it is
-           * called separately after the commit.)
+           * real database, 165MB to 21MB. (VACUUM does not run inside a transaction, so it waits
+           * for the step's commit, recorded as owed until it has run.)
            */
-          this.db.exec('VACUUM')
+          this.vacuumAfterStep()
         },
       },
       {
@@ -1682,7 +1828,7 @@ export class Store {
        * process does was also the one thing it did silently.
        */
       console.error(`[store] merged streaming rows into messages: ${before.n} -> ${after.n} rows`)
-      this.db.exec('VACUUM') // SQLite does not hand back freed space on its own (see v11's note)
+      this.vacuumAfterStep() // SQLite does not hand back freed space on its own (see v11's note)
     }
   }
 
@@ -1695,8 +1841,9 @@ export class Store {
    * keyed by its message's rowid, as `appendMessages` writes it (v11).
    *
    * Nothing to rebuild when every index row already belongs to an indexed message: a new store, or a rerun after the
-   * rebuild committed. The vacuum is decided separately, by how much of the file is free, so a start that was killed
-   * during the vacuum (which SQLite rolls back whole) vacuums on the next start.
+   * rebuild committed. The vacuum is decided separately, by how much of the file is free. It runs after the step has
+   * committed, so v40 does not run again for it: a start that was killed during the vacuum (which SQLite rolls back
+   * whole) leaves it recorded as owed, and the next open vacuums (#396, `vacuumAfterStep`).
    *
    * A vacuum that fails — no room for its temporary copy, say — is reported and passed over: the index is already
    * rebuilt, the freed pages stay in the file and later writes reuse them, and a store that cannot shrink must not
@@ -1746,22 +1893,16 @@ export class Store {
     }
     const t1 = Date.now()
     const pageSize = this.db.pragma('page_size', { simple: true }) as number
-    const pages = () => this.db.pragma('page_count', { simple: true }) as number
     const free = (this.db.pragma('freelist_count', { simple: true }) as number) * pageSize
     if (free < VACUUM_FREE_BYTES) {
       if (stale.n > 0) console.error(`[store] search index rebuilt without tool calls: dropped ${stale.n} rows, kept ${rows} (${t1 - t0}ms)`)
       return
     }
-    const before = pages() * pageSize
-    try {
-      this.db.exec('VACUUM')
-    } catch (err) {
-      console.error(`[store] could not vacuum after rebuilding the search index; ${mb(free)} stay free in the file: ${(err as Error).message}`)
-      return
-    }
-    console.error(
-      `[store] search index rebuilt without tool calls: dropped ${stale.n} rows, kept ${rows} (${t1 - t0}ms); ` +
-        `vacuumed ${mb(before)} -> ${mb(pages() * pageSize)} (${Date.now() - t1}ms)`,
+    this.vacuumAfterStep(({ before, after, ms }) =>
+      console.error(
+        `[store] search index rebuilt without tool calls: dropped ${stale.n} rows, kept ${rows} (${t1 - t0}ms); ` +
+          `vacuumed ${mb(before)} -> ${mb(after)} (${ms}ms)`,
+      ),
     )
   }
 
@@ -3272,6 +3413,12 @@ export type AppRunRecord = {
  * writes to reuse; a vacuum rewrites the whole file, which is not worth it for a few megabytes.
  */
 const VACUUM_FREE_BYTES = 16 * 1024 * 1024
+
+/** What a reset WAL is cut back to (`journal_size_limit`) */
+const WAL_SIZE_LIMIT = 64 * 1024 * 1024
+
+/** What an owed `VACUUM` did: the file's size before and after, and how long it took */
+type VacuumDone = { before: number; after: number; ms: number }
 
 const mb = (bytes: number): string => `${(bytes / 1048576).toFixed(1)}MB`
 

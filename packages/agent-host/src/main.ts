@@ -34,6 +34,7 @@ import { AgentVersionService } from './agent-versions.js'
 import { acquireInstanceLock, lockConflictMessage } from './dev-services/instance-lock.js'
 import { hostLogPath, rotateIfLarge, startupBanner, teeStderrToFile } from './log-file.js'
 import { hostDrain } from './drain.js'
+import { stopThenClose } from './shutdown.js'
 import { bridgeAddress, ControlChannel, KEEPS_AGENTS_ACROSS_SWAP, onDrain, standby, viewPort } from './swap-control.js'
 
 /**
@@ -503,11 +504,12 @@ console.log(JSON.stringify({ ready: true, port, token, db: dbPath }))
 // What a swap would cost with this build, for the app to say before it asks (#280 step 3, swap-control.ts)
 if (underKeeper) console.log(JSON.stringify({ swap: { keepsAgents: KEEPS_AGENTS_ACROSS_SWAP && held !== null } }))
 /*
- * The heavy and breaking steps a swap left for later (store.ts, "During a swap"). By the time this
- * timer fires the ready line has gone out and the keeper has pointed the front door here: the host
- * this one replaced is gone, so a breaking step can no longer strand it.
+ * The heavy and breaking steps a swap left for later (store.ts, "During a swap"), and a vacuum a
+ * stopped host left owed (#396). By the time this timer fires the ready line has gone out and the
+ * keeper has pointed the front door here: the host this one replaced is gone, so a breaking step can
+ * no longer strand it.
  */
-if (swapping && store.deferredSteps.length > 0) {
+if (swapping && (store.deferredSteps.length > 0 || store.vacuumOwed)) {
   setTimeout(() => {
     try {
       store.runDeferred()
@@ -624,6 +626,19 @@ process.on('uncaughtException', (err) => {
  * closes them.
  */
 async function stopServices(mode: LeaveMode, handOver: boolean): Promise<void> {
+  /*
+   * The store closes however the rest goes (#396). It used to close only if every step before it succeeded: one that
+   * threw left the store open and its WAL unfolded, and on the signal path the host never reached its exit and waited
+   * to be killed. Each close runs whatever the other does, and neither hides the error that came first (shutdown.ts).
+   */
+  await stopThenClose(
+    () => stopServicesBeforeStore(mode, handOver),
+    [() => store.close(), () => held?.children.close()],
+    (line) => console.error(line),
+  )
+}
+
+async function stopServicesBeforeStore(mode: LeaveMode, handOver: boolean): Promise<void> {
   if (handOver) {
     try {
       const n = recordViewHandover(store, views, inlineViews)
@@ -663,8 +678,6 @@ async function stopServices(mode: LeaveMode, handOver: boolean): Promise<void> {
   inlineViews.dispose()
   await views.dispose()
   await server.close()
-  store.close()
-  held?.children.close()
 }
 
 let leaving: LeaveMode | null = null
@@ -672,7 +685,9 @@ const shutdown = async (mode: LeaveMode, handOver: boolean) => {
   // A second signal while leaving changes nothing: the first decided what happens to the children
   if (leaving) return
   leaving = mode
-  await stopServices(mode, handOver)
+  await stopServices(mode, handOver).catch((err) => {
+    console.error(`[agent-host] a step of shutting down failed; leaving anyway: ${(err as Error).stack ?? err}`)
+  })
   // Why it ended becomes the first line of the next investigation — it never disappears silently
   console.error(`[agent-host] shutting down (pid ${process.pid}, ${mode === 'detach' ? 'agents, terminals and commands left running in the keeper' : 'stopped'})`)
   stopLog()
