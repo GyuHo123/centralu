@@ -1306,6 +1306,7 @@ fn write_inbuf(c: &mut Child) {
             Ok(0) => break,
             Ok(k) => {
                 c.inbuf.drain(..k);
+                buffer::give_back(&mut c.inbuf);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
