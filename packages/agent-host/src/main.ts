@@ -482,11 +482,12 @@ console.log(JSON.stringify({ ready: true, port, token, db: dbPath }))
 // What a swap would cost with this build, for the app to say before it asks (#280 step 3, swap-control.ts)
 if (underKeeper) console.log(JSON.stringify({ swap: { keepsAgents: KEEPS_AGENTS_ACROSS_SWAP && held !== null } }))
 /*
- * The heavy and breaking steps a swap left for later (store.ts, "During a swap"). By the time this
- * timer fires the ready line has gone out and the keeper has pointed the front door here: the host
- * this one replaced is gone, so a breaking step can no longer strand it.
+ * The heavy and breaking steps a swap left for later (store.ts, "During a swap"), and a vacuum a
+ * stopped host left owed (#396). By the time this timer fires the ready line has gone out and the
+ * keeper has pointed the front door here: the host this one replaced is gone, so a breaking step can
+ * no longer strand it.
  */
-if (swapping && store.deferredSteps.length > 0) {
+if (swapping && (store.deferredSteps.length > 0 || store.vacuumOwed)) {
   setTimeout(() => {
     try {
       store.runDeferred()

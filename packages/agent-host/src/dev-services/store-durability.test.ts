@@ -5,9 +5,11 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Store } from './store.js'
 
 const dirs: string[] = []
@@ -64,6 +66,86 @@ describe('a migration step is one unit with the record that it ran', () => {
 
     expect(columns(file)).not.toContain('half_a')
     expect(raw(file, (db) => db.pragma('user_version', { simple: true }))).toBe(version)
+  })
+})
+
+/*
+ * A step's VACUUM runs after the step has committed, so a host killed during it finds no step left to run. The kill is a
+ * real one: a separate process opens the store and SIGKILLs itself the moment v40 starts its vacuum.
+ */
+describe('a vacuum cut off by a kill is still owed', () => {
+  const storeModule = pathToFileURL(fileURLToPath(new URL('./store.ts', import.meta.url))).href
+  const root = fileURLToPath(new URL('../../../../', import.meta.url))
+
+  /** A current store with v40 pending and 24 MB free in the file, past the 16 MB at which v40 vacuums */
+  function storeWithFreePages(): string {
+    const file = storeFile()
+    raw(file, (db) => {
+      db.exec(`CREATE TABLE junk (b BLOB)`)
+      db.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 24)
+               INSERT INTO junk SELECT zeroblob(1048576) FROM n`)
+      db.exec(`DROP TABLE junk`)
+      db.pragma('user_version = 39')
+      db.pragma('wal_checkpoint(TRUNCATE)')
+    })
+    return file
+  }
+  const freePages = (file: string) => raw(file, (db) => db.pragma('freelist_count', { simple: true }) as number)
+  const owed = (file: string) =>
+    raw(file, (db) => db.prepare(`SELECT 1 FROM app_settings WHERE key = 'vacuum_owed'`).get() !== undefined)
+
+  function openAndDieAtVacuum(file: string, swap: boolean) {
+    const script = join(dirname(file), 'die-at-vacuum.mts')
+    writeFileSync(
+      script,
+      `import { createRequire } from 'node:module'
+const { Store } = await import(${JSON.stringify(storeModule)})
+const Database = createRequire(${JSON.stringify(storeModule)})('better-sqlite3')
+const exec = Database.prototype.exec
+Database.prototype.exec = function (sql) {
+  if (sql === 'VACUUM') process.kill(process.pid, 'SIGKILL')
+  return exec.call(this, sql)
+}
+const s = new Store(${JSON.stringify(file)}, { swap: ${swap} })
+if (${swap}) s.runDeferred()
+`,
+    )
+    const r = spawnSync(process.execPath, ['--import', 'tsx', script], { cwd: root, stdio: 'ignore', timeout: 60_000 })
+    expect(r.signal).toBe('SIGKILL')
+  }
+
+  it('the next open vacuums', () => {
+    const file = storeWithFreePages()
+    openAndDieAtVacuum(file, false)
+    // v40 committed; its vacuum did not happen
+    expect(raw(file, (db) => db.pragma('user_version', { simple: true }))).toBe(40)
+    expect(freePages(file)).toBeGreaterThan(0)
+    expect(owed(file)).toBe(true)
+
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const s = new Store(file)
+    expect(s.migrationsRun).toBe(s.latestKnownVersion - 40) // the steps after v40; v40 itself is not run again
+    s.close()
+    expect(freePages(file)).toBe(0)
+    expect(owed(file)).toBe(false)
+    expect(said.mock.calls.some(([line]) => String(line).includes('left it owed'))).toBe(true)
+  })
+
+  it('in a swap, the steps left for later are run with it, not the open', () => {
+    const file = storeWithFreePages()
+    openAndDieAtVacuum(file, true)
+    expect(owed(file)).toBe(true)
+
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const s = new Store(file, { swap: true })
+    expect(s.deferredSteps).toEqual([])
+    expect(s.vacuumOwed).toBe(true)
+    expect(freePages(file)).toBeGreaterThan(0)
+
+    s.runDeferred()
+    expect(s.vacuumOwed).toBe(false)
+    s.close()
+    expect(freePages(file)).toBe(0)
   })
 })
 

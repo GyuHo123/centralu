@@ -683,8 +683,10 @@ M1.5에서 Node 사이드카가 배포 경로가 되면서, "Tauri 4단계에서
 6. **단계는 자신이 돌았다는 기록과 함께 한 단위로 커밋한다 (#396):** 단계의 문장들, `min_reader_version` 상향,
    `user_version` 증가(또는 `runDeferred`에서 줄어든 `deferred_migrations` 목록)가 한 트랜잭션에 들어간다. 전에는 문장마다
    따로 커밋되어, v12나 v17의 두 `ALTER` 사이에서 죽은 시작은 첫 열만 남겼고, 다음 시작은 그 열을 보고 단계의 나머지를
-   영영 건너뛰었다. `VACUUM`은 트랜잭션 안에서 돌 수 없으므로 단계는 그것을 커밋 뒤로 미룬다(`afterStep`). v10은
-   트랜잭션 안에서는 무시되는 `foreign_keys`를 바꾸므로 스스로 커밋하고(`ownTransaction`), 그 자체로 한 단위다.
+   영영 건너뛰었다. `VACUUM`은 트랜잭션 안에서 돌 수 없으므로 단계는 그것을 커밋 뒤로 미루고, 그 커밋 안에 VACUUM이
+   밀려 있다고 적는다(`app_settings`의 `vacuum_owed` 행, VACUUM이 돌거나 실패하면 지운다; `vacuumAfterStep`). VACUUM
+   도중에 멈춘 호스트는 그 행을 남기고, 다음 열기가, 스왑이면 `runDeferred`가 VACUUM을 돌린다. v10은 트랜잭션
+   안에서는 무시되는 `foreign_keys`를 바꾸므로 스스로 커밋하고(`ownTransaction`), 그 자체로 한 단위다.
 
 | 단계 | 하는 일 | 옛 빌드 |
 |---|---|---|

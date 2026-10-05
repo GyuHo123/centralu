@@ -43,6 +43,14 @@ const MIN_READER_KEY = 'min_reader_version'
  */
 const DEFERRED_KEY = 'deferred_migrations'
 
+/**
+ * The `app_settings` key present while a `VACUUM` a migration step queued has not run yet (#396). Written in the step's
+ * own transaction and deleted once the vacuum is over, so a host stopped during the vacuum (which SQLite rolls back
+ * whole) leaves it for the next open. The step's version has already committed by then: without the row, nothing would
+ * vacuum again and the file would keep its free pages for good.
+ */
+const VACUUM_OWED_KEY = 'vacuum_owed'
+
 export type StoreOptions = {
   /**
    * Opened by a host that is taking over from another one (#280 step 3, a blue-green swap). Only the steps the
@@ -258,6 +266,11 @@ export class Store {
       console.error(`[store] left for after the swap: v${[...deferred].sort((a, b) => a - b).join(', v')}`)
     }
     /*
+     * A vacuum a stopped host left owed (#396) runs now. In a swap it waits for `runDeferred` with the heavy steps: it
+     * holds the file for as long as they do.
+     */
+    if (!swap && this.vacuumOwed) this.runOwedVacuum('a host stopped during it left it owed')
+    /*
      * If migrations ran, **say so** (a lesson from a dogfooding incident: beta.4 silently
      * reworked a 151k-message database for over ten seconds, and with neither the UI nor the
      * log saying anything, it read as "frozen" and the person killed it with Cmd+Q). One line
@@ -298,7 +311,8 @@ export class Store {
      * version a moment later: a start killed between two ALTERs of one step left the first column added and the next
      * start, finding that column, skipped the step for good, so every later query on the missing column failed. A
      * swap makes that kill likelier: the keeper stops a host that has not finished activating. What cannot run inside a
-     * transaction (VACUUM) waits for the commit (`afterStep`); a vacuum that is cut off loses nothing.
+     * transaction (VACUUM) waits for the commit (`afterStep`), and the step records in its commit that the vacuum is
+     * owed (`vacuumAfterStep`): one that is cut off is run again by the next open.
      */
     if (step.ownTransaction) {
       apply()
@@ -324,6 +338,53 @@ export class Store {
     else work()
   }
 
+  /**
+   * A step's `VACUUM` (#396): recorded as owed inside the step's transaction, run after its commit. `report` is told
+   * what the vacuum did when it ran.
+   */
+  private vacuumAfterStep(report?: (done: VacuumDone) => void): void {
+    this.db.exec(APP_SETTINGS_DDL)
+    this.db
+      .prepare(`INSERT INTO app_settings (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(VACUUM_OWED_KEY)
+    this.afterStep(() => {
+      const done = this.runOwedVacuum()
+      if (done) report?.(done)
+    })
+  }
+
+  /** A `VACUUM` a step queued has not run yet: the host was stopped during it (#396) */
+  get vacuumOwed(): boolean {
+    const table = this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'`).get()
+    return !!table && !!this.db.prepare(`SELECT 1 FROM app_settings WHERE key = ?`).get(VACUUM_OWED_KEY)
+  }
+
+  /**
+   * Runs the owed `VACUUM` and deletes the record of it. `why`, when given, is said in host.log on success.
+   *
+   * A vacuum that fails (no room for its temporary copy, say) is reported and passed over, its record deleted too: the
+   * free pages stay in the file and later writes reuse them, and a store that cannot shrink must neither keep the host
+   * from starting nor make every start try again. Only a host stopped during the vacuum leaves the record behind.
+   */
+  private runOwedVacuum(why?: string): VacuumDone | null {
+    const pageSize = this.db.pragma('page_size', { simple: true }) as number
+    const size = () => (this.db.pragma('page_count', { simple: true }) as number) * pageSize
+    const before = size()
+    const t0 = Date.now()
+    try {
+      this.db.exec('VACUUM')
+    } catch (err) {
+      const free = (this.db.pragma('freelist_count', { simple: true }) as number) * pageSize
+      console.error(`[store] could not vacuum; ${mb(free)} stay free in the file: ${(err as Error).message}`)
+      return null
+    } finally {
+      this.db.prepare(`DELETE FROM app_settings WHERE key = ?`).run(VACUUM_OWED_KEY)
+    }
+    const done = { before, after: size(), ms: Date.now() - t0 }
+    if (why) console.error(`[store] vacuumed ${mb(done.before)} -> ${mb(done.after)} (${done.ms}ms): ${why}`)
+    return done
+  }
+
   /** Steps a swap left for later that have not run yet (#280 step 3) */
   get deferredSteps(): number[] {
     return this.storedDeferred()
@@ -336,7 +397,9 @@ export class Store {
    */
   runDeferred(): number {
     const left = new Set(this.storedDeferred())
-    if (left.size === 0) return 0
+    // A swap's open leaves an owed vacuum (#396) here too, so this may have that alone to do
+    const owed = this.vacuumOwed
+    if (left.size === 0 && !owed) return 0
     const t0 = Date.now()
     let floor = this.minReaderVersion
     let ran = 0
@@ -349,6 +412,8 @@ export class Store {
       })
       ran += 1
     }
+    // Paid by a step above if one vacuumed; otherwise still owed from before the swap
+    if (owed && this.vacuumOwed) this.runOwedVacuum('a host stopped during it left it owed')
     if (this.dbPath !== ':memory:') console.error(`[store] ran ${ran} step(s) left from the swap (${Date.now() - t0}ms)`)
     // A deferred VACUUM goes through the WAL whole; folded now, not at this host's close days from now
     this.checkpoint()
@@ -724,9 +789,9 @@ export class Store {
            * SQLite does not hand back freed space on its own. The room the duplicate rows took
            * up is still sitting in the file, so it is reclaimed once here — measured on the
            * real database, 165MB to 21MB. (VACUUM does not run inside a transaction, so it waits
-           * for the step's commit.)
+           * for the step's commit, recorded as owed until it has run.)
            */
-          this.afterStep(() => this.db.exec('VACUUM'))
+          this.vacuumAfterStep()
         },
       },
       {
@@ -1750,7 +1815,7 @@ export class Store {
        * process does was also the one thing it did silently.
        */
       console.error(`[store] merged streaming rows into messages: ${before.n} -> ${after.n} rows`)
-      this.afterStep(() => this.db.exec('VACUUM')) // SQLite does not hand back freed space on its own (see v11's note)
+      this.vacuumAfterStep() // SQLite does not hand back freed space on its own (see v11's note)
     }
   }
 
@@ -1763,8 +1828,9 @@ export class Store {
    * keyed by its message's rowid, as `appendMessages` writes it (v11).
    *
    * Nothing to rebuild when every index row already belongs to an indexed message: a new store, or a rerun after the
-   * rebuild committed. The vacuum is decided separately, by how much of the file is free, so a start that was killed
-   * during the vacuum (which SQLite rolls back whole) vacuums on the next start.
+   * rebuild committed. The vacuum is decided separately, by how much of the file is free. It runs after the step has
+   * committed, so v40 does not run again for it: a start that was killed during the vacuum (which SQLite rolls back
+   * whole) leaves it recorded as owed, and the next open vacuums (#396, `vacuumAfterStep`).
    *
    * A vacuum that fails — no room for its temporary copy, say — is reported and passed over: the index is already
    * rebuilt, the freed pages stay in the file and later writes reuse them, and a store that cannot shrink must not
@@ -1814,25 +1880,17 @@ export class Store {
     }
     const t1 = Date.now()
     const pageSize = this.db.pragma('page_size', { simple: true }) as number
-    const pages = () => this.db.pragma('page_count', { simple: true }) as number
     const free = (this.db.pragma('freelist_count', { simple: true }) as number) * pageSize
     if (free < VACUUM_FREE_BYTES) {
       if (stale.n > 0) console.error(`[store] search index rebuilt without tool calls: dropped ${stale.n} rows, kept ${rows} (${t1 - t0}ms)`)
       return
     }
-    this.afterStep(() => {
-      const before = pages() * pageSize
-      try {
-        this.db.exec('VACUUM')
-      } catch (err) {
-        console.error(`[store] could not vacuum after rebuilding the search index; ${mb(free)} stay free in the file: ${(err as Error).message}`)
-        return
-      }
+    this.vacuumAfterStep(({ before, after, ms }) =>
       console.error(
         `[store] search index rebuilt without tool calls: dropped ${stale.n} rows, kept ${rows} (${t1 - t0}ms); ` +
-          `vacuumed ${mb(before)} -> ${mb(pages() * pageSize)} (${Date.now() - t1}ms)`,
-      )
-    })
+          `vacuumed ${mb(before)} -> ${mb(after)} (${ms}ms)`,
+      ),
+    )
   }
 
   /** v10: drops the NOT NULL on project_id. SQLite cannot alter a column, so the table is rebuilt */
@@ -3345,6 +3403,9 @@ const VACUUM_FREE_BYTES = 16 * 1024 * 1024
 
 /** What a reset WAL is cut back to (`journal_size_limit`) */
 const WAL_SIZE_LIMIT = 64 * 1024 * 1024
+
+/** What an owed `VACUUM` did: the file's size before and after, and how long it took */
+type VacuumDone = { before: number; after: number; ms: number }
 
 const mb = (bytes: number): string => `${(bytes / 1048576).toFixed(1)}MB`
 

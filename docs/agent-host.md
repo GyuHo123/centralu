@@ -764,8 +764,10 @@ step against:
    and the `user_version` bump (or, in `runDeferred`, the shortened `deferred_migrations` list) go in one transaction.
    Each statement used to commit on its own, so a start killed between two `ALTER`s of v12 or v17 left the first
    column, and the next start, finding it, skipped the rest of the step for good. `VACUUM` cannot run in a
-   transaction, so a step queues it for after its commit (`afterStep`). v10 switches `foreign_keys`, which SQLite
-   ignores inside a transaction, and commits on its own (`ownTransaction`), as one unit by itself.
+   transaction, so a step queues it for after its commit and records in that commit that it is owed (a `vacuum_owed`
+   row in `app_settings`, deleted once the vacuum has run or failed; `vacuumAfterStep`). A host stopped during the
+   vacuum leaves the row, and the next open vacuums, or, in a swap, `runDeferred` does. v10 switches `foreign_keys`,
+   which SQLite ignores inside a transaction, and commits on its own (`ownTransaction`), as one unit by itself.
 
 | Steps | What they do | Older build |
 |---|---|---|
