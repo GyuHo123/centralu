@@ -249,7 +249,7 @@ impl OutBuf {
 }
 
 /// Smallest capacity worth keeping: below this, giving memory back costs more than holding it.
-const KEEP_CAPACITY: usize = 64 * 1024;
+pub(crate) const KEEP_CAPACITY: usize = 64 * 1024;
 
 /// Hands back the capacity a burst left behind (#392).
 ///

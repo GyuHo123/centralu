@@ -334,3 +334,30 @@ fn a_control_queue_past_the_cap_is_dropped_while_the_socket_is_full() {
     assert!(r.flush_conn(2) == Flush::Keep);
     drop(peer);
 }
+
+/// A reactor nobody connects to, for driving one connection or child by hand.
+fn bare_reactor(d: &Dir) -> Reactor {
+    let sock = d.0.join("s");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let (wake_r, wake_w) = UnixStream::pair().unwrap();
+    let shared = Arc::new(Shared { cmds: Mutex::new(Vec::new()), wake: OwnedFd::from(wake_w), sock });
+    Reactor::new(listener, OwnedFd::from(wake_r), shared).unwrap()
+}
+
+/// A long control line, once answered, does not leave its size behind in the read buffer (#392).
+#[test]
+fn a_long_control_line_gives_its_read_memory_back_once_it_is_answered() {
+    let d = temp_dir("rbuf");
+    let mut r = bare_reactor(&d);
+    let (mine, _peer) = UnixStream::pair().unwrap();
+    mine.set_nonblocking(true).unwrap();
+    // As a read leaves it after a 12 MiB line came in: under LINE_CAP, so the line is answered.
+    let mut line = vec![b'x'; 12 * 1024 * 1024];
+    line.push(b'\n');
+    r.conns.insert(1, Conn { stream: mine, role: Role::Control, rbuf: line, wbuf: Vec::new() });
+    r.read_conn(1);
+    let conn = &r.conns[&1];
+    assert!(conn.rbuf.is_empty() && !conn.wbuf.is_empty(), "the line was taken and answered");
+    let kept = conn.rbuf.capacity();
+    assert!(kept <= buffer::KEEP_CAPACITY, "the read buffer kept {kept} bytes of capacity");
+}

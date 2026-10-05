@@ -881,6 +881,11 @@ impl Reactor {
             return self.drop_conn(id, Flush::Lost);
         }
         self.process_input(id);
+        // What a burst left behind once it was taken: up to IN_CAP for an attach, LINE_CAP for a
+        // control line (#392).
+        if let Some(conn) = self.conns.get_mut(&id) {
+            buffer::give_back(&mut conn.rbuf);
+        }
         if eof {
             match self.conns.get_mut(&id).map(|c| &mut c.role) {
                 // The host half-closed: it is detaching. Send what it is owed, then close.
