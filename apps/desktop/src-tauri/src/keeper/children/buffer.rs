@@ -249,7 +249,11 @@ impl OutBuf {
 }
 
 /// Smallest capacity worth keeping: below this, giving memory back costs more than holding it.
-pub(crate) const KEEP_CAPACITY: usize = 64 * 1024;
+///
+/// Well above the 64 KiB a compaction waits for: at that size a chatty stream shrank on one
+/// compaction and grew again on the next read, every ~64 KiB of output. 1 MiB per buffer is
+/// nothing next to what a burst used to keep.
+pub(crate) const KEEP_CAPACITY: usize = 1024 * 1024;
 
 /// Hands back the capacity a burst left behind (#392).
 ///
@@ -408,6 +412,23 @@ mod tests {
         b.sent(n);
         assert_eq!(b.len(), 0);
         assert!(b.data.capacity() <= KEEP_CAPACITY, "kept {} bytes of capacity", b.data.capacity());
+    }
+
+    /// Lines of ordinary size, each compacted away once sent, do not make the buffer shrink only
+    /// to grow again on the next one.
+    #[test]
+    fn a_steady_stream_keeps_its_capacity_between_compactions() {
+        let mut b = OutBuf::new(Policy::Lines { cap: LINES_CAP });
+        let mut line = vec![b'x'; 100 * 1024];
+        line.push(b'\n');
+        for _ in 0..8 {
+            b.push(&line);
+            let n = b.sendable(false).len();
+            b.sent(n);
+            assert_eq!(b.len(), 0, "the line was compacted away");
+            let cap = b.data.capacity();
+            assert!(cap >= line.len(), "shrank to {cap} bytes, too few for the next {}-byte line", line.len());
+        }
     }
 
     #[test]
