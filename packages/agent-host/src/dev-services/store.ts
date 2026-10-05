@@ -245,7 +245,6 @@ export class Store {
      * itself a swap. A host that died before `runDeferred` finished leaves them here for the next one.
      */
     const deferred = new Set(this.storedDeferred())
-    const deferredBefore = deferred.size
     // A swap only ever meets a store an earlier host already built; a new store has nothing heavy to do
     const swap = this.opts.swap === true && current > 0
     for (const step of steps) {
@@ -256,13 +255,22 @@ export class Store {
       }
       if (swap && (step.heavy || step.breaksOlderReaders)) {
         deferred.add(step.to)
-        bump()
+        /*
+         * The list and the version past the step commit together (#396). The list used to be written once the loop
+         * was over: a start stopped before then left `user_version` past a step no list remembered, and it never ran.
+         */
+        this.db.transaction(() => {
+          this.writeDeferred([...deferred])
+          bump()
+        })()
       } else {
-        floor = this.runStep(step, floor, bump)
-        deferred.delete(step.to)
+        floor = this.runStep(step, floor, () => {
+          bump()
+          // A step an earlier swap left for later is crossed off in its own commit, as `runDeferred` does
+          if (deferred.delete(step.to)) this.writeDeferred([...deferred])
+        })
       }
     }
-    if (deferred.size > 0 || deferredBefore > 0) this.writeDeferred([...deferred])
     if (deferred.size > 0 && this.dbPath !== ':memory:') {
       console.error(`[store] left for after the swap: v${[...deferred].sort((a, b) => a - b).join(', v')}`)
     }
