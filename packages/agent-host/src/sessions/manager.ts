@@ -360,6 +360,25 @@ const SKILL_MAX_CHARS = 2_000
  */
 
 /**
+ * How many tool-and-folder keys the per-folder caches keep (`commandCache`, `externalIndex`).
+ *
+ * Both are keyed by the session's folder, and a worktree session has a folder of its own, so every worktree ever
+ * opened added an entry (a slash-command list can run to tens of KB with skill descriptions) and none was ever
+ * removed (#392). Both are memos: the commands are on disk, the index is re-read after 30 s.
+ */
+const FOLDER_CACHE_KEYS = 32
+
+/** Sets a key as the most recently used and lets the least recently used go past `cap` */
+export function remember<K, V>(map: Map<K, V>, key: K, value: V, cap = FOLDER_CACHE_KEYS): void {
+  map.delete(key)
+  map.set(key, value)
+  for (const oldest of map.keys()) {
+    if (map.size <= cap) break
+    map.delete(oldest)
+  }
+}
+
+/**
  * Session lifecycle plus persistence. Adapters hold no state (docs/agent-host.md §2), so all state
  * tracking and storage happens here.
  */
@@ -3585,7 +3604,7 @@ export class SessionManager {
     // Looked up in memory first, then on disk. The list has to survive the host being turned off and
     // back on, so slash commands still work for a sleeping session
     const cached = this.commandCache.get(key) ?? this.store.loadCommands<CommandInfo[]>(m.tool, cwd) ?? undefined
-    if (cached) this.commandCache.set(key, cached)
+    if (cached) remember(this.commandCache, key, cached)
 
     const handle = this.handles.get(sessionId)
     if (handle?.listCommands) {
@@ -3596,7 +3615,7 @@ export class SessionManager {
           .filter((c) => typeof c.name === 'string' && c.name.length > 0)
           .map((c) => ({ name: c.name, description: c.description ?? '', argumentHint: c.argumentHint ?? '' }))
         if (commands.length > 0) {
-          this.commandCache.set(key, commands)
+          remember(this.commandCache, key, commands)
           this.store.saveCommands(m.tool, cwd, commands)
         }
         return { ready: true, commands }
@@ -3684,7 +3703,7 @@ export class SessionManager {
     try {
       const rows = await adapter.listExternalSessions(cwd, EXTERNAL_LIST_LIMIT)
       const index = { ids: new Map(rows.map((r) => [r.externalId, r.updatedAt])), complete: rows.length < EXTERNAL_LIST_LIMIT }
-      this.externalIndex.set(key, { ...index, at: Date.now() })
+      remember(this.externalIndex, key, { ...index, at: Date.now() })
       return index
     } catch {
       return null
