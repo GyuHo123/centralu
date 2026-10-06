@@ -49,6 +49,7 @@ import { readClaudeModels, type ModelQuery } from './models.js'
 import type { AgentAdapter, AgentProcess, AgentSpawnSpec, CreateSessionOpts, DetectResult, EventSink, SessionHandle } from '../contract.js'
 import { LocalAgentProcess, spawnLocalAgent, type LocalSpawnSpec } from '../local-process.js'
 import { approvalDetail, ClaudeStreamNormalizer } from './normalize.js'
+import { AlwaysAllowRules, alwaysAllowKey } from '../always-allow.js'
 
 const exec = promisify(execFile)
 
@@ -314,7 +315,7 @@ class ClaudeSession implements SessionHandle {
   /** The live query — the channel for asking about slash commands and context. */
   private query: QueryHandle | null = null
   /** Auto-approval matchers. Seeded with the saved rules at session start, and grows with each 'always' response. */
-  private alwaysAllow = new Set<string>()
+  private alwaysAllow = new AlwaysAllowRules()
   private reqCounter = 0
   private readonly stream: ClaudeStreamNormalizer
   /**
@@ -629,11 +630,8 @@ class ClaudeSession implements SessionHandle {
            * it was edited again. Other kinds (`other`) have no key at all: what "always" would
            * even mean for them has not been decided yet.
            */
-          const key =
-            detail.kind === 'command' ? detail.command
-            : detail.kind === 'file_edit' && detail.path !== '?' ? detail.path
-            : ''
-          if (key && self.isAlwaysAllowed(key)) return { behavior: 'allow' as const, updatedInput: toolInput }
+          const key = alwaysAllowKey(detail, { skipPath: '?' })
+          if (key && self.alwaysAllow.allows(key)) return { behavior: 'allow' as const, updatedInput: toolInput }
 
           const requestId = `req-${++self.reqCounter}`
           self.emit({ type: 'approval_request', sessionId: self.sessionId, requestId, detail })
@@ -1001,10 +999,9 @@ class ClaudeSession implements SessionHandle {
 
   /** Injects saved rules (so "always allow" survives a restart). */
   applyRules(matchers: readonly string[]): void {
-    for (const m of matchers) this.alwaysAllow.add(m)
+    this.alwaysAllow.addAll(matchers)
   }
 
-  /** Only supports a trailing wildcard (`npm test*`) — the same rule as core's `matchesRule`. */
   /**
    * Reports context usage (FR-14).
    *
@@ -1098,13 +1095,6 @@ class ClaudeSession implements SessionHandle {
     } catch {
       // The conversation continues even if context usage cannot be read.
     }
-  }
-
-  private isAlwaysAllowed(key: string): boolean {
-    for (const m of this.alwaysAllow) {
-      if (m.endsWith('*') ? key.startsWith(m.slice(0, -1)) : key === m) return true
-    }
-    return false
   }
 
   /**
