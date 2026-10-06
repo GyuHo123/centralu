@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { ORCHESTRATOR_ROLE, orchestratorHome } from './orchestrator-home.js'
 import { dedupeNearbyHits, windowAround } from './snippet.js'
-import { proposedMcpServerNameError, profileAllows, runOrchestratorTool } from './orchestrator-tools.js'
+import { profileAllows, runOrchestratorTool } from './orchestrator-tools.js'
 import type { ToolProfile } from '../apps/contract.js'
 import { buildHandoffRecord } from './handoff-record.js'
+import { OrchestratorProposals, type ProposalOutcome } from './orchestrator-proposals.js'
 import { SessionAppsHub } from './session-apps.js'
 import { AppAccess, writeShared } from './app-access.js'
 import type { AgentRunRequest, AgentRunResult, AppCheckReport, AppRef, BrokerHost, CapabilityQuestion, ExternalApps, HostCapability } from '../apps/external/runtime.js'
@@ -288,19 +289,6 @@ const EXTERNAL_LIST_LIMIT = 200
 /** Key for the builder-session directory (APP_BUILDERS_KEY) — an app is identified by (project, id) */
 const builderKey = (ref: AppRef): string => `${ref.projectId ?? '_user'}/${ref.appId}`
 
-/** One line of app description — within the manifest's cap (2000 characters), so a long command
- * does not turn into the wrong app */
-const clampLine = (text: string): string => (text.length > 500 ? `${text.slice(0, 499)}…` : text)
-
-/** The app_setting key where the orchestrator's MCP proposal list lives (propose_mcp_server flow) */
-const MCP_PROPOSALS_KEY = 'orchestrator_mcp_proposals'
-/**
- * The **old** directory of approved MCP servers (before M4 A-7). Approved servers now live as apps
- * in the user folder, and this key is only read by the migration (migrateApprovedMcpServers) — it
- * is never loaded into an adapter.
- */
-const LEGACY_MCP_SERVERS_KEY = 'orchestrator_mcp_servers'
-
 /**
  * One builder session per app (M4 C-2) — `<projectId | _user>/<appId>` -> session id. A single JSON
  * field in app_settings.
@@ -313,14 +301,6 @@ const LEGACY_MCP_SERVERS_KEY = 'orchestrator_mcp_servers'
  */
 const APP_BUILDERS_KEY = 'apps.builders'
 
-/** Orchestrator skills (#71) — live in the DB, not as files (a worker can write files but cannot
- * write to the DB) */
-const SKILL_PROPOSALS_KEY = 'orchestrator_skill_proposals'
-const SKILLS_KEY = 'orchestrator_skills'
-/** Skill budget (the answer to #71's open question): cap count and length so it does not erode the
- * system prompt */
-const SKILL_MAX_COUNT = 10
-const SKILL_MAX_CHARS = 2_000
 /*
  * What the value means: **everything in the external transcript up to this moment is something I
  * already know.** Two hands write it — catch-up, after it reads (the `updatedAt` the tool gave),
@@ -425,6 +405,8 @@ export class SessionManager {
   private appsHub: SessionAppsHub | null = null
   /** Another project's apps, attached on demand (#371 part A) — null exactly when `appsHub` is */
   private appAccess: AppAccess | null = null
+  /** The orchestrator's MCP-server and skill proposals and its approved skills (#71, M4 A-7) */
+  private readonly proposals: OrchestratorProposals
   /**
    * Codex sessions whose attached apps changed mid-turn (#371 part A) — restarted through resume when
    * the turn ends, beside `restartAfterTurn`'s settings drift: a Codex thread keeps the MCP servers it
@@ -502,6 +484,7 @@ export class SessionManager {
       keptSessions?: ReadonlySet<string>
     } = {},
   ) {
+    this.proposals = new OrchestratorProposals(this.store, () => this.appsHub?.rt)
     const rawEmit = this.emit
     this.emit = (full) => {
       /*
@@ -4716,52 +4699,11 @@ export class SessionManager {
        * registering arbitrary command execution, so installing it right here would turn a single
        * injected line that came in through read_session into a running process.
        */
-      proposeMcpServer: async (spec) => {
-        /*
-         * The naming rule is **deliberately different** from the skill naming rule right below (#93).
-         * A skill name is only ever used as a subheading in the role prompt, but an MCP server name
-         * becomes a tool prefix, and that prefix is the basis on which an approval exception is
-         * checked — the same letters carry a different weight. An `app-` prefix is blocked right here,
-         * since that namespace belongs to external apps (M4 A-5, proposedMcpServerNameError).
-         */
-        const nameError = proposedMcpServerNameError(spec.name)
-        if (nameError) return { ok: false, error: nameError }
-        /*
-         * Once approved, it becomes the user-folder app `<name>` (M4 A-7). So the name shares its slot
-         * with app ids — it can never take a reserved id, or an existing user app's id. Overwriting one
-         * is exactly swapping out a command.
-         */
-        if (RESERVED_APP_IDS.includes(spec.name)) {
-          return { ok: false, error: `"${spec.name}" is a reserved app name — propose a different name` }
-        }
-        if (this.userAppExists(spec.name)) return { ok: false, error: `"${spec.name}" is already installed` }
-        const proposals = this.mcpProposals().filter((p) => p.name !== spec.name)
-        proposals.push({ name: spec.name, command: spec.command, args: spec.args, why: spec.why })
-        this.store.setAppSetting(MCP_PROPOSALS_KEY, JSON.stringify(proposals))
-        return { ok: true }
-      },
+      proposeMcpServer: async (spec) => this.proposals.proposeMcpServer(spec),
 
       // Skill proposal (#71) — the same rule as an MCP proposal: proposing only saves it, and it has no
       // effect until approved
-      proposeSkill: async (spec) => {
-        if (!/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(spec.name)) {
-          return { ok: false, error: 'The name must be alphanumeric characters, hyphens, and underscores, 32 characters or fewer' }
-        }
-        if (!spec.content.trim()) return { ok: false, error: 'The content is empty' }
-        if (spec.content.length > SKILL_MAX_CHARS) {
-          return { ok: false, error: `The content is too long (${spec.content.length} characters > ${SKILL_MAX_CHARS}) — keep only the essentials of the procedure` }
-        }
-        if (this.orchestratorSkills().some((s) => s.name === spec.name)) {
-          return { ok: false, error: `The "${spec.name}" skill already exists — the person has to delete it first before it can be changed` }
-        }
-        if (this.orchestratorSkills().length >= SKILL_MAX_COUNT) {
-          return { ok: false, error: `There are already ${SKILL_MAX_COUNT} skills — the system prompt budget is full, so suggest to the person that a less-used one be deleted` }
-        }
-        const proposals = this.skillProposals().filter((p) => p.name !== spec.name)
-        proposals.push({ name: spec.name, content: spec.content, why: spec.why })
-        this.store.setAppSetting(SKILL_PROPOSALS_KEY, JSON.stringify(proposals))
-        return { ok: true }
-      },
+      proposeSkill: async (spec) => this.proposals.proposeSkill(spec),
 
       // Checks its own app (C-3) — which app it is is decided by the calling session. Refused if it is not a
       // builder session (the directory has changed)
@@ -5558,141 +5500,34 @@ export class SessionManager {
   }
 
   /** MCP server proposals waiting on the person's approval */
-  mcpProposals(): { name: string; command: string; args: string[]; why?: string }[] {
-    try {
-      const raw = this.store.appSetting(MCP_PROPOSALS_KEY)
-      return raw ? (JSON.parse(raw) as ReturnType<SessionManager['mcpProposals']>) : []
-    } catch {
-      return []
-    }
+  /** The approved skills as a system prompt section (OrchestratorProposals.skillsPrompt) */
+  private skillsPrompt(): string {
+    return this.proposals.skillsPrompt()
   }
 
-  /** Does an app with this id already exist in the user folder — that is the slot an approved MCP server
-   * lands in (even a broken manifest still occupies its slot) */
-  private userAppExists(id: string): boolean {
-    return !!this.appsHub?.rt.list().some((a) => a.projectId === null && a.appId === id)
-  }
-
-  /**
-   * Approved MCP servers from the old directory (before M4 A-7) — read only by the migration.
-   * A malformed entry is filtered out right here: there is nothing to migrate for an entry when it is unclear
-   * what it would even launch.
-   */
-  private legacyMcpServers(): { name: string; command: string; args: string[] }[] {
-    try {
-      const raw = this.store.appSetting(LEGACY_MCP_SERVERS_KEY)
-      const list = raw ? (JSON.parse(raw) as unknown) : []
-      if (!Array.isArray(list)) return []
-      return list.filter(
-        (x): x is { name: string; command: string; args: string[] } =>
-          !!x && typeof x.name === 'string' && typeof x.command === 'string' && Array.isArray(x.args) && x.args.every((a: unknown) => typeof a === 'string'),
-      )
-    } catch {
-      return []
-    }
-  }
-
-  /**
-   * Migrates a previously approved MCP server into a user-folder app (M4 A-7) — runs once, when the
-   * runtime is received (startup).
-   *
-   * **Idempotent no matter how many times it runs.** `installUserApp` is called for each entry, and
-   * that function simply returns the existing app if an app for the same server already exists — if
-   * migration is interrupted and runs again on the next startup, it never creates a duplicate app, and
-   * an already-migrated app is never touched again.
-   *
-   * **Only entries that migrated successfully are removed from the old key.** An entry that failed to
-   * migrate stays in the key and is retried on every startup, logging the reason. There are two kinds
-   * of these: a name that cannot become an app id (like `centralu`, approved before #93 — that name
-   * was shadowed by a built-in server and never ran even once), and an id where a different app already
-   * exists (an app the person built is never overwritten). A leftover entry is never loaded anywhere —
-   * the adapter no longer reads this key at all. Once everything migrates, the key is deleted.
-   */
-  private migrateApprovedMcpServers(rt: ExternalApps): void {
-    const legacy = this.legacyMcpServers()
-    if (legacy.length === 0) {
-      if (this.store.appSetting(LEGACY_MCP_SERVERS_KEY) !== null) this.store.deleteAppSetting(LEGACY_MCP_SERVERS_KEY)
-      return
-    }
-    const left: typeof legacy = []
-    for (const s of legacy) {
-      try {
-        rt.installUserApp({
-          id: s.name,
-          name: s.name,
-          description: clampLine(`Previously approved MCP server (propose_mcp_server): ${[s.command, ...s.args].join(' ')}`),
-          server: { command: s.command, args: s.args },
-        })
-      } catch (err) {
-        left.push(s)
-        console.error(`[apps] approved MCP server "${s.name}" was not moved into an app: ${(err as Error).message}`)
-      }
-    }
-    if (left.length === 0) this.store.deleteAppSetting(LEGACY_MCP_SERVERS_KEY)
-    else this.store.setAppSetting(LEGACY_MCP_SERVERS_KEY, JSON.stringify(left))
-    const moved = legacy.length - left.length
-    if (moved > 0) console.error(`[apps] ${moved} approved MCP server(s) moved into user-folder apps`)
+  mcpProposals(): ReturnType<OrchestratorProposals['mcpProposals']> {
+    return this.proposals.mcpProposals()
   }
 
   /** Skill proposals waiting on the person's approval (#71) */
-  skillProposals(): { name: string; content: string; why?: string }[] {
-    try {
-      const raw = this.store.appSetting(SKILL_PROPOSALS_KEY)
-      return raw ? (JSON.parse(raw) as ReturnType<SessionManager['skillProposals']>) : []
-    } catch {
-      return []
-    }
+  skillProposals(): ReturnType<OrchestratorProposals['skillProposals']> {
+    return this.proposals.skillProposals()
   }
 
   /** Skills that have been approved and loaded into the orchestrator's role prompt (#71) */
-  orchestratorSkills(): { name: string; content: string }[] {
-    try {
-      const raw = this.store.appSetting(SKILLS_KEY)
-      return raw ? (JSON.parse(raw) as ReturnType<SessionManager['orchestratorSkills']>) : []
-    } catch {
-      return []
-    }
-  }
-
-  /**
-   * Turns approved skills into a block appended to the role prompt (#71). This is tool-agnostic text
-   * — the same text goes to Claude as a systemPrompt append and to Codex as developerInstructions
-   * (one authoring format, N adapters — the same kind of line NormalizedEvent draws for events).
-   */
-  private skillsPrompt(): string {
-    const skills = this.orchestratorSkills()
-    if (skills.length === 0) return ''
-    return (
-      '\n\n## Approved skills (procedures the person has approved — follow them in the matching situation)\n' +
-      skills.map((s) => `### ${s.name}\n${s.content}`).join('\n\n')
-    )
+  orchestratorSkills(): ReturnType<OrchestratorProposals['orchestratorSkills']> {
+    return this.proposals.orchestratorSkills()
   }
 
   /** The person's answer to a skill proposal (#71) — if approved, it is saved and the orchestrator is
    * restarted */
   async resolveSkillProposal(name: string, approve: boolean): Promise<{ ok: boolean; error?: string }> {
-    const proposals = this.skillProposals()
-    const hit = proposals.find((p) => p.name === name)
-    if (!hit) return { ok: false, error: `No pending skill proposal named "${name}"` }
-    this.store.setAppSetting(SKILL_PROPOSALS_KEY, JSON.stringify(proposals.filter((p) => p.name !== name)))
-    if (!approve) return { ok: true }
-
-    const skills = this.orchestratorSkills().filter((s) => s.name !== name)
-    skills.push({ name: hit.name, content: hit.content })
-    this.store.setAppSetting(SKILLS_KEY, JSON.stringify(skills))
-    await this.restartOrchestrator()
-    return { ok: true }
+    return this.afterProposal(this.proposals.resolveSkillProposal(name, approve))
   }
 
-  /** Deletes a skill (the answer to #71's open question: a skill that can only be added, never removed, is
-   * worse than none at all) */
+  /** Deletes a skill — the orchestrator is restarted so the deleted skill leaves its prompt */
   async deleteOrchestratorSkill(name: string): Promise<{ ok: boolean; error?: string }> {
-    const skills = this.orchestratorSkills()
-    if (!skills.some((s) => s.name === name)) return { ok: false, error: `No skill named "${name}"` }
-    this.store.setAppSetting(SKILLS_KEY, JSON.stringify(skills.filter((s) => s.name !== name)))
-    // If a deleted skill stayed in the prompt, the deletion would be a lie — it is swapped in immediately
-    await this.restartOrchestrator()
-    return { ok: true }
+    return this.afterProposal(this.proposals.deleteOrchestratorSkill(name))
   }
 
   /** Restarts the orchestrator if it is alive — the shared path for reflecting a skill or MCP change
@@ -5702,50 +5537,16 @@ export class SessionManager {
     if (orch) await this.restartSession(orch.id).catch(() => {})
   }
 
-  /**
-   * The person's answer to a proposal (dogfooding request, option b — propose -> one-click approval
-   * -> the app installs and restarts).
-   *
-   * If approved, that server becomes **a viewless app in the user folder** (M4 A-7, decision 8). Once
-   * it is an app, calls go through the broker (visibility, run log), it comes up only when first
-   * needed and goes back down when idle, and it can be removed from the list (`apps.remove`). A
-   * user-folder app is attached to the orchestrator (decision 4) — the same slot a previously approved
-   * server used to attach to. In a session, its server name is `app-<name>`.
-   *
-   * And this **restarts the orchestrator** — since a restart is a resume, the conversation continues.
-   * Claude's server set can change without a restart (setMcpServers), but Codex only ever receives its
-   * server set when a new thread is launched. What the person approving is waiting for is "usable
-   * now", so this goes through the same path regardless of the tool.
-   *
-   * If the app fails to be created, the proposal is left in place — the person can see why and reject it.
-   */
+  /** The person's answer to an MCP server proposal — if approved, it becomes a user-folder app and the
+   * orchestrator is restarted (OrchestratorProposals.resolveMcpProposal) */
   async resolveMcpProposal(name: string, approve: boolean): Promise<{ ok: boolean; error?: string }> {
-    const proposals = this.mcpProposals()
-    const hit = proposals.find((p) => p.name === name)
-    if (!hit) return { ok: false, error: `No pending proposal named "${name}"` }
-    const dropProposal = () => this.store.setAppSetting(MCP_PROPOSALS_KEY, JSON.stringify(proposals.filter((p) => p.name !== name)))
-    if (!approve) {
-      dropProposal()
-      return { ok: true }
-    }
+    return this.afterProposal(this.proposals.resolveMcpProposal(name, approve))
+  }
 
-    const rt = this.appsHub?.rt
-    if (!rt) return { ok: false, error: 'External apps are unavailable — the approved server has nowhere to run' }
-    try {
-      rt.installUserApp({
-        id: hit.name,
-        name: hit.name,
-        description: clampLine(hit.why?.trim() || `MCP server approved by the person (propose_mcp_server): ${[hit.command, ...hit.args].join(' ')}`),
-        server: { command: hit.command, args: hit.args },
-      })
-    } catch (err) {
-      return { ok: false, error: `Could not install "${name}" as an app: ${(err as Error).message}` }
-    }
-    dropProposal()
-
-    // Swapped even while it is running — what the person who approved this is waiting for is "usable now"
-    await this.restartOrchestrator()
-    return { ok: true }
+  /** Restarts the orchestrator when a proposal answer asks for it — the change is already saved by then */
+  private async afterProposal({ restart, ...result }: ProposalOutcome): Promise<{ ok: boolean; error?: string }> {
+    if (restart) await this.restartOrchestrator()
+    return result
   }
 
   /**
@@ -5850,7 +5651,7 @@ export class SessionManager {
     rt.attachBrokerHost(this.brokerHost())
     // Migrates a previously approved MCP server into an app (A-7) — this runs before any session comes up, so
     // the orchestrator has it from the very start
-    this.migrateApprovedMcpServers(rt)
+    this.proposals.migrateApprovedMcpServers(rt)
   }
 
   /**
