@@ -42,7 +42,7 @@ the Codex bridge.
 |---|---|---|---|---|
 | `orchestrator` | the one orchestrator | every session | all but the manager's and builder's | role and usage |
 | `manager` | a session with worktree children, or the project's manager slot (#69, #76) | its own worktree children | list, read, send, propose and delete a worktree session | worktree rules |
-| `scoped` | a coordinator (#80; made through `agents.createCoordinator`, once by the control app's tasks, removed in #97) | its members | list, read, send | its boundary |
+| `scoped` | a coordinator (#80): made only by the control app's tasks, which were removed in #372 with the RPC that created one; the ones in a store still wake with this profile | its members | list, read, send | its boundary |
 | `builder` | an app's building session (M4 C-3) | its own app | `check` | build-and-check |
 | `reader` | every other session in a project (#320) | its own project, read at call time | `read_session` (no id: lists), `recall`, `app_guide`; `ask_project` (#371, §1.2); and `find_apps`, `attach_app`, `detach_app` (#371 part A, apps.md §9.4) | none |
 
@@ -149,7 +149,7 @@ measured for `recall`. A miss is an answer saying it has no such project, and th
 the tool. One of five unrelated how-to questions drew a call naming a project that does not exist
 (refused, no card). The description says "a job", not "a task": the two read the same to the model
 (7 in 10 each), and the guide, which lists every seat's tools, keeps no word of the removed
-control rail's tasks (#97). Two other wordings did no better (0 and 3 in 5).
+control rail's tasks (#372). Two other wordings did no better (0 and 3 in 5).
 
 `scripts/smoke-ask-project.mts` runs it end to end on a temp store and data folder: a haiku session
 in one scratch project has the other write a file with a number only it knows and reads it back
@@ -573,20 +573,47 @@ must keep reading an older host's tags: the children outlive the build that spaw
 
 - **Agents.** The manager passes the adapter a `ProcessSource` (`adapters/contract.ts`): `spawn` in the keeper,
   or `adopt` a kept process. Claude gets it as `spawnClaudeCodeProcess`; `CodexClient` takes the process instead
-  of spawning. `KeeperAgentProcess` has the `ChildProcess` surface both use, but `kill()` is a keeper request that
-  is never sent once the process is detached or the host is exiting (the SDK kills its processes on owner exit),
-  and `stdin.end()` is `close_stdin`. Codex request ids carry a per-client prefix, so an answer to the previous
+  of spawning. `KeeperAgentProcess` has the `ChildProcess` surface both use, but `kill()` is a keeper request for
+  the CLI's whole process group (below) that is never sent once the process is detached or the host is exiting
+  (the SDK kills its processes on owner exit), and `stdin.end()` is `close_stdin`. Codex request ids carry a per-client prefix, so an answer to the previous
   host's request cannot resolve one of ours.
 - **Terminals and commands.** `TerminalService` and `CommandRunner` take the keeper's pty module (`KeeperPty`,
-  node-pty's surface) instead of node-pty; stopping them still walks the process tree (`kill-tree.ts`), which
-  works from anywhere.
+  node-pty's surface) instead of node-pty; stopping or closing them walks the process tree (`kill-tree.ts`), which
+  works from anywhere. Closing a terminal takes the tree before the shell gets its hang-up: a dev server started
+  from it is in a group of its own (job control), and one that ignored the hang-up used to be left running.
+
+**What stopping an agent ends.** An agent CLI starts helpers of its own: Claude Code's LSP tool runs
+`typescript-language-server`, which runs `tsserver` (one reached 3.4 GB); MCP servers from the user's config; shells.
+They share the CLI's process group, which `setsid` made the CLI's own, so the group is the CLI, what it started, and
+nothing else. A stop signals that group: the host's TERM, and the KILL that follows when the CLI is still there after
+its grace (the SDK's 5 s; codex's 2 s after EOF), reach the helpers too. And whenever an agent exits, however it ended
+(a stop, a crash, a CLI that does not clean up), the keeper sweeps its group: TERM at once, KILL 2 s later to whatever
+is still in it (`Sweep`, `keeper/children/mod.rs`). Before, only the CLI's pid was signalled, and what it left was
+reparented to launchd/init and kept running with its memory. A group number is not reused while anyone is in it, and
+no sweep is sent while any process holds the CLI's pid (its zombie not yet reaped, or the number given to someone
+else), so a sweep never reaches another group; the keeper's own group is never a target (#350). A sweep still
+waiting is handed to the next keeper with the table (§4.4), and a keeper stopping for good waits for its sweeps and
+KILLs what is left at the end. Ptys are not swept: the kernel hangs up a terminal's foreground group as its shell
+exits, and the host ends a terminal's or a command's tree when it stops one. A detach (a restart, a swap) sends
+nothing, so agents and their helpers survive it.
+
+Without a keeper (Windows, `pnpm dev`, e2e, a debug app, a keeper whose child service did not answer) the host
+spawns the CLI itself, Claude's through `spawnClaudeCodeProcess` too (`adapters/local-process.ts`). On macOS and
+Linux it gets a process group of its own; a stop is `kill-tree.ts`'s TERM to every group in its tree and KILL to
+the survivors after 3 s, and once it has exited its group is swept the same way (`stopGroup`). On Windows a stop is
+`taskkill /T /F` on its tree, and once it has exited what it left running is found by parent links and creation
+times and ended (`collectOrphansWindows`). Being in a group of its own, the CLI is no longer in the host's: a host
+that is SIGKILLed takes it along only through stdin EOF, on which codex exits at once and claude after the turn it
+is in. The SDK adds the end of the CLI's stderr to a failure only for a process it spawned itself, so the adapter
+adds it the same way.
 
 **Leaving** (`main.ts`, `stopServices(mode)`). *Detach* — SIGTERM, SIGINT, the keeper's pipe closing, an
 uncaught exception, a swap's drain — calls `detach()` on every session handle, terminal and command run: nothing
 is sent to the tool, a waiting approval stays waiting, and output still in flight is recorded before the store
 closes. App processes and the in-process tool servers stop, as they live in the host. *Stop* — the keeper's `stop`
 event, or any ending without the child service — is the old path: sessions disposed, terminals and runs killed.
-After a stop the keeper ends whatever is left (stdin EOF and SIGHUP, 2 s, TERM to each group, 1 s, KILL).
+After a stop the keeper ends whatever is left (stdin EOF and SIGHUP, 2 s, TERM to each group, 1 s, KILL), and
+what exited agents left in their groups.
 
 **Re-attach.** At startup the host lists the keeper's children. Live agents re-attach after `listen`, through
 `resumeSession`, so a screen waking the same session joins the re-attach instead of starting a second process.
@@ -800,11 +827,121 @@ by absolute path. Those paths are versioned under nvm and Homebrew, so after a N
 
 **What phase 1 does not cover.** App views open from the host's HTTP door at `127.0.0.1:<port>`, so they work
 through a forward whose local port equals the remote port. An app whose manifest asks for its own origin gets a port of
-its own (`views/origin-ports.ts`), which one forward does not carry. The client's host list, search across machines and
-the grid layout moving to the client are the client's part of #82.
+its own (`views/origin-ports.ts`), which one forward does not carry. The other end, the host that links to this one, is
+§4.8.
 
 A host refuses a client of another protocol with `version_mismatch` and close code 4002. The message names both numbers
 and which side is older, so the person knows whether to update the app or the remote ([protocol.md](protocol.md) §1).
+
+### 4.8 Remote mode, phase 1: the hub's links (#82)
+
+The other half of §4.7: the host a window is attached to (the **hub**) links to the `centralu serve` hosts of other
+machines and shows their sessions and projects as its own ([plans/remote-hub.md](plans/remote-hub.md); the protocol
+side is [protocol.md](protocol.md) §6). Hosts talk only to hosts: the window still talks to one host, and each machine
+stays the one writer of its own store. The code is `packages/agent-host/src/links/`.
+
+**The pieces, as `main.ts` wires them.**
+
+| Piece | File | What it does |
+|---|---|---|
+| Registry | `stored.ts`, store v46 `linked_machines` | The machines the person linked: id, name, ssh target, remote shell, the `slot` for folding numbers, the version pair accepted |
+| Transport | `tunnel.ts` (`SshTunnel`) | Asks the remote for its connection line over ssh, then holds an ssh local forward |
+| Link | `links.ts` (`LinkedMachine`) | One per machine: transport, version check, client, backoff, status, the hidden-session set, the mirror's updates |
+| Client | `remote-client.ts` | The hub's WebSocket to the remote host: hello, cursor and epoch, calls, events, terminal frames |
+| Router | `router.ts`, `routes.ts` | In front of `HostServer.onRpc`: sends a call to the machine its ids name, merges lists, answers the rest locally |
+| Qualifier | `qualifier.ts`, `machine-ids.ts` | `<machine>.<id>` on the way in, stripped on the way out; numbers folded per slot |
+| Mirror | `stored.ts`, store v46 `machine_headers` | Each machine's sessions and projects as last listed, for when it cannot be reached |
+
+The three choke points of §5 of the plan are where it sits: the router is the `onRpc` the server calls, a link puts
+the remote's events into `server.broadcast` (so they get the hub's own `seq` and replay) and its terminal frames into
+the same lane as local ones. A host with no linked machine routes every call to its own handler, as before.
+
+**The transport.** Two ssh commands, the person's own `ssh`, keys and `~/.ssh/config`:
+
+```
+ssh -T -o BatchMode=yes -o ConnectTimeout=15 -- <target> <connection command>
+ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -o GatewayPorts=no -L 127.0.0.1:<port>:127.0.0.1:<port> -- <target>
+```
+
+The connection command depends on the remote's shell (`MachineInfo.shell`), because `ssh <target> <command>` hands the
+command to whatever login shell the remote account has:
+
+| Shell | The connection command | Measured on |
+|---|---|---|
+| `posix` | `sh -c 'if command -v centralu …; then exec centralu serve --connection; elif [ -x "$HOME/.centralu/bin/centralu" ]; then exec …; else echo CENTRALU-NOT-FOUND; exit 127; fi'` | the fake ssh of `tunnel.test.ts` |
+| `powershell` | `powershell -NoProfile -NonInteractive -EncodedCommand <UTF-16LE base64>` of the same lookup (`Get-Command centralu`, then `%USERPROFILE%\.centralu\bin\centralu.cmd`) | Windows 11, OpenSSH, PowerShell 5.1 |
+| `wsl` | The same PowerShell wrapper around `wsl.exe -d '<distro>' -- bash -lc 'echo <base64> \| base64 -d \| bash -l'`, the script being the POSIX lookup with `/mnt/*` taken off PATH | Ubuntu 24.04 in WSL2 on that laptop |
+
+A machine can name its own command in place of `centralu` (`MachineInfo.command`): a source checkout, a data folder
+other than `~/.centralu`. It runs as given, with no fallback.
+
+| Decision | Why |
+|---|---|
+| The fallback to the launcher is decided on the remote, in one command, and "not found" is a word on stdout | Exit codes do not survive Windows: OpenSSH runs the command under PowerShell, which turns any failure into 1. Measured: a 127 from WSL or from PowerShell itself arrived as 1, and a missing command inside WSL arrived as 0 |
+| Everything but plain words crosses PowerShell as base64 | PowerShell 5.1 re-parses quotes, and mangles a double quote passed to a native program; base64 is letters, digits, `+`, `/` and `=`, which no layer touches |
+| A WSL lookup takes `/mnt/*` off PATH | WSL appends Windows' PATH, and Windows' npm folder has a `centralu` shim: measured, `command -v centralu` in the distro named `/mnt/c/Users/<me>/AppData/Roaming/npm/centralu`, the Windows install |
+| The WSL forward runs `wsl.exe -d <distro> --exec sleep infinity` instead of `-N` | WSL stops a distro about 15 s after its last `wsl.exe` client exits, and its services with it. Measured: `centralu serve` under a systemd unit was stopped 19 s after it started, with no client attached; a forward to Windows' sshd alone never holds the distro |
+| Both ends of the forward bind 127.0.0.1, `GatewayPorts=no` | Nothing on either machine's network can use the link |
+| The same port number on both ends when it is free here, another one otherwise | §4.7: an app view's address carries the host's own port. Two machines on the default 17175 cannot both have it; app views of the second need the proxy of phase 2 anyway |
+| `BatchMode=yes` everywhere | A password or host-key prompt nobody can answer would hang the link. The person sets the keys up once, as for any ssh use |
+| The token is not stored; it is asked over ssh at every link start | It is the key to every RPC on that machine. One ssh round trip per start (measured 2.1 to 4.3 s to connected on a LAN) is cheap |
+| The ssh processes are children of the hub host, behind the `Tunnel` interface | Where they should live across a hub swap (a keeper child, or OpenSSH `ControlPersist`) is probe 4 of the plan; whichever wins replaces only `SshTunnel` |
+
+**The link's states** (`MachineInfo.status`, sent as `machine_status`): `connecting`; `connected`; `unreachable`
+(ssh failed, the forward or the socket dropped; retried with backoff from 2 s to a minute); `not_running` (Centralu
+answers there but no `centralu serve` runs; retried); `versions_differ`; `refused` (a token refused twice in a row:
+the connection line is read again once at once, since `--rotate-token` changes the token a running serve keeps until
+it restarts).
+
+**Versions are checked before connecting** (plan §4). The connection line carries the running remote host's `version`
+and `protocolVersion`, and the hub compares them with its own before it opens the socket, and again with
+`hello_ok.build` once it does. Another protocol never connects. Another version of the same channel holds the link at
+`versions_differ`, naming the older side, until the two match or the person declines (`machines.acceptVersions`,
+remembered for that pair only, so either side moving asks again). A dev build has no older side and connects on one
+protocol. The update itself is the next step: the hub's through its own update, the remote's by hand in phase 1
+(`npm i -g centralu` there) and over ssh in phase 3.
+
+**After connecting**, the link reads the remote's `sessions.list` and `projects.list` into the mirror, notes which
+sessions it hides (the remote's orchestrator and coordinators, §3.4 of the plan), and broadcasts `machine_resync`; the
+window re-reads that machine and wakes what died. The link keeps one cursor and epoch per remote, so a dropped socket
+gets the gap replayed, and a remote that restarted is a new lifetime and a resync. Events of sessions the hub does not
+show are dropped, and session events keep the mirror's names and states current between reads.
+
+**The reverse direction is off** (plan §3.2). The link is a client connection the hub opened. The protocol has no
+frame for a host to call its client, and `RemoteClient` drops anything shaped like a request without dispatching it
+(`remote-client.test.ts`), so a compromised remote cannot reach the hub through the link.
+
+**Measured through the hub** (probe 3, 2026-10-05; a MacBook on Wi-Fi, the remote a Windows 11 laptop on the same
+LAN; `centralu serve` of main in WSL2 and of beta.10 on Windows):
+
+| | WSL2 Ubuntu | Windows (PowerShell) |
+|---|---|---|
+| Link to connected | 2.1 to 4.3 s | 2.3 to 3.7 s |
+| RPC round trip through the hub, median / p95 | 5.4–12.8 / 7.7–36 ms | 5.5–22 / 8–68 ms |
+| Keystroke to echo (one RPC per key), median / p95 | 8–16 / 12–35 ms | 16–31 / 17–46 ms |
+| Terminal output, through the hub / straight to the remote | 6.3 MB at 7.5–15 / 5.5–8.7 MB/s | 0.34 MB in 10.0 / 9.5 s |
+| `git.diff` of a 400k-line change (the host's 0.5 MB cap) | 240–290 ms | 310–365 ms |
+
+The relay adds nothing measurable against the remote's own pace: Windows' slow output is ConPTY's, the same straight
+to the remote host. The 64 MiB slow-reader cut was not reached.
+
+**The window's side** (`packages/ui`; the recovery is in [state-management.md](state-management.md) §7):
+
+| Where | What it does with the links |
+|---|---|
+| Sidebar | Once there is a linked machine, groups by `machine`: this computer first (with "Your apps"), then each machine with its name and link state (`connected`, `connecting`, `away`, `version mismatch`, …), its projects and its user-folder apps. A project or session of a machine that is not connected stays listed, dimmed (`data-away`), and is never woken. A machine's + adds a folder there by its path (`projects.add {path, machine}`); its name opens Settings → Machines |
+| Settings → Machines | `machines.list/add/remove/reconnect`. Each row says the last error as what to do (`machineProblem` in `@cc/core`: a key not loaded, a host key never accepted, Centralu not installed or not serving there), and holds the version prompt |
+| Version prompt | From `MachineInfo.versions`: an older hub gets the existing update path; an older remote gets the exact `npm i -g centralu@<hub version>` to run there (phase 1 cannot update it); "Connect anyway" is `machines.acceptVersions`, offered only on one protocol |
+| New-session dialog, session menu | `agents.detect`, `agents.models`, `agents.capabilities` with the project's `machine` |
+| Session header | Names the machine (also every grid panel's header, and where approvals and questions are answered); "older CLI" compares with `agents.versions {machine}` |
+| Inbox, notice cards, OS notifications | Name the machine of a remote session |
+| Off for another machine's project | Reveal in the file manager and the file tree's menu, Open in IDE (`fs.resolve` is refused), moving its folder to this computer's trash on delete, New app, app views (`appStatus` says they open in a later version) |
+
+**What phase 1 does not cover yet.** App views of another machine are phase 2 (listed, their tools work there, their
+view says so); installing and updating the remote over ssh is phase 3. Usage gauges, `processes.strays/stop` and the
+quit dialog still ask this computer only. `centralu serve` on WSL needs something that starts it when the distro starts
+(the systemd unit of §4.7); the link then keeps the distro running.
 
 ## 5. dev-services (despite the name, this is the prod path — corrected 2026-08-15)
 
@@ -894,7 +1031,9 @@ This section used to describe something else entirely: a chokidar watcher parsin
 `~/.claude/projects/**` and `~/.codex/sessions/**` incrementally, writing `usage_facts` rows
 that a `usage.weekly` RPC would read, with aggregation in `core/usage`. **None of it exists** —
 chokidar is not a dependency, `core/usage` is not a directory, there is no `usage.weekly`
-method, and while `usage_facts` is still in `schema.sql` no code reads or writes it. It was
+method, and no build ever wrote a row to `usage_facts`. It stays in `schema.sql` for now: released builds up to
+v0.1.0-beta.10 still delete a project's rows from it, and this build is the first that leaves it alone, so dropping it
+is a contract step for a later release (§5.1 rule 2). It was
 also the *opposite* of the rule §8.1 states, and the two sections sat in this file
 contradicting each other. Reading a tool's private JSONL is exactly what §8.1 forbids, for
 the reason given there: an undocumented format breaks silently on upgrade, and a silent break

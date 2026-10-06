@@ -15,6 +15,7 @@ import {
   ToolSummary,
   UpdateStatus,
 } from './entities.js'
+import { MachineInfo } from './machines.js'
 
 /**
  * Normalized events flowing adapter → app (docs/protocol.md §2).
@@ -617,26 +618,19 @@ export const NormalizedEvent = z.discriminatedUnion('type', [
    */
   z.object({ ...appScoped, type: z.literal('update_status'), status: UpdateStatus }),
   /**
-   * An app's document changed (#81) — deliberately coarse: it never carries what changed, only
-   * that the receiving side should refetch via apps.state. Building a per-app event shape would
-   * make the protocol know about apps.
-   */
-  z.object({ ...appScoped, type: z.literal('app_state_changed'), appId: AppId }),
-  /**
-   * An external app's tool call finished (M4 A-4) — the same meaning and the same coarseness as
-   * `app_state_changed`: it never carries what changed, only that the receiving side should
-   * refetch. An external app's state lives inside the app process, so "refetch" here means
-   * calling that app's state tool again, not apps.state (on screen this is surfaced as
-   * `centralu/notifications/changed`, B-5).
+   * An external app's tool call finished (M4 A-4). Deliberately coarse: it never carries what
+   * changed, only that the receiving side should refetch. An external app's state lives inside the
+   * app process, so "refetch" means calling that app's state tool again (on screen this is surfaced
+   * as `centralu/notifications/changed`, B-5). An app is unique per (project, id), so the project is
+   * carried too — null means a user-folder app. This does not arrive for a call that never reached
+   * the app (rejected), or a call to a read-only tool (`readOnlyHint: true`): nothing changed. The
+   * host batches these per app over 250ms (up to 4 per second for one app). `cause` is only carried
+   * when every batched call shares a single owner — mixed owners means it is dropped (and everyone
+   * listens).
    *
-   * Why the names are split: receiving that event for a built-in app makes the UI refetch
-   * `apps.state(appId)`. Reusing the same name would add a useless round trip for every external
-   * app call, and mix external app ids into the built-in app's own state field. An app is unique
-   * per (project, id), so the project is carried too — null means a user-folder app. This does
-   * not arrive for a call that never reached the app (rejected), or a call to a read-only tool
-   * (`readOnlyHint: true`): nothing changed. The host batches these per app over 250ms (up to 4
-   * per second for one app). `cause` is only carried when every batched call shares a single
-   * owner — mixed owners means it is dropped (and everyone listens).
+   * The `external_` prefix is from when compiled-in apps had their own `app_state_changed`. That
+   * event was removed with them (#372); a host from before it may still send one, and a receiver
+   * drops it as an unknown type (docs/protocol.md §3.2).
    */
   z.object({
     ...appScoped,
@@ -686,6 +680,20 @@ export const NormalizedEvent = z.discriminatedUnion('type', [
    * Settings refetches `projectConsents.list`.
    */
   z.object({ ...appScoped, type: z.literal('project_consents_changed') }),
+  /**
+   * A linked machine's link changed state (#82, docs/plans/remote-hub.md): connecting, connected,
+   * unreachable, waiting on a version decision. Carries the whole record, the same shape
+   * `machines.list` answers, so the receiving side replaces its row rather than patching it.
+   */
+  z.object({ ...appScoped, type: z.literal('machine_status'), machine: MachineInfo }),
+  /**
+   * What the UI holds about one linked machine has to be read again (#82): the link (re)connected,
+   * the remote host restarted, or the machine was removed. The UI re-reads `sessions.list` and
+   * `projects.list` and runs its reconnect recovery for that machine's sessions alone: a session it
+   * held as live that the fresh list says is not is woken, the others are left as they are. The
+   * events of the gap are not replayed through the hub; the conversations are read again.
+   */
+  z.object({ ...appScoped, type: z.literal('machine_resync'), machineId: z.string() }),
   /**
    * Something changed in a watched directory (#34 — Finder, a terminal, an agent, regardless of
    * source).

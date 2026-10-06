@@ -43,9 +43,23 @@ import {
   UpdateStatus,
 } from './entities.js'
 import { ThemeFileContent, ThemeFileEntry, ThemeId } from './theme.js'
+import { MachineId, MachineInfo, RemoteShell } from './machines.js'
 import { parseTolerant } from './tolerant.js'
 
 /** UI → host RPC. Maps one-to-one to the port interface (platform/ports) (docs/protocol.md §3) */
+
+/**
+ * Which linked machine a row comes from (#82, docs/plans/remote-hub.md). Absent or null: the hub's
+ * own. Set by the hub on what it passes on from another machine, whose ids then read
+ * `<machine>.<id>`; the UI groups by this field and never parses the prefix.
+ */
+const machineField = { machine: z.string().nullable().optional() }
+
+/**
+ * The machine a per-machine question is for (#82): its agent CLIs, its usage, its folders. Absent:
+ * the hub's own, which is what every call meant before linked machines existed.
+ */
+const machineParam = { machine: MachineId.optional() }
 
 export const CreateSessionParams = z.object({
   projectId: ProjectId,
@@ -309,6 +323,13 @@ export const SessionInfo = z.object({
    * that predates it needs no change: absent and null read the same.
    */
   askedBy: z.string().nullable().optional(),
+  ...machineField,
+  /**
+   * The hub could not reach this session's machine, and answered from what it last heard (#82): the
+   * headers mirror. `live` is then the last-known value, not a fact, so the UI must neither drop the
+   * session nor try to wake it; it waits for that machine's `machine_resync`.
+   */
+  unreachable: z.boolean().optional(),
   /**
    * **Facts valid only while the process is alive** — these come from the host's memory, not
    * the database.
@@ -492,6 +513,9 @@ export const ProjectInfo = z.object({
     })
     .nullable()
     .default(null),
+  ...machineField,
+  /** The same mark as `SessionInfo.unreachable`: last heard, not current (#82) */
+  unreachable: z.boolean().optional(),
 })
 export type ProjectInfo = z.infer<typeof ProjectInfo>
 
@@ -582,6 +606,7 @@ export const TrashedSession = z.object({
   conversationFile: z.enum(['remove', 'keep', 'none']),
   /** The session's worktree, kept in place while it is in the trash; `remove` if deleting for good removes it */
   worktree: z.object({ path: z.string(), branch: z.string(), remove: z.boolean() }).nullable(),
+  ...machineField,
 })
 export type TrashedSession = z.infer<typeof TrashedSession>
 
@@ -758,22 +783,6 @@ export const RpcMethods = {
     params: z.object({ sessionId: SessionId, afterSeq: z.number().int().nonnegative() }),
     result: z.object({ text: z.string(), path: z.string() }).nullable(),
   },
-  /**
-   * Creates a coordinating session with a restricted view (#80, #81 physics). The
-   * opinions (task, foreman) belong to the app; this only creates the underlying capability of
-   * "an orchestrator-shaped session that can only see a member list."
-   */
-  'agents.createCoordinator': {
-    params: z.object({
-      name: z.string(),
-      memberSessionIds: z.array(z.string()).min(1),
-      roleAppend: z.string(),
-      tool: ToolName,
-      model: z.string().optional(),
-      effort: z.string().optional(),
-    }),
-    result: SessionInfo,
-  },
   'agents.worktreeStatus': {
     params: z.object({ sessionId: SessionId }),
     result: z
@@ -842,9 +851,9 @@ export const RpcMethods = {
       sessions: z.array(ExternalSession),
     }),
   },
-  'agents.capabilities': { params: z.object({ tool: ToolName }), result: AdapterCapabilities },
+  'agents.capabilities': { params: z.object({ tool: ToolName, ...machineParam }), result: AdapterCapabilities },
   'agents.detect': {
-    params: z.object({}),
+    params: z.object({ ...machineParam }),
     result: z.array(ToolStatus),
   },
   /**
@@ -853,12 +862,12 @@ export const RpcMethods = {
    * `package.json` says the version), so this is cheap either way.
    */
   'agents.versions': {
-    params: z.object({ force: z.boolean().default(false) }),
+    params: z.object({ force: z.boolean().default(false), ...machineParam }),
     result: AgentVersions,
   },
   /** "Move idle sessions to a newly installed agent CLI" on or off (#297). On by default */
   'agents.setAutoApplyVersions': {
-    params: z.object({ enabled: z.boolean() }),
+    params: z.object({ enabled: z.boolean(), ...machineParam }),
     result: AgentVersions,
   },
   /**
@@ -867,7 +876,7 @@ export const RpcMethods = {
    * background tasks is left as it is and listed in `busy`; with `autoApply` on it moves once it is idle.
    */
   'agents.applyVersions': {
-    params: z.object({}),
+    params: z.object({ ...machineParam }),
     result: z.object({ restarted: z.array(z.string()).default([]), busy: z.array(z.string()).default([]) }),
   },
   'git.status': { params: z.object({ projectId: ProjectId }), result: z.array(GitFileStatus) },
@@ -989,7 +998,7 @@ export const RpcMethods = {
     result: z.object({ ok: z.literal(true) }),
   },
   'workspace.load': { params: z.object({}), result: z.record(z.string(), z.unknown()).nullable() },
-  'projects.add': { params: z.object({ path: z.string() }), result: ProjectInfo },
+  'projects.add': { params: z.object({ path: z.string(), ...machineParam }), result: ProjectInfo },
   /**
    * **Deletes** a project — not just removing it from the list, but erasing it from this app's
    * records entirely (its sessions, conversations, search index, approval rules, even usage
@@ -1244,33 +1253,15 @@ export const RpcMethods = {
     result: z.looseObject({ contents: z.array(z.looseObject({ uri: z.string() })) }),
   },
   /**
-   * App state (#81). One JSON document plus an enabled flag per app — no per-app protocol is
-   * ever built. Only the app knows what the document means; the core and the protocol only carry it.
-   */
-  'apps.state': {
-    params: z.object({ appId: AppId }),
-    result: z.object({ doc: z.unknown().nullable(), enabled: z.boolean() }),
-  },
-  'apps.setState': {
-    params: z.object({ appId: AppId, doc: z.unknown() }),
-    result: z.object({ ok: z.literal(true) }),
-  },
-  /**
-   * A screen calls an app tool — **built-in and external apps use the same door** (#81, M4 A-4).
+   * A screen calls an app tool (M4 A-4).
    *
-   * Built-in app (no `projectId`, and its id is on the built-in roster): treated as though the
-   * person called it — instead of a profile judgment, only "is this that app's tool" is checked.
-   * caller.sessionId=null means a person.
-   *
-   * External app: an app is unique per (project, id), so `projectId` distinguishes it (null =
-   * a user-folder app). The caller is recorded **as a screen**, and only tools open to a screen
+   * An app is unique per (project, id), so `projectId` distinguishes it (null or absent = a
+   * user-folder app). The caller is recorded **as a screen**, and only tools open to a screen
    * (with `app` in `visibility`) can be called. `result` is exactly the app's own answer (the
    * shape the screen's AppBridge receives). If `status` is `rejected`, the host never sent it to
    * the app at all — the reason is in `text`.
    *
-   * Why there is no separate door for each: to the caller (a screen), built-in and external are
-   * the same operation. Two doors would force the UI to know which one it is dealing with, and
-   * that distinction is a fact only the host knows.
+   * This door once also served the compiled-in apps (#81); they were removed in #372.
    */
   'apps.invoke': {
     params: z.object({
@@ -1289,15 +1280,10 @@ export const RpcMethods = {
       result: z.unknown().optional(),
     }),
   },
-  'apps.setEnabled': {
-    params: z.object({ appId: AppId, enabled: z.boolean() }),
-    result: z.object({ ok: z.literal(true) }),
-  },
   /**
    * Discovered external apps (M4 A-2) — project apps and user-folder apps. Apps from an
    * untrusted project and apps with a broken manifest are listed too, with a reason (`status`,
-   * `error`): hiding them would leave nowhere to ask why they do not show up. Built-in apps are
-   * not here (the built-in roster is compiled in, and A-8 merges the two).
+   * `error`): hiding them would leave nowhere to ask why they do not show up.
    */
   'apps.list': { params: z.object({}), result: z.array(ExternalAppInfo) },
   /**
@@ -1715,7 +1701,7 @@ export const RpcMethods = {
    * API. An older tool may not know this, so it comes back as supported=false plus a reason.
    */
   'agents.models': {
-    params: z.object({ tool: ToolName }),
+    params: z.object({ tool: ToolName, ...machineParam }),
     result: z.object({
       supported: z.boolean(),
       reason: z.string().optional(),
@@ -1723,7 +1709,7 @@ export const RpcMethods = {
     }),
   },
   'agents.usage': {
-    params: z.object({ tool: ToolName }),
+    params: z.object({ tool: ToolName, ...machineParam }),
     result: z.object({ supported: z.boolean(), reason: z.string().optional(), usage: UsageSnapshot.nullable() }),
   },
   /** File search for `@` autocomplete (within the project only) */
@@ -1735,12 +1721,12 @@ export const RpcMethods = {
    * **shows it** and lets the person choose.
    */
   'processes.strays': {
-    params: z.object({}),
+    params: z.object({ ...machineParam }),
     result: z.array(z.object({ pid: z.number(), command: z.string(), cwd: z.string() })),
   },
   /** Stops the chosen ones (SIGTERM). The host re-measures the condition right before killing them */
   'processes.stop': {
-    params: z.object({ pids: z.array(z.number()) }),
+    params: z.object({ pids: z.array(z.number()), ...machineParam }),
     result: z.object({ stopped: z.number() }),
   },
   'files.search': {
@@ -1915,9 +1901,38 @@ export const RpcMethods = {
         /** Which project or session this rule belongs to — the same rule from two different projects used to look like one identical row in Settings (#183) */
         projectId: z.string().nullable().default(null),
         sessionId: z.string().nullable().default(null),
+        /** A rule of a linked machine (#82): its `id` is then folded into a negative number the hub maps back */
+        ...machineField,
       }),
     ),
   },
+  /**
+   * Linked machines (#82, docs/plans/remote-hub.md). The hub's own: these are never forwarded.
+   * Adding one is the consent for this computer to reach that machine (plan §3.2): the person can
+   * already open an SSH connection to it. The link uses the person's own `ssh` and keys
+   * (`BatchMode`), and expects `centralu serve` running there (docs/agent-host.md §4.7).
+   */
+  'machines.list': { params: z.object({}), result: z.array(MachineInfo) },
+  'machines.add': {
+    params: z.object({
+      name: z.string().min(1).max(64),
+      sshTarget: z.string().min(1).max(255),
+      shell: RemoteShell.default('posix'),
+      wslDistro: z.string().max(64).nullable().optional(),
+      command: z.string().max(1024).nullable().optional(),
+    }),
+    result: MachineInfo,
+  },
+  /** Unlinks a machine: its sessions and projects leave this computer's lists. Nothing on the machine changes */
+  'machines.remove': { params: z.object({ machineId: MachineId }), result: z.object({ ok: z.literal(true) }) },
+  /** Tries the link again now instead of waiting out its backoff */
+  'machines.reconnect': { params: z.object({ machineId: MachineId }), result: MachineInfo },
+  /**
+   * Connects although the two sides run different versions of one protocol: the person declined to
+   * align them (plan §4). Remembered for this pair of versions only; when either side moves, the
+   * question comes again. Refused when the protocols differ.
+   */
+  'machines.acceptVersions': { params: z.object({ machineId: MachineId }), result: MachineInfo },
   /**
    * The trash (#204). Only the person reaches these: the RPC is the UI's channel, and neither the agents' tools nor
    * the apps' broker has a trash or purge verb. `agents.deleteSession` is the way in.

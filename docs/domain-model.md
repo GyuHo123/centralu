@@ -36,7 +36,7 @@ Diagrams are UML in Mermaid. `<<kind>>` marks what a session is created as; `<<r
 | Ordinary session | A `worker` in a project that is not a builder, a manager or an app's agent. Gets the read-only `reader` tools (worktree and delegated sessions too), unless Settings turns them off | `readsOwnProject`, `packages/agent-host/src/sessions/manager.ts` | |
 | Worktree manager | `<<role>>` A session with worktree sessions under it, or the one a project's manager slot names. Directs only its own children | `isWorktreeManager`, `manager.ts`; `projects.worktree_manager` | lead, parent |
 | Worktree session (worker) | A session working in its own git worktree and branch, always under a manager (`parentSessionId`) | `SessionInfo.worktree`, `parentSessionId` | branch session |
-| Coordinator | A session with a fixed list of sessions it may see (`scopeSessionIds`) and a role text (`roleAppend`), made through `agents.createCoordinator`. The control app that created them was removed (#372); the kind and the RPC stay, nothing calls the RPC now, and old coordinators carry `appId: 'control'` | `kind: 'coordinator'`; `createCoordinator`, `manager.ts` | sub-orchestrator |
+| Coordinator | A session with a fixed list of sessions it may see (`scopeSessionIds`) and a role text (`roleAppend`), made only by the control app's tasks. That app was removed in #372 and the RPC that created one (`agents.createCoordinator`) after it, so nothing makes a new one; the kind stays for the ones already in people's stores, which are listed, read, woken and trashed like any session, and carry `appId: 'control'` | `kind: 'coordinator'`; `manager.ts` | sub-orchestrator |
 | Builder | `<<role>>` The session building one app. A session carrying `appId` **and** named by that app in the builder map (`apps.builders`) | `builderRefOf`, `manager.ts`; `packages/agent-host/src/sessions/app-builder.ts` | |
 | App-agent session | `<<role>>` A session an app started through `run_agent`: carries `appId`, is not the builder, runs under `safe`, gets no apps and no reader tools, and its answer goes back to the app | `isAppAgentSession`, `runAppAgent`, `manager.ts`; `packages/agent-host/src/sessions/app-agents.ts` | |
 | Delegated ("asked by") session | `<<role>>` A session another project's session started or reused through `ask_project`; marked with `askedBy` | `SessionInfo.askedBy`; `packages/agent-host/src/sessions/ask-project.ts`; [agent-host.md](agent-host.md) §1.2 | delegate |
@@ -120,7 +120,8 @@ Diagrams are UML in Mermaid. `<<kind>>` marks what a session is created as; `<<r
 | Codex bridge | A small Node MCP server that `codex app-server` starts for a session: one for Centralu's tools and one per attached app. It calls back into the host over the front door (or the host's own port without a keeper). Claude needs none: its servers run inside the host | `packages/agent-host/src/adapters/codex/orchestrator-bridge.mjs` | orchestrator bridge (it carries more) |
 | `centralu serve` | The npm launcher running a host headless on `127.0.0.1:17175`, no window and no keeper, for remote mode phase 1 | `packaging/npm/centralu/bin/serve.mjs`; [agent-host.md](agent-host.md) §4.7 | |
 | Stream epoch | A random id per host life. A client whose epoch differs after a reconnect resyncs instead of replaying | `packages/agent-host/src/transport/event-log.ts`; [protocol.md](protocol.md) | |
-| Machine *(planned)* | A computer running its own host, linked to the others host to host. Not in the code yet: open PRs #409, #410 | [plans/remote-hub.md](plans/remote-hub.md) | |
+| Machine | A computer running its own host, linked to the others host to host (§6). Ids it hands over read `<machine>.<id>` | `MachineInfo`, `packages/protocol/src/machines.ts`; `packages/agent-host/src/links/`; [agent-host.md](agent-host.md) §4.8 | remote, server |
+| Hub | The host a window is attached to, seen from the machines it links to: it routes the window's calls to them and mirrors what they last said | `packages/agent-host/src/links/router.ts`; [plans/remote-hub.md](plans/remote-hub.md) | |
 
 ### 1.6 Words that mean two things
 
@@ -354,17 +355,18 @@ import confirmations (`<data>/app-imports.json`), kept versions (`<data>/app-ver
 | Grid layout | Which panels the grid shows, in order: a session or an app, with an app panel's span |
 | Workspace snapshot | The UI's state as one blob, written by the UI, read back at start |
 | Commit attribution | Which session made a commit, picked up from the agent's `git commit` output; kept only here, never in the repository (#50) |
-| Usage facts | A table for tokens and cost per day, tool, model and project that **nothing reads or writes** today; only deleting a project touches it. The usage people see is the account's limits, read live (`UsageSnapshot`, [agent-host.md](agent-host.md) §6) |
+| Usage facts | A table for tokens and cost per day, tool, model and project that **nothing reads or writes**: no build ever wrote a row, and releases up to v0.1.0-beta.10 only deleted a deleted project's rows. The usage people see is the account's limits, read live (`UsageSnapshot`, [agent-host.md](agent-host.md) §6) |
 
 Where it is stored:
 
-- `grid_layout`: the grid's panels (sessions and apps, store v42; spans v43).
+- `grid_layout`: the grid's panels (sessions and apps, store v42; spans v43; a linked machine's session in a column
+  of its own, v46).
 - `grid_panels`: the grid of session panels as v9 made it, kept for hosts older than v42 (this build copies it once
   and afterwards only removes a trashed session's row); dropped in a later contract step
   ([agent-host.md](agent-host.md) §5.1).
 - `workspace`: the UI's snapshot, one row.
 - `commit_sessions`: commit attribution.
-- `usage_facts`: unused (above).
+- `usage_facts`: unused (above); dropped in a later contract step ([agent-host.md](agent-host.md) §5.1).
 
 ## 3. Session state
 
@@ -637,8 +639,41 @@ sequenceDiagram
 If B fails after A drained, the keeper starts A's build again from its kept copy. Every phase is pushed to windows
 (`view.swap`). Detail: [architecture.md](architecture.md) §4.2, [agent-host.md](agent-host.md) §4.2.
 
-## 6. Planned: machines
+## 6. Machines
 
-Remote mode as linked hosts ([plans/remote-hub.md](plans/remote-hub.md), open PRs #409 and #410) adds a **Machine**:
-a computer running its own host with its own store, agents and sign-ins, linked to other hosts host to host. Nothing
-of it is in the code on `main` yet; when it lands, it gets its own rows here.
+Remote mode as linked hosts ([plans/remote-hub.md](plans/remote-hub.md), phase 1) adds a **Machine**: a computer
+running its own host with its own store, agents and sign-ins. The host a window is attached to is the **hub** for it:
+the person links other machines to it, each reached over the person's own ssh, and the hub shows their sessions and
+projects next to its own. Hosts talk only to hosts; each machine stays the one writer of its own store.
+
+```mermaid
+classDiagram
+  class Hub["Hub (host)"]
+  class Machine {
+    id, name
+    ssh target, shell
+    status
+  }
+  class Header["Mirrored header"]
+  Hub "1" o-- "*" Machine : links
+  Machine "1" *-- "*" Header : last listed sessions and projects
+  Machine "1" o-- "*" Session : runs, on its own host
+```
+
+- A machine's sessions, projects and terminals keep their ids on their own host; the hub qualifies them as
+  `<machine>.<id>` and every row carries an explicit `machine` field, so the UI never parses an id. An approval rule
+  id from a machine is folded into a negative number per machine (its `slot`).
+- What the hub last heard from a machine is mirrored, so a machine that is away still lists its sessions (marked
+  unreachable, last-known `live`, never woken). The remote's orchestrator and coordinators are not shown.
+- The link's state (`connecting`, `connected`, `unreachable`, `versions_differ`, ...) is live only and sent as
+  `machine_status`; a (re)connect says `machine_resync`. Detail: [agent-host.md](agent-host.md) §4.8,
+  [protocol.md](protocol.md) §6.
+
+Where it is stored:
+
+- `linked_machines`: the machines the person linked: id, name, ssh target, remote shell, the slot for folding
+  numbers, the version pair accepted (store v46).
+- `machine_headers`: the mirror: each machine's sessions and projects as it last listed them (store v46).
+
+Live only (hub memory): each link's status, its ssh processes and forward, the remote's cursor and epoch. Not stored
+anywhere: the remote host's token, asked over ssh at every link start.

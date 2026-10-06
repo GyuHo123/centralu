@@ -13,7 +13,7 @@ import { Store } from './store.js'
  * v22, v23 and v24 broke the same six assertions one after another: if the version is written
  * six times, every migration bills six small chores.
  */
-const LATEST_SCHEMA = 45
+const LATEST_SCHEMA = 46
 
 function seeded() {
   const s = new Store()
@@ -2007,6 +2007,21 @@ describe('migration v45 — a delegated session remembers who asked', () => {
     expect(plain!.askedBy).toBeNull()
     s.upsertSession({ ...plain!, id: 's2', askedBy: 's1' })
     expect(s.listSessions().find((x) => x.id === 's2')!.askedBy).toBe('s1')
+    s.close()
+  })
+})
+
+/**
+ * `usage_facts` is on its way out (#372 follow-up): no build ever wrote a row, and this build is the first that does
+ * not touch it, which is what lets a later contract step drop it (docs/agent-host.md §5.1 rule 2). Deleting a project
+ * was the last statement that named it; on a store where the table is already gone it works all the same.
+ */
+describe('usage_facts is no longer touched', () => {
+  it('deleting a project works on a store without the table', () => {
+    const s = seeded()
+    ;(s as unknown as { db: Database.Database }).db.exec(`DROP TABLE usage_facts`)
+    s.deleteProject('p1')
+    expect(s.listProjects()).toEqual([])
     s.close()
   })
 })

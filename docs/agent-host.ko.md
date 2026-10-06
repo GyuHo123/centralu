@@ -43,7 +43,7 @@ claude는 인프로세스, codex는 stdio 다리.
 |---|---|---|---|---|
 | `orchestrator` | 하나뿐인 오케스트레이터 | 모든 세션 | 매니저·빌더 전용을 뺀 전부 | 역할과 사용법 |
 | `manager` | 워크트리 자식이 있거나 프로젝트의 매니저 자리인 세션 (#69, #76) | 자기 워크트리 자식 | 목록, 읽기, 보내기, 워크트리 세션 제안·삭제 | 워크트리 규칙 |
-| `scoped` | 코디네이터(#80. `agents.createCoordinator`로 만든다. 예전에는 #97에서 걷어낸 관제 앱의 작업이 만들었다) | 자기 멤버 | 목록, 읽기, 보내기 | 자기 경계 |
+| `scoped` | 코디네이터(#80). 관제 앱의 작업만 만들었고, 그것은 만들던 RPC와 함께 #372에서 걷어냈다. 저장소에 있는 것은 이 프로필로 깨어난다 | 자기 멤버 | 목록, 읽기, 보내기 | 자기 경계 |
 | `builder` | 앱을 만드는 세션 (M4 C-3) | 자기 앱 | `check` | 만들고 검사하기 |
 | `reader` | 프로젝트에 속한 그 밖의 모든 세션 (#320) | 자기 프로젝트, 호출할 때 읽음 | `read_session`(id 없으면 목록), `recall`, `app_guide`; `ask_project`(#371, §1.2). 그리고 `find_apps`, `attach_app`, `detach_app`(#371 A, apps.md §9.4) | 없음 |
 
@@ -131,7 +131,7 @@ project export the sprites again, then tell me where the files are"에 로드하
 5번 중 0번 — 지난 대화와 자기 폴더를 뒤졌다. #320이 `recall`에서 잰 실패와 같다. 놓친 경우는 그런 프로젝트가 없다는 답이고,
 사람이 도구를 이름으로 부를 수 있다. 상관없는 사용법 질문 다섯 중 하나가 없는 프로젝트를 대서 불렀다(거절, 카드 없음).
 설명은 "a task"가 아니라 "a job"이라 쓴다: 모델에게는 같게 읽히고(각각 10번 중 7번), 모든 자리의 도구를 나열하는 안내서에
-없어진 컨트롤 레일의 task라는 말이 남지 않게 한다(#97). 다른 문구 두 가지는 낫지 않았다(5번 중 0, 3).
+없어진 컨트롤 레일의 task라는 말이 남지 않게 한다(#372). 다른 문구 두 가지는 낫지 않았다(5번 중 0, 3).
 
 `scripts/smoke-ask-project.mts`가 임시 스토어와 데이터 폴더에서 처음부터 끝까지 돌린다: 한 임시 프로젝트의 haiku 세션이 다른
 프로젝트에 자기만 아는 숫자를 쓴 파일을 만들게 하고 그 파일을 읽어 온다(`CALLER`/`CALLEE` = `claude` 또는 `codex`).
@@ -509,17 +509,42 @@ sessionId, version?}`(띄운 CLI 버전, #297, §4.6), `{kind:"terminal", id, cw
 
 - **에이전트.** 매니저는 어댑터에 `ProcessSource`(`adapters/contract.ts`)를 넘긴다: 키퍼에서 `spawn`하거나, 쥐어 둔
   프로세스를 `adopt`한다. claude는 이것을 `spawnClaudeCodeProcess`로 받고, `CodexClient`는 띄우는 대신 그 프로세스를
-  받는다. `KeeperAgentProcess`는 둘이 쓰는 `ChildProcess`의 표면을 갖지만, `kill()`은 키퍼에 보내는 요청이고 프로세스를
-  놓았거나 호스트가 끝나는 중이면 결코 보내지 않는다(SDK는 주인이 끝날 때 자기 프로세스를 kill한다). `stdin.end()`는
+  받는다. `KeeperAgentProcess`는 둘이 쓰는 `ChildProcess`의 표면을 갖지만, `kill()`은 CLI의 프로세스 그룹 전체(아래)에
+  대해 키퍼에 보내는 요청이고 프로세스를 놓았거나 호스트가 끝나는 중이면 결코 보내지 않는다(SDK는 주인이 끝날 때 자기
+  프로세스를 kill한다). `stdin.end()`는
   `close_stdin`이다. codex 요청 id에는 클라이언트마다 접두사가 붙어, 이전 호스트의 요청에 대한 답이 우리 요청을 풀지 못한다.
 - **터미널과 명령.** `TerminalService`와 `CommandRunner`는 node-pty 대신 키퍼의 pty 모듈(`KeeperPty`, node-pty의 표면)을
-  받는다. 멈출 때는 여전히 프로세스 트리를 걷는다(`kill-tree.ts`). 어디서든 통한다.
+  받는다. 멈추거나 닫을 때는 프로세스 트리를 걷는다(`kill-tree.ts`). 어디서든 통한다. 터미널을 닫을 때는 셸이 끊김
+  신호를 받기 전에 트리를 잡는다: 거기서 띄운 개발 서버는 자기 그룹에 있고(작업 제어), 끊김 신호를 무시하는 서버는 예전에
+  계속 돌고 있었다.
+
+**에이전트를 멈추면 끝나는 것.** 에이전트 CLI는 자기 도우미를 띄운다: Claude Code의 LSP 도구는
+`typescript-language-server`를 띄우고 그것이 `tsserver`를 띄운다(하나가 3.4 GB까지 갔다). 사용자 설정의 MCP 서버, 셸도
+있다. 도우미는 CLI의 프로세스 그룹을 함께 쓰고, `setsid`가 그 그룹을 CLI만의 것으로 만들었으므로 그룹은 CLI와 그것이
+띄운 것뿐이다. 멈춤은 그 그룹에 신호를 보낸다: 호스트의 TERM과, 유예가 지나도 CLI가 남아 있을 때 뒤따르는 KILL(SDK는
+5초, codex는 EOF 뒤 2초)이 도우미에게도 닿는다. 그리고 에이전트가 끝나면, 어떻게 끝났든(멈춤, 크래시, 정리하지 않는 CLI)
+키퍼가 그 그룹을 쓸어 낸다: 곧바로 TERM, 2초 뒤 아직 남은 것에 KILL(`Sweep`, `keeper/children/mod.rs`). 예전에는 CLI의
+pid에만 신호를 보냈고, 남은 것은 launchd/init으로 넘어가 메모리를 쥔 채 계속 돌았다. 그룹 번호는 그룹에 누가 남아 있는
+동안 다시 쓰이지 않고, CLI의 pid를 어떤 프로세스든 쥐고 있으면(아직 거두지 않은 좀비, 또는 남에게 넘어간 번호) 쓸어 내기를
+보내지 않으므로, 쓸어 내기는 다른 그룹에 닿지 않는다. 키퍼 자신의 그룹은 결코 대상이 아니다(#350). 아직 기다리는
+쓸어 내기는 표와 함께 다음 키퍼에 넘어가고(§4.4), 아주 멈추는 키퍼는 쓸어 내기를 기다렸다가 마지막에 남은 것을 KILL한다.
+pty는 쓸어 내지 않는다: 셸이 끝나면 커널이 터미널의 전경 그룹에 끊김 신호를 보내고, 호스트는 터미널이나 명령을 멈출 때
+그 트리를 끝낸다. detach(재시작, 교체)는 아무것도 보내지 않으므로 에이전트와 도우미는 살아남는다.
+
+키퍼가 없으면(Windows, `pnpm dev`, e2e, 디버그 앱, 자식 서비스가 답하지 않은 키퍼) 호스트가 CLI를 직접 띄운다. Claude도
+`spawnClaudeCodeProcess`로 그렇게 한다(`adapters/local-process.ts`). macOS와 Linux에서는 CLI가 자기 프로세스 그룹을
+갖는다. 멈춤은 `kill-tree.ts`의 방식이다: 트리의 모든 그룹에 TERM, 3초 뒤 살아남은 것에 KILL. 끝난 뒤에는 그 그룹을 같은
+방식으로 쓸어 낸다(`stopGroup`). Windows에서 멈춤은 트리에 `taskkill /T /F`이고, 끝난 뒤에는 남긴 것을 부모 링크와 생성
+시각으로 찾아 끝낸다(`collectOrphansWindows`). 자기 그룹에 있으므로 CLI는 더 이상 호스트의 그룹에 있지 않다: SIGKILL을
+받은 호스트는 stdin EOF로만 그것을 데려간다. codex는 EOF에 바로 끝나고, claude는 하던 턴을 마치고 끝난다. SDK는 자기가
+띄운 프로세스에만 실패 메시지에 CLI의 stderr 끝을 붙이므로, 어댑터가 같은 방식으로 붙인다.
 
 **떠나기** (`main.ts`, `stopServices(mode)`). *detach* — SIGTERM, SIGINT, 키퍼 파이프가 닫힘, 잡히지 않은 예외,
 교체의 드레인 — 는 모든 세션 핸들·터미널·명령 실행에 `detach()`를 부른다: 도구에는 아무것도 보내지 않고, 기다리는
 승인은 계속 기다리며, 오는 중이던 출력은 저장소가 닫히기 전에 기록한다. 앱 프로세스와 in-process 도구 서버는 호스트에
 살므로 멈춘다. *stop* — 키퍼의 `stop` 이벤트, 또는 자식 서비스 없는 모든 끝 — 은 예전 경로다: 세션을 정리하고 터미널과
-실행을 죽인다. stop 뒤에는 남은 것을 키퍼가 끝낸다(stdin EOF와 SIGHUP, 2초, 각 그룹에 TERM, 1초, KILL).
+실행을 죽인다. stop 뒤에는 남은 것을 키퍼가 끝낸다(stdin EOF와 SIGHUP, 2초, 각 그룹에 TERM, 1초, KILL). 끝난
+에이전트가 그룹에 남긴 것도.
 
 **다시 붙기.** 시작할 때 호스트가 키퍼의 자식 목록을 읽는다. 살아 있는 에이전트는 `listen` 뒤에 `resumeSession`을 거쳐
 다시 붙는다. 그래서 같은 세션을 깨우는 화면은 두 번째 프로세스를 띄우지 않고 다시 붙기에 합류한다. 그 세션들은 시작 시
@@ -722,11 +747,117 @@ stdout에는 그 줄만 나가고, 설명할 것은 stderr로 간다. 명령을 
 
 **1단계가 다루지 않는 것.** 앱 뷰는 호스트의 HTTP 문 `127.0.0.1:<port>`에서 열리므로, 로컬 포트가 원격 포트와 같은
 포워드를 통해서는 동작한다. 매니페스트가 자기 origin을 요구하는 앱은 따로 포트를 받으며(`views/origin-ports.ts`),
-포워드 하나로는 실리지 않는다. 클라이언트의 호스트 목록, 머신을 가로지르는 검색, 그리드 배치를 클라이언트로 옮기는
-것은 #82의 클라이언트 쪽 몫이다.
+포워드 하나로는 실리지 않는다. 반대편, 이 호스트에 링크하는 호스트는 §4.8이다.
 
 호스트는 다른 프로토콜의 클라이언트를 `version_mismatch`와 종료 코드 4002로 거절한다. 메시지는 두 숫자와 어느 쪽이
 더 오래되었는지를 말하므로, 사람은 앱을 업데이트할지 원격을 업데이트할지 안다 ([protocol.ko.md](protocol.ko.md) §1).
+
+### 4.8 원격 모드 1단계: 허브의 링크 (#82)
+
+§4.7의 나머지 반쪽이다. 창이 붙은 호스트(**허브**)는 다른 기기의 `centralu serve` 호스트에 링크하고, 그 세션과
+프로젝트를 제 것처럼 보여 준다([plans/remote-hub.md](plans/remote-hub.md). 프로토콜 쪽은
+[protocol.ko.md](protocol.ko.md) §6). 호스트는 호스트하고만 말한다: 창은 여전히 호스트 하나와 말하고, 각 기기는 자기
+저장소의 유일한 작성자로 남는다. 코드는 `packages/agent-host/src/links/`에 있다.
+
+**`main.ts`가 엮는 조각들.**
+
+| 조각 | 파일 | 하는 일 |
+|---|---|---|
+| 레지스트리 | `stored.ts`, store v46 `linked_machines` | 사람이 링크한 기기: id, 이름, ssh 대상, 원격 셸, 숫자를 접는 `slot`, 받아들인 버전 쌍 |
+| 전송 | `tunnel.ts` (`SshTunnel`) | ssh로 원격에 연결 줄을 묻고, ssh 로컬 포워드를 잡고 있는다 |
+| 링크 | `links.ts` (`LinkedMachine`) | 기기마다 하나: 전송, 버전 확인, 클라이언트, 재시도 간격, 상태, 숨기는 세션 집합, 미러 갱신 |
+| 클라이언트 | `remote-client.ts` | 허브가 원격 호스트에 거는 WebSocket: hello, 커서와 에포크, 호출, 이벤트, 터미널 프레임 |
+| 라우터 | `router.ts`, `routes.ts` | `HostServer.onRpc` 앞에서: id가 가리키는 기기로 호출을 보내고, 목록을 합치고, 나머지는 로컬로 답한다 |
+| 한정자 | `qualifier.ts`, `machine-ids.ts` | 들어올 때 `<machine>.<id>`를 붙이고 나갈 때 뗀다. 숫자는 slot마다 접는다 |
+| 미러 | `stored.ts`, store v46 `machine_headers` | 기기마다 마지막으로 받은 세션과 프로젝트 목록. 닿지 않을 때 대신 답한다 |
+
+계획 문서 §5의 세 길목이 그 자리다: 라우터가 서버가 부르는 `onRpc`이고, 링크는 원격의 이벤트를 `server.broadcast`에
+넣으며(그래서 허브 자신의 `seq`와 재전송을 받는다), 터미널 프레임은 로컬 것과 같은 길로 넣는다. 링크된 기기가 없는
+호스트는 모든 호출을 전처럼 자기 핸들러로 보낸다.
+
+**전송.** 사람 자신의 `ssh`, 키, `~/.ssh/config`로 두 번:
+
+```
+ssh -T -o BatchMode=yes -o ConnectTimeout=15 -- <target> <연결 명령>
+ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -o GatewayPorts=no -L 127.0.0.1:<port>:127.0.0.1:<port> -- <target>
+```
+
+연결 명령은 원격의 셸(`MachineInfo.shell`)에 따라 다르다. `ssh <target> <명령>`은 원격 계정의 로그인 셸이 무엇이든
+그 셸에 명령을 넘기기 때문이다:
+
+| 셸 | 연결 명령 | 잰 곳 |
+|---|---|---|
+| `posix` | `sh -c 'if command -v centralu …; then exec centralu serve --connection; elif [ -x "$HOME/.centralu/bin/centralu" ]; then exec …; else echo CENTRALU-NOT-FOUND; exit 127; fi'` | `tunnel.test.ts`의 가짜 ssh |
+| `powershell` | 같은 찾기(`Get-Command centralu`, 다음 `%USERPROFILE%\.centralu\bin\centralu.cmd`)를 `powershell -NoProfile -NonInteractive -EncodedCommand <UTF-16LE base64>`로 | Windows 11, OpenSSH, PowerShell 5.1 |
+| `wsl` | 같은 PowerShell 감싸기 안에 `wsl.exe -d '<distro>' -- bash -lc 'echo <base64> \| base64 -d \| bash -l'`. 스크립트는 PATH에서 `/mnt/*`를 뺀 POSIX 찾기 | 그 노트북의 WSL2 Ubuntu 24.04 |
+
+기기마다 `centralu` 대신 돌릴 명령을 적을 수 있다(`MachineInfo.command`): 소스 체크아웃, `~/.centralu`가 아닌 데이터
+폴더. 적힌 그대로 돌고, 대체 경로는 없다.
+
+| 결정 | 이유 |
+|---|---|
+| 런처로 넘어가는 판단은 원격에서 명령 하나로 하고, "없음"은 stdout의 단어로 말한다 | 종료 코드가 Windows를 건너오지 못한다: OpenSSH는 명령을 PowerShell 아래에서 돌리고, PowerShell은 어떤 실패든 1로 바꾼다. 잰 값: WSL이나 PowerShell의 127은 1로 왔고, WSL 안의 없는 명령은 0으로 왔다 |
+| 평범한 단어가 아닌 것은 모두 base64로 PowerShell을 건넌다 | PowerShell 5.1은 따옴표를 다시 해석하고, 네이티브 프로그램에 넘기는 큰따옴표를 망가뜨린다. base64는 글자, 숫자, `+`, `/`, `=`뿐이라 어느 층도 건드리지 않는다 |
+| WSL의 찾기는 PATH에서 `/mnt/*`를 뺀다 | WSL은 Windows의 PATH를 뒤에 붙이고, Windows의 npm 폴더에는 `centralu` shim이 있다: 배포판 안의 `command -v centralu`는 `/mnt/c/Users/<me>/AppData/Roaming/npm/centralu`, 곧 Windows 설치본을 가리켰다 |
+| WSL 포워드는 `-N` 대신 `wsl.exe -d <distro> --exec sleep infinity`를 돌린다 | WSL은 마지막 `wsl.exe` 클라이언트가 끝나고 15초쯤 뒤 배포판을 멈추고, 그 안의 서비스도 함께 멈춘다. 잰 값: systemd 유닛 아래의 `centralu serve`가 붙은 클라이언트 없이 시작 19초 만에 멈췄다. Windows의 sshd로 가는 포워드만으로는 배포판이 붙들리지 않는다 |
+| 포워드 양 끝은 127.0.0.1에 묶고 `GatewayPorts=no` | 어느 기기의 네트워크에서도 링크를 쓸 수 없다 |
+| 비어 있으면 양 끝에 같은 포트 번호, 아니면 다른 번호 | §4.7: 앱 뷰의 주소에는 호스트 자신의 포트가 들어 있다. 기본값 17175를 쓰는 두 기기는 그 번호를 함께 가질 수 없고, 두 번째 기기의 앱 뷰는 어차피 2단계의 프록시가 필요하다 |
+| 어디서나 `BatchMode=yes` | 아무도 답할 수 없는 암호나 호스트 키 질문이 링크를 멈춰 세운다. 키는 사람이 다른 ssh 쓰임처럼 한 번 마련한다 |
+| 토큰은 저장하지 않고 링크가 시작할 때마다 ssh로 묻는다 | 그 기기의 모든 RPC 열쇠다. 시작마다 ssh 왕복 한 번(LAN에서 연결까지 2.1–4.3초 잼)은 싸다 |
+| ssh 프로세스는 허브 호스트의 자식이고 `Tunnel` 인터페이스 뒤에 있다 | 허브 교체를 건너 어디서 살지(keeper의 자식이냐 OpenSSH `ControlPersist`냐)는 계획 문서의 probe 4다. 어느 쪽이 되든 `SshTunnel`만 바뀐다 |
+
+**링크의 상태**(`MachineInfo.status`, `machine_status`로 보낸다): `connecting`; `connected`; `unreachable`(ssh 실패,
+포워드나 소켓이 끊김. 2초에서 1분까지 늘려 가며 다시 시도); `not_running`(Centralu는 답하지만 `centralu serve`가 돌지
+않는다. 다시 시도); `versions_differ`; `refused`(토큰이 연달아 두 번 거절됨. 연결 줄은 바로 한 번 다시 읽는다.
+`--rotate-token`은 토큰을 바꾸지만 돌고 있는 serve는 재시작할 때까지 이전 것을 쓰기 때문이다).
+
+**버전은 연결 전에 확인한다**(계획 문서 §4). 연결 줄은 돌고 있는 원격 호스트의 `version`과 `protocolVersion`을
+싣고, 허브는 소켓을 열기 전에 자기 것과 비교하며, 연 뒤에는 `hello_ok.build`로 한 번 더 본다. 프로토콜이 다르면
+절대 이어지지 않는다. 같은 채널의 다른 버전이면 더 오래된 쪽을 가리키며 `versions_differ`에 멈추고, 두 쪽이 맞거나
+사람이 거절할 때까지(`machines.acceptVersions`, 그 쌍에 대해서만 기억하므로 어느 쪽이든 바뀌면 다시 묻는다) 기다린다.
+dev 빌드에는 더 오래된 쪽이 없고 프로토콜이 같으면 이어진다. 업데이트 자체는 다음 단계다: 허브는 자기 업데이트로,
+원격은 1단계에서 손으로(`npm i -g centralu`), 3단계에서 ssh로.
+
+**연결한 뒤** 링크는 원격의 `sessions.list`와 `projects.list`를 미러로 읽고, 숨길 세션(원격의 오케스트레이터와
+코디네이터, 계획 문서 §3.4)을 적어 두고, `machine_resync`를 보낸다. 창은 그 기기를 다시 읽고 죽은 것을 깨운다.
+링크는 원격마다 커서와 에포크를 하나씩 쥐므로, 끊긴 소켓은 빈틈을 재전송받고, 재시작한 원격은 새 수명이라 다시
+동기화한다. 허브가 보여 주지 않는 세션의 이벤트는 버리고, 세션 이벤트로 읽기 사이의 미러 이름과 상태를 따라간다.
+
+**반대 방향은 꺼져 있다**(계획 문서 §3.2). 링크는 허브가 연 클라이언트 연결이다. 프로토콜에는 호스트가 클라이언트를
+부르는 프레임이 없고, `RemoteClient`는 요청 모양의 것을 실행하지 않고 버린다(`remote-client.test.ts`). 그래서 탈취된
+원격이 링크를 통해 허브에 닿을 수 없다.
+
+**허브를 거쳐 잰 값**(probe 3, 2026-10-05. Wi-Fi의 MacBook, 원격은 같은 LAN의 Windows 11 노트북. WSL2에서는 main의,
+Windows에서는 beta.10의 `centralu serve`):
+
+| | WSL2 Ubuntu | Windows (PowerShell) |
+|---|---|---|
+| 링크부터 연결까지 | 2.1–4.3초 | 2.3–3.7초 |
+| 허브를 거친 RPC 왕복, 중앙값 / p95 | 5.4–12.8 / 7.7–36 ms | 5.5–22 / 8–68 ms |
+| 키 입력부터 에코까지(키마다 RPC 하나), 중앙값 / p95 | 8–16 / 12–35 ms | 16–31 / 17–46 ms |
+| 터미널 출력, 허브를 거쳐 / 원격에 바로 | 6.3 MB를 7.5–15 / 5.5–8.7 MB/s | 0.34 MB를 10.0 / 9.5초 |
+| 40만 줄 변경의 `git.diff` (호스트의 0.5 MB 상한) | 240–290 ms | 310–365 ms |
+
+중계는 원격 자신의 속도에 비해 잴 만한 것을 더하지 않는다: Windows의 느린 출력은 ConPTY의 것이고, 원격 호스트에
+바로 붙어도 같다. 64 MiB 느린 독자 차단에는 닿지 않았다.
+
+**창 쪽** (`packages/ui`; 복구는 [state-management.ko.md](state-management.ko.md) §7):
+
+| 어디 | 링크로 하는 일 |
+|---|---|
+| 사이드바 | 연결된 기기가 하나라도 있으면 `machine`으로 묶는다: 이 컴퓨터가 먼저("Your apps"와 함께), 그다음 기기마다 이름과 링크 상태(`connected`, `connecting`, `away`, `version mismatch`, …), 그 프로젝트와 사용자 폴더 앱. 연결되지 않은 기기의 프로젝트와 세션은 흐리게(`data-away`) 남고, 결코 깨우지 않는다. 기기의 +는 그 기기의 경로로 폴더를 더하고(`projects.add {path, machine}`), 기기 이름은 설정 → 기기를 연다 |
+| 설정 → 기기 | `machines.list/add/remove/reconnect`. 행마다 마지막 오류를 할 일로 말하고(`@cc/core`의 `machineProblem`: 키가 안 올라감, 호스트 키를 받은 적 없음, 거기에 Centralu가 없거나 serve가 안 돎), 버전 질문을 담는다 |
+| 버전 질문 | `MachineInfo.versions`에서: 허브가 오래되면 기존 업데이트 경로, 원격이 오래되면 거기서 칠 정확한 `npm i -g centralu@<허브 버전>`(1단계는 원격을 업데이트하지 못한다). "Connect anyway"는 `machines.acceptVersions`이고, 프로토콜이 같을 때만 내놓는다 |
+| 새 세션 대화상자, 세션 메뉴 | `agents.detect`, `agents.models`, `agents.capabilities`에 프로젝트의 `machine`을 넘긴다 |
+| 세션 머리줄 | 기기를 밝힌다(그리드 패널의 머리줄이기도 하고, 승인과 질문에 답하는 곳이기도 하다). "older CLI"는 `agents.versions {machine}`과 비교한다 |
+| 인박스, 알림 카드, OS 알림 | 원격 세션의 기기를 밝힌다 |
+| 다른 기기의 프로젝트에서 꺼지는 것 | 파일 관리자에서 보기와 파일 트리 메뉴, IDE에서 열기(`fs.resolve`가 거절된다), 삭제할 때 폴더를 이 컴퓨터의 휴지통으로 옮기기, 새 앱, 앱 뷰(`appStatus`가 나중 버전에서 열린다고 말한다) |
+
+**1단계가 아직 다루지 않는 것.** 다른 기기의 앱 뷰는 2단계다(목록에 있고, 그 도구는 거기서 돌며, 뷰는 그렇다고
+말한다). ssh로 원격을 설치하고 업데이트하는 것은 3단계다. 사용량 게이지, `processes.strays/stop`, 종료 대화상자는
+아직 이 컴퓨터에만 묻는다. WSL의 `centralu serve`에는 배포판이 시작할 때 그것을 띄울 것(§4.7의 systemd 유닛)이
+필요하고, 그 뒤로는 링크가 배포판을 살려 둔다.
 
 ## 5. dev-services (이름과 달리 prod 경로다 — 2026-08-15 정정)
 
@@ -811,7 +942,9 @@ SDK, 다른 쪽은 `app-server`). 답하지 못하는 어댑터는 던지고, �
 `~/.codex/sessions/**`를 감시하며 증분 파싱하고, `usage_facts` 행을 써서 `usage.weekly` RPC로
 읽고, 집계는 `core/usage`에서 한다는 설계. **그중 어느 것도 존재하지 않는다** — chokidar는
 의존성이 아니고, `core/usage`라는 디렉토리는 없고, `usage.weekly` 메서드도 없으며,
-`usage_facts`는 `schema.sql`에 남아 있지만 읽거나 쓰는 코드가 없다. 게다가 그것은 §8.1이
+`usage_facts`에 행을 쓴 빌드는 하나도 없다. 그래도 지금은 `schema.sql`에 남는다: v0.1.0-beta.10까지의
+릴리스는 프로젝트를 지울 때 여기서 그 행을 지우고, 이 빌드가 그것을 건드리지 않는 첫 빌드라서, 지우는 것은 나중
+릴리스의 수축 단계다(§5.1 규칙 2). 게다가 그것은 §8.1이
 말하는 규칙의 **정반대**였고, 두 절이 이 문서 안에서 서로를 부정한 채 나란히 있었다. 도구의
 비공개 JSONL을 읽는 것이 바로 §8.1이 금지하는 일이고, 이유도 거기 적혀 있다: 문서화되지 않은
 포맷은 업그레이드에서 소리 없이 깨지며, 숫자가 조용히 깨지는 것은 숫자가 없는 것보다 나쁘다.
