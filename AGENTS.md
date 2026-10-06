@@ -63,3 +63,18 @@ and its **Not exercised** field, and updating documents in the same pull request
 
 Talk to the person in whatever language they use. Everything written down (code, comments,
 tests, documents, commits, issues, pull requests, reviews) is in English.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `ijun17/centralu`, through the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default roles (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `docs/domain-model.md` is the glossary, ADRs go in `docs/adr/`. See `docs/agents/domain.md`.
