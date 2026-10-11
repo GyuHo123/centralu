@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { bridgePath } from './bridge-path.js'
 /** Name of our MCP server attached via the bridge — elicitation acceptance judges by this name (defined in one place, #93) */
-import { ORCHESTRATOR_MCP_NAME } from '../../sessions/orchestrator-tools.js'
+import { ORCHESTRATOR_MCP_NAME, codexToolInstructionsFor } from '../../sessions/orchestrator-tools.js'
 import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -229,6 +229,14 @@ const BACKGROUND_RESUME_CAP_MS = 150_000
 
 class CodexSession implements SessionHandle {
   readonly sessionId: string
+  /**
+   * The thread id, once there is a conversation to resume (#524). A thread Codex started has no rollout until its
+   * first turn, and resuming it before then is refused (measured, codex-cli 0.160.0, 2026-10-12:
+   * `thread/resume` -32600 "no rollout found for thread id …", and `thread/list` leaves it out). So a started thread
+   * names itself at its first turn (`threadWritten`), as Claude's conversation names itself at its first message:
+   * a session restarted before then (a model set before the first message) starts a thread again instead of
+   * failing to resume one. A resumed thread has a rollout, and names itself at once.
+   */
   externalId: string | null = null
   private closed = false
 
@@ -530,14 +538,14 @@ class CodexSession implements SessionHandle {
          * The role is given directly through developerInstructions — the same slot as Claude's
          * systemPrompt append. The reason we avoid a file (AGENTS.md) is the same: if a
          * lower-privilege session could edit that file, it would become able to instruct every
-         * session.
+         * session. The instructions of the Centralu tools ride there too (#525, developerInstructions()).
          *
          * Tools are attached through the stdio bridge. What we confirmed by measurement:
          *   per-thread config.mcp_servers  works (our command actually runs)
          *   the url (HTTP) approach        does not — not a single request ever arrives
          * So one extra process ends up running — a cost that does not exist on the Claude path.
          */
-        ...(this.opts.systemPromptAppend ? { developerInstructions: this.opts.systemPromptAppend } : {}),
+        ...this.developerInstructions(),
         /*
          * config is **assembled in this one place only.** There used to be a trap where the
          * verbosity spread and the orchestrator spread each built their own config keys, and one
@@ -560,8 +568,31 @@ class CodexSession implements SessionHandle {
       this.threadId = threadIdOf(res)
       this.threadSettings = threadSettingsOf(res)
       this.checkAppMode(res)
+      // No rollout yet: the thread is named at its first turn (see externalId)
+      return
     }
     this.externalId = this.threadId
+  }
+
+  /**
+   * The thread's developer instructions: the session's role, then the instructions of the Centralu tools it gets
+   * (#525), which Claude receives from the in-process server and Codex would never show from the bridge's
+   * `initialize` (measured: sessions/orchestrator-tools.ts, codexToolInstructionsFor). Sent at thread/start only.
+   * `thread/resume` takes the same field and ignores it: resumed with other developer instructions, the model still
+   * named the phrase from the first ones and the rollout gained no developer message (codex-cli 0.160.0,
+   * `scripts/probe-codex-mcp-instructions.mts`, 2026-10-12). So a thread keeps what it was started with; a session
+   * that changes profile while its thread lives on (one becoming a worktree manager when a child is linked to it)
+   * keeps its tools' new rules from the tool descriptions alone until it starts a new thread.
+   */
+  private developerInstructions(): { developerInstructions?: string } {
+    const tools = this.opts.orchestratorTools && this.opts.orchestratorBridge ? codexToolInstructionsFor(this.opts.toolProfile ?? 'orchestrator') : undefined
+    const text = [this.opts.systemPromptAppend, tools].filter(Boolean).join('\n\n')
+    return text ? { developerInstructions: text } : {}
+  }
+
+  /** A turn started on this thread, so Codex has written its rollout and the thread can be resumed (see externalId) */
+  private threadWritten(): void {
+    if (this.externalId === null && this.threadId !== null) this.externalId = this.threadId
   }
 
   /**
@@ -739,7 +770,11 @@ class CodexSession implements SessionHandle {
     }
     // Which turn is running (Turn.id — generated/v2/Turn.ts). Cleared once it ends: trying to
     // stop a turn that has already ended gets rejected by the server, and that rejection becomes a false "did not stop" signal
-    if (n.method === 'turn/started') this.turnId = turnIdOf(n.params)
+    if (n.method === 'turn/started') {
+      this.turnId = turnIdOf(n.params)
+      // Before the event below goes out: the manager records a handle's external id as its events arrive
+      this.threadWritten()
+    }
     if (n.method === 'turn/completed' || n.method === 'turn/failed') {
       this.turnId = null
       const ended = turnIdOf(n.params)
@@ -1212,6 +1247,7 @@ class CodexSession implements SessionHandle {
    * `turn/completed` can come before it (a short turn), so a late response must not bring an ended turn back.
    */
   private takeStartedTurn(id: string | null): void {
+    this.threadWritten()
     if (id && !this.endedTurns.includes(id)) this.turnId ??= id
   }
 
