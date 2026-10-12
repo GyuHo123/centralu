@@ -1,5 +1,10 @@
 import { query, resolveSettings, type McpServerConfig, type PermissionMode } from '@anthropic-ai/claude-agent-sdk'
 import { homedir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { InputReceipts, type InputReceipt } from '../input-receipts.js'
+import type { InputObserver } from '../contract.js'
+
+type ClaudeInput = { text: string; uuid: ReturnType<typeof randomUUID>; parentNote: boolean }
 
 /**
  * Only the part of the SDK Query that we use.
@@ -10,7 +15,9 @@ type QueryHandle = AsyncIterable<unknown> &
   ModelQuery & {
     getContextUsage(): Promise<{ totalTokens?: number; maxTokens?: number } | undefined>
     /** Interrupts the turn in progress. Only works in streaming input mode — which is the mode we use. */
-    interrupt(): Promise<unknown>
+    interrupt(options?: { cancelQueued: boolean }): Promise<unknown>
+    /** Optional on older SDKs; cancel_async_message removes one UUID-stamped queued input. */
+    cancelAsyncMessage?(uuid: string): Promise<boolean>
     /** Stops one background task; a task_notification with status 'stopped' follows (sdk.d.ts, measured — #290). */
     stopTask(taskId: string): Promise<void>
     supportedCommands(): Promise<{ name: string; description?: string; argumentHint?: string }[]>
@@ -335,7 +342,13 @@ type ClaudeLaunch = {
 
 class ClaudeSession implements SessionHandle {
   externalId: string | null = null
-  private queue: string[] = []
+  private queue: ClaudeInput[] = []
+  private inputReceipts = new InputReceipts()
+  /** Person messages already handed to the SDK, so an interrupt receipt can report cancellations. */
+  private personInputs = new Set<string>()
+  private trackedInputKnown = false
+  /** Installed only after the initial CLI metadata confirms the protocol we have verified. */
+  sendTracked?: (text: string, observer?: InputObserver) => Promise<void>
   /** The CLI version this process last reported (#297) */
   private reportedVersion: string | null = null
   private notify: (() => void) | null = null
@@ -381,13 +394,13 @@ class ClaudeSession implements SessionHandle {
   /** Letting go of the process for the next host: its stream ending is not a crash */
   private detaching = false
   /** The messages the CLI has read since its last result: what a retried turn sends again (#353) */
-  private inTurn: string[] = []
+  private inTurn: ClaudeInput[] = []
   /** This turn already went again once after losing the sign-in refresh race */
   private raceRetried = false
   /** An assistant message in the current turn carried the refresh-race error */
   private raceSeen: string | null = null
   /** A resend waiting out its delay, and what it will send */
-  private retry: { timer: ReturnType<typeof setTimeout>; texts: string[] } | null = null
+  private retry: { timer: ReturnType<typeof setTimeout>; texts: ClaudeInput[] } | null = null
   /** The link folder this session's process runs from, released when the process is gone */
   private runKey: string | null = null
   /** Settles once the stream ended: the CLI process is gone, or this host let go of it */
@@ -469,11 +482,13 @@ class ClaudeSession implements SessionHandle {
         const next = self.queue.shift()
         if (next !== undefined) {
           self.inTurn.push(next)
+          if (!next.parentNote) self.personInputs.add(next.uuid)
           yield {
             type: 'user' as const,
             parent_tool_use_id: null,
             session_id: self.externalId ?? '',
-            message: { role: 'user' as const, content: [{ type: 'text' as const, text: next }] },
+            uuid: next.uuid,
+            message: { role: 'user' as const, content: [{ type: 'text' as const, text: next.text }] },
           }
           continue
         }
@@ -735,8 +750,29 @@ class ClaudeSession implements SessionHandle {
            * own record.
            */
           if (this.closed) break
-          const m = msg as { type?: string; session_id?: string; subtype?: string; slash_commands?: unknown; claude_code_version?: unknown }
+          const m = msg as { type?: string; session_id?: string; subtype?: string; slash_commands?: unknown; claude_code_version?: unknown; capabilities?: unknown; user_message_uuid?: string; parent_tool_use_id?: string | null }
+          if (!this.turnOpen && m.user_message_uuid && !m.parent_tool_use_id && (m.type === 'assistant' || m.type === 'stream_event')) {
+            this.turnOpen = true
+            if (!this.pending.size && !this.questions.size) this.emit({ type: 'state_change', sessionId: this.sessionId, state: 'working' })
+          }
           if (m.type === 'system' && m.subtype === 'init' && m.session_id) this.externalId = m.session_id
+          if (m.type === 'system' && m.subtype === 'init' && !this.trackedInputKnown) {
+            this.trackedInputKnown = true
+            // 2.1.289's result UUID array includes inputs folded between tool rounds (verified in
+            // the installed CLI and pinned SDK schema). The single UUID only names the first input.
+            // Refuse older/unknown protocols before a note is recorded, rather than guessing from
+            // results: background task notifications legitimately produce results without IDs.
+            const version = typeof m.claude_code_version === 'string' ? /^(\d+)\.(\d+)\.(\d+)$/.exec(m.claude_code_version) : null
+            const supported = version && (Number(version[1]) > 2 || (Number(version[1]) === 2 &&
+              (Number(version[2]) > 1 || (Number(version[2]) === 1 && Number(version[3]) >= 289))))
+            if (supported && Array.isArray(m.capabilities) && m.capabilities.includes('interrupt_receipt_v1') && m.capabilities.includes('interrupt_cancel_queued_v1')) {
+              this.sendTracked = (text, observer) => {
+                const receipt = this.inputReceipts.create(observer)
+                this.sendInput(text, receipt.id, receipt)
+                return receipt.done
+              }
+            }
+          }
           // The CLI's own version, for moving the session to a newer install (#297). Once per process: init repeats per query
           if (m.type === 'system' && m.subtype === 'init' && typeof m.claude_code_version === 'string' && m.claude_code_version !== this.reportedVersion) {
             this.reportedVersion = m.claude_code_version
@@ -751,9 +787,26 @@ class ClaudeSession implements SessionHandle {
           if (m.type === 'result') this.turnOpen = false
           let events = this.stream.push(msg)
           const retrying = m.type === 'result' && this.retryAfterRefreshRace(msg as RaceMsg)
+          if (m.type === 'result' && !retrying) {
+            const result = msg as { user_message_uuid?: string; user_message_uuids?: string[] }
+            for (const id of result.user_message_uuids ?? (result.user_message_uuid ? [result.user_message_uuid] : [])) this.personInputs.delete(id)
+          }
+          let completedInputs: string[] | undefined
+          if (m.type === 'result' && !retrying && this.inputReceipts.size && events.some((e) => e.type === 'turn_complete' || e.type === 'error')) {
+            const result = msg as { user_message_uuid?: string; user_message_uuids?: string[] }
+            const ids = result.user_message_uuids ?? []
+            const failure = events.find((e) => e.type === 'error')
+            if (ids.length && failure?.type === 'error') this.cancelParentNotes(new Error(failure.error.message))
+            else if (ids.length) completedInputs = ids
+            // ID-less results belong to synthetic/task-notification turns, not a parent note.
+          }
           // The turn goes again instead of failing: its error marker would end the turn on screen
           if (retrying) events = events.filter((e) => e.type !== 'error')
-          for (const e of events) this.emit(e)
+          for (const e of events) {
+            this.emit(e)
+            // Capture this result before a later turn's frames can overwrite the host's answer.
+            if (e.type === 'turn_complete' && completedInputs) this.inputReceipts.complete(completedInputs)
+          }
           this.armScheduleLook()
           // Once a turn ends, asks what is currently in the context window (FR-14).
           if (m.type === 'result' && !retrying) void this.reportContext(q)
@@ -948,7 +1001,9 @@ class ClaudeSession implements SessionHandle {
     }
   }
 
-  send(text: string): void {
+  send(text: string): void { this.sendInput(text) }
+
+  private sendInput(text: string, uuid = randomUUID(), note?: InputReceipt): void {
     /*
      * `/goal` goes to the CLI when the CLI offers it (2026-10-03). On 2026-09-07 (SDK 0.3.231 and
      * 0.3.263, the CLI of that day) the headless path had no goal at all: sent as text, the model
@@ -967,12 +1022,13 @@ class ClaudeSession implements SessionHandle {
      */
     const goal = isGoalCommand(text)
     if (!this.sendGate && !(goal && this.goalCommand === undefined)) {
-      this.deliver(text)
+      this.deliver(text, uuid, !!note)
       return
     }
     const gate = (this.sendGate = (this.sendGate ?? this.goalKnown).then(() => {
+      if (note?.cancelled) return
       if (!this.closed) {
-        this.deliver(text)
+        this.deliver(text, uuid, !!note)
         return
       }
       // Closed while it waited: the same rule as dispose's queue — a message is never dropped silently
@@ -991,7 +1047,7 @@ class ClaudeSession implements SessionHandle {
     })
   }
 
-  private deliver(text: string): void {
+  private deliver(text: string, uuid: ReturnType<typeof randomUUID>, parentNote: boolean): void {
     if (isGoalCommand(text)) {
       if (this.goalCommand !== true) {
         /*
@@ -1013,11 +1069,13 @@ class ClaudeSession implements SessionHandle {
       }
       this.stream.goal.commandSent()
     }
-    this.queue.push(text)
+    const starting = !this.turnOpen
+    this.queue.push({ text, uuid, parentNote })
     this.turnOpen = true
     this.notify?.()
     this.notify = null
-    this.emit({ type: 'state_change', sessionId: this.sessionId, state: 'working' })
+    // A note queued while a tool awaits approval must leave that card and state intact.
+    if (starting) this.emit({ type: 'state_change', sessionId: this.sessionId, state: 'working' })
   }
 
   respondApproval(requestId: string, decision: ApprovalDecision, scope?: ApprovalScope, matcher?: string): boolean {
@@ -1172,7 +1230,13 @@ class ClaudeSession implements SessionHandle {
    *   2) SDK interrupt: this actually cuts the turn. We can call this method because we pass the
    *      prompt as an async generator, in streaming input mode.
    */
-  interrupt(): void {
+  interrupt(cancelQueued = this.inputReceipts.size > 0, reason = new Error('The parent note was stopped before it finished')): void {
+    // The SDK's plain interrupt leaves queued commands alive; cancelQueued maps to control-request cancel_queued.
+    this.inputReceipts.failAll(reason)
+    const held = (cancelQueued ? this.queue.filter((input) => !input.parentNote).length : 0) +
+      (this.retry?.texts.filter((input) => !input.parentNote).length ?? 0)
+    if (cancelQueued) this.queue.length = 0
+    this.reportUndelivered(held)
     /*
      * This also stops any app calls this session made (M4 A-5). The SDK makes no promise about
      * whether the CLI sends a cancellation to a tool call when it interrupts a turn — we cut it
@@ -1196,7 +1260,15 @@ class ClaudeSession implements SessionHandle {
      */
     if (this.turnOpen) this.stream.stopped()
 
-    void this.query?.interrupt().catch((err: Error) => {
+    void this.query?.interrupt(cancelQueued ? { cancelQueued: true } : undefined).then((response) => {
+      // cancel_queued sweeps SDK-held messages too, including the person's. The CLI's receipt
+      // identifies exactly which did not run; do not silently discard their already-visible rows.
+      const cancelled = (response as { cancelled?: unknown } | undefined)?.cancelled
+      if (!Array.isArray(cancelled)) return
+      let count = 0
+      for (const id of cancelled) if (typeof id === 'string' && this.personInputs.delete(id)) count++
+      this.reportUndelivered(count)
+    }).catch((err: Error) => {
       // If we could not actually stop it, say so. Letting the person believe it stopped and wait is the worst outcome.
       this.emit({
         type: 'error',
@@ -1206,6 +1278,37 @@ class ClaudeSession implements SessionHandle {
     })
 
     this.emit({ type: 'state_change', sessionId: this.sessionId, state: 'waiting_input', reason: 'interrupted' })
+  }
+
+  /** A failed turn is already over. Cancel its parent notes without interrupting the person's next turn. */
+  private cancelParentNotes(reason: Error): void {
+    const ids = this.inputReceipts.ids
+    this.inputReceipts.failAll(reason)
+    this.queue = this.queue.filter((input) => !input.parentNote)
+    if (this.retry) {
+      // The retry timer captured this array; remove notes in place so it cannot requeue cancelled input.
+      const texts = this.retry.texts
+      texts.splice(0, texts.length, ...texts.filter((input) => !input.parentNote))
+      if (!texts.length) this.cancelRetry()
+    }
+    const query = this.query
+    // The CLI can cancel an already-dequeued representative UUID's entire coalesced batch
+    // (SDKControlInterruptResponse). A mixed batch could contain person input, so leave the SDK
+    // queue intact when that race is possible; only local notes have been removed above.
+    if (!query?.cancelAsyncMessage || this.personInputs.size || this.queue.length || this.retry?.texts.length || this.sendGate) return
+    for (const id of ids) void query.cancelAsyncMessage(id).catch((error: Error) => {
+      this.emit({ type: 'error', sessionId: this.sessionId, error: {
+        code: 'internal', message: `Could not cancel the parent note: ${error.message}`, retryable: false,
+      } })
+    })
+  }
+
+  private reportUndelivered(count: number): void {
+    if (!count) return
+    this.emit({
+      type: 'error', sessionId: this.sessionId,
+      error: { code: 'internal', message: `${count} message(s) were still queued when the turn stopped and were not delivered — please resend`, retryable: false },
+    })
   }
 
   /**
@@ -1227,6 +1330,7 @@ class ClaudeSession implements SessionHandle {
    * same way; only swapping the process was missing it.
    */
   async dispose(): Promise<void> {
+    this.inputReceipts.failAll(new Error('The session closed before the parent note finished'))
     this.closed = true
     this.notify?.()
     // A message held behind an unanswered /goal is reported as undelivered, like the queue below
@@ -1293,6 +1397,7 @@ class ClaudeSession implements SessionHandle {
    * the process (#98) — and ends every background task the session listed (#290), for the same reason.
    */
   private releaseAgents(why: string): void {
+    this.inputReceipts.failAll(new Error(why))
     if (this.scheduleLook) clearTimeout(this.scheduleLook)
     this.scheduleLook = null
     for (const e of this.stream.release(why)) this.emit(e)
@@ -1510,6 +1615,8 @@ export class ClaudeAdapter implements AgentAdapter {
     processModel: 'per-session',
     builtInSubagents: true,
     peerMessaging: true,
+    // The query's prompt iterator reads queued user messages while the current turn continues.
+    midTurnInput: true,
     /*
      * An idle session may be put to sleep (#568): a resumed process read the prompt cache as the live one did (~100% at
      * 2, 6 and 10 min on the 1 h lifetime, CLI 2.1.29x with haiku, #561) for +0.7 s (p50) / +1.8 s (p95) before the first

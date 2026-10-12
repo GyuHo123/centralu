@@ -12,7 +12,7 @@ import type { AgentRunRequest, AgentRunResult, AppCheckReport, AppRef, BrokerHos
 import { AgentRunWait, finalAnswer } from './app-agents.js'
 import { CacheLedger } from './cache-ledger.js'
 import { ASK_WAIT_MS, askFrame, clipAnswer, pathsIn, readableGrants, taskLine, underGrant } from './ask-project.js'
-import { AGENT_CEILING, agentBranch, agentFrame, agentName, presetWithin } from './start-agent.js'
+import { AGENT_CEILING, agentBranch, agentFrame, agentNoteFrame, agentName, presetWithin } from './start-agent.js'
 import { builderRole } from './app-builder.js'
 import { remember } from './folder-cache.js'
 import { makeProjectFolder, projectFolderTarget, type ProjectFolderTarget } from '../dev-services/project-folder.js'
@@ -433,6 +433,8 @@ export class SessionManager {
    * app-server), even though the screen said "starting next turn".
    */
   private restartAfterTurn = new Set<string>()
+  /** Input arriving after a note completes waits for its deferred process replacement, including disposal. */
+  private deferredRestarts = new Map<string, Promise<void>>()
   /** A new host served a different Centralu tool prefix; replace the old agent at its safe boundary. */
   private definitionsRestartAfterTurn = new Set<string>()
   /** A kept process was started with adapter settings from an older host build (#589). */
@@ -2900,6 +2902,9 @@ export class SessionManager {
     }
     // An event that gets recorded carries its assigned in-session seq along with it — the basis for the UI's
     // unread tracking
+    // Capture the answer before an event subscriber can send more input into this conversation.
+    const run = e.sessionId ? this.agentRuns.get(e.sessionId) : undefined
+    run?.onEvent(e)
     this.emit(seq != null ? ({ ...e, seq } as NormalizedEvent) : e)
     /*
      * Reporting happens **no matter how the turn ends** (#166). It used to only consume the marker on
@@ -2907,10 +2912,7 @@ export class SessionManager {
      * too would end the state as "awaiting input" and hide the failure). So a failed run was never
      * reported, the marker stayed set, and a later, unrelated turn ended up reported as "it finished".
      */
-    if (endedTurn && e.sessionId) void this.reportBackIfAwaited(e.sessionId, e)
-    // A session an app is waiting on an answer from (M4 D-1) — notified **after** the save: the waiting side
-    // reads the final answer from the store
-    if (e.sessionId) this.agentRuns.get(e.sessionId)?.onEvent(e)
+    if (endedTurn && e.sessionId && !run?.tracksInputs) void this.reportBackIfAwaited(e.sessionId, e, run?.completedAnswer)
     // The card slot is now empty — if a capability question was waiting, it is raised (D-4). Either the
     // adapter's card just closed, or a card that had been hiding ours just closed
     if (e.type === 'approval_resolved' && e.sessionId) this.raiseHostAsks(e.sessionId)
@@ -2918,15 +2920,25 @@ export class SessionManager {
     // so nothing happens
     // A commit call still unanswered when its turn ends never will be: interrupted, or its process gone (#392)
     if (endedTurn && e.sessionId) this.forgetCommits(e.sessionId)
-    if (endedTurn && e.sessionId && this.restartAfterTurn.delete(e.sessionId)) {
-      // An app attached or detached in this turn (#371 part A) is a reason of its own, settings or not
-      const apps = this.appsRestartAfterTurn.delete(e.sessionId)
-      const definitions = this.definitionsRestartAfterTurn.delete(e.sessionId)
-      const launchSettings = this.launchSettingsRestartAfterTurn.delete(e.sessionId)
-      if ((apps || definitions || launchSettings || this.settingsDrifted(e.sessionId)) && this.handles.has(e.sessionId)) {
-        void this.restartSession(e.sessionId, launchSettings ? 'launch_settings' : apps ? 'thread_restart' : definitions ? 'instructions' : this.restartCause(e.sessionId)).catch(() => {})
-      }
-    }
+    if (endedTurn && e.sessionId) this.applyDeferredRestart(e.sessionId)
+  }
+
+  /** A note receipt follows turn_complete: re-check the same deferred change when the last hold is released. */
+  private applyDeferredRestart(sessionId: string): void {
+    const session = this.meta.get(sessionId)
+    if (!session || inTurn(session.state) || this.deferredRestarts.has(sessionId) || this.agentRuns.get(sessionId)?.waitingForInputs || !this.restartAfterTurn.delete(sessionId)) return
+    // An app attached or detached in this turn (#371 part A) is a reason of its own, settings or not.
+    const apps = this.appsRestartAfterTurn.delete(sessionId)
+    const definitions = this.definitionsRestartAfterTurn.delete(sessionId)
+    const launchSettings = this.launchSettingsRestartAfterTurn.delete(sessionId)
+    if (!(apps || definitions || launchSettings || this.settingsDrifted(sessionId)) || !this.handles.has(sessionId)) return
+    const cause = launchSettings ? 'launch_settings' : apps ? 'thread_restart' : definitions ? 'instructions' : this.restartCause(sessionId)
+    // Publish the barrier before dispose can emit events or the completed wait can hand the parent its answer.
+    const restarting = Promise.resolve().then(() => this.restartSession(sessionId, cause)).then(() => {}).finally(() => {
+      if (this.deferredRestarts.get(sessionId) === restarting) this.deferredRestarts.delete(sessionId)
+    })
+    this.deferredRestarts.set(sessionId, restarting)
+    void restarting.catch(() => {})
   }
 
   /**
@@ -2941,7 +2953,7 @@ export class SessionManager {
    *  - Once notified, the marker is cleared. Otherwise that session would wake the orchestrator on
    *    every turn it runs on its own afterward — which would become a loop of waking each other
    */
-  private async reportBackIfAwaited(sessionId: string, ending: NormalizedEvent): Promise<void> {
+  private async reportBackIfAwaited(sessionId: string, ending: NormalizedEvent, answer?: string): Promise<void> {
     const orchestratorId = this.awaitingReport.get(sessionId)
     if (!orchestratorId) return
     this.awaitingReport.delete(sessionId)
@@ -2958,7 +2970,7 @@ export class SessionManager {
     const project = target.projectId
       ? (this.store.listProjects().find((p) => p.id === target.projectId)?.name ?? '(project no longer exists)')
       : '(none)'
-    await this.deliverReport(orchestratorId, sessionId, target.name, project, previewOf(this.store, sessionId, 600), ending)
+    await this.deliverReport(orchestratorId, sessionId, target.name, project, answer?.slice(0, 600) ?? previewOf(this.store, sessionId, 600), ending)
   }
 
   /** Reports the end of a turn the orchestrator asked to hear about, as one message in its session (#166) */
@@ -3420,7 +3432,10 @@ export class SessionManager {
      * a different header (`appMessageFrame`)
      */
     fromAppVia: AppMessageVia = 'inline',
+    sendInput?: (handle: SessionHandle, text: string) => void,
   ): Promise<void> {
+    const restarting = this.deferredRestarts.get(sessionId)
+    if (restarting) await restarting
     const m = this.meta.get(sessionId)
     if (!m) throw Object.assign(new Error(`Session not found: ${sessionId}`), { code: 'session_not_found' })
 
@@ -3494,7 +3509,8 @@ export class SessionManager {
         : attachments?.length
           ? `${text}\n\n${attachments.map((a) => `@${a.path}`).join('\n')}`
           : text
-    h.send(adapterText)
+    if (sendInput) sendInput(h, adapterText)
+    else h.send(adapterText)
   }
 
   /**
@@ -4409,6 +4425,7 @@ export class SessionManager {
   sessionIdle(sessionId: string): SessionIdle {
     const m = this.meta.get(sessionId)
     if (!m) throw Object.assign(new Error(`Session not found: ${sessionId}`), { code: 'session_not_found' })
+    if (this.agentRuns.get(sessionId)?.waitingForInputs) return { idle: false, reason: 'turn' }
     return sessionIdle(m, {
       running: this.handles.has(sessionId),
       reportsBackground: !!this.adapters.get(m.tool)?.capabilities.backgroundTasks,
@@ -4443,7 +4460,7 @@ export class SessionManager {
    */
   async sleepSession(sessionId: string): Promise<boolean> {
     const h = this.handles.get(sessionId)
-    if (!h || this.resuming.has(sessionId) || this.sleeping.has(sessionId) || this.leaving.has(sessionId)) return false
+    if (!h || this.resuming.has(sessionId) || this.deferredRestarts.has(sessionId) || this.sleeping.has(sessionId) || this.leaving.has(sessionId)) return false
     if (!this.sessionIdle(sessionId).idle || this.waitsOn(sessionId).length > 0) return false
     this.handles.delete(sessionId)
     this.running.delete(sessionId)
@@ -4464,17 +4481,17 @@ export class SessionManager {
   }
 
   interrupt(sessionId: string): void {
-    this.requireHandle(sessionId).interrupt()
+    const handle = this.requireHandle(sessionId)
+    // Receipt failures and ending events may be emitted synchronously by interrupt.
+    const run = this.agentRuns.get(sessionId)
+    if (run) run.stoppedByPerson = true
+    handle.interrupt()
     // Stop on a caller stops what it asked another project to do (#371): the call it is waiting in ends with it
     // A child start_agent started (#561) stops only while the caller is waiting on it: one left running with
     // `wait: false` (or past the bound) is its own session now, with its own Stop
     for (const d of this.delegations.values()) {
       if (d.callerId === sessionId && (!d.agent || (d.waiters ?? 0) > 0)) d.stop('the person stopped the session that asked')
     }
-    // The person stopped an agent an app had asked for (M4 D-1) — this turn's ending is not an answer. The
-    // app is told it was stopped
-    const run = this.agentRuns.get(sessionId)
-    if (run) run.stoppedByPerson = true
   }
 
   /**
@@ -5444,32 +5461,41 @@ export class SessionManager {
   /** Registers the wait on the delegated session's turn (the same watcher an app's agent uses, `AgentRunWait`) */
   private startDelegation(key: string, callerId: string, sessionId: string, target: { id: string; name: string; path: string }, agent = false): Delegation {
     let notice: string | undefined
-    const wait = new AgentRunWait((message) => (notice = message), () => this.meta.get(sessionId)?.name ?? 'the session')
+    let answerAfter = this.meta.get(sessionId)?.lastSeq ?? 0
+    const wait = new AgentRunWait((message) => (notice = message), () => this.meta.get(sessionId)?.name ?? 'the session', undefined, () => {
+      // Queued turns have no new stored user row: their input was recorded before the previous answer.
+      const answer = finalAnswer(this.store.loadMessages(sessionId, 50).filter((m) => m.seq > answerAfter))
+      answerAfter = this.meta.get(sessionId)?.lastSeq ?? answerAfter
+      return answer
+    })
     const d: Delegation = {
       callerId,
       sessionId,
       target,
       wait,
-      settled: false,
+      get settled() { return wait.finished },
       notice: () => notice,
       outcome: wait.done.then(
-        () => ({ ok: true as const }),
+        (r) => ({ ok: true as const, answer: r.answer }),
         (e: Error) => ({ ok: false as const, error: e.message }),
       ),
       stop: (why) => {
         if (d.settled) return
+        wait.fail(new Error(`${why}, so the delegated turn was stopped`))
         try {
           this.handles.get(sessionId)?.interrupt()
         } catch {
           // The session has already gone down — there is nothing left to stop
         }
-        wait.fail(new Error(`${why}, so the delegated turn was stopped`))
       },
       ...(agent ? { agent: true } : {}),
     }
-    void d.outcome.then(() => {
-      d.settled = true
+    void d.outcome.then((r) => {
       if (this.agentRuns.get(sessionId) === wait) this.agentRuns.delete(sessionId)
+      // Queued notes can finish after the original turn. Report only the whole delegation's ending.
+      if (agent) void this.reportBackIfAwaited(sessionId, r.ok
+        ? { type: 'turn_complete', sessionId }
+        : { type: 'error', sessionId, error: { code: 'internal', message: r.error, retryable: false } }, r.ok ? r.answer : undefined)
     })
     this.agentRuns.set(sessionId, wait)
     this.delegations.set(key, d)
@@ -5507,7 +5533,7 @@ export class SessionManager {
           error: `${d.target.name}'s session "${sessionName()}" [${d.sessionId}] did not finish: ${r.error}. Tell the person, or ask again with a clearer task.`,
         }
       }
-      const answer = finalAnswer(this.store.loadMessages(d.sessionId, 50))
+      const answer = r.answer ?? finalAnswer(this.store.loadMessages(d.sessionId, 50))
       const { granted, outside } = readableGrants(pathsIn(answer), d.target.path)
       if (granted.length) {
         const set = this.readGrants.get(d.callerId) ?? new Set<string>()
@@ -5637,8 +5663,8 @@ export class SessionManager {
    *
    *   status  where it stands, without waiting (the answer, once the turn the caller gave it has ended)
    *   wait    waits on that turn up to the bound, as start_agent does
-   *   send    gives it more: refused while a turn the caller gave it runs, while it works on the person's own
-   *           message, or when the person has since raised its preset above the caller's
+   *   send    gives it more, including during the caller's turn on adapters that accept mid-turn input; refused
+   *           while it works on the person's own message or has a higher preset than the caller
    *   stop    stops the turn the caller gave it; a turn the person started there is theirs
    *   delete  cleans up a child's merged, clean worktree (`cleanUpWorktreeChild`, #76's hard gate, part 3)
    */
@@ -5673,27 +5699,47 @@ export class SessionManager {
         return { ok: true, state: 'deleted', sessionId: child.id, sessionName: child.name, tool: child.tool, branch: r.branch, proof: r.proof }
       }
       case 'send': {
-        if (d && !d.settled) {
-          return { ok: false, error: `"${child.name}" is still working on what you gave it. Wait for it (action "wait") or stop it first.` }
-        }
-        // An answer the caller never came back for gives way to the new message
-        if (d) this.delegations.delete(key)
-        if (child.state === 'working' || child.state === 'waiting_approval' || this.agentRuns.has(child.id)) {
-          return { ok: false, error: `"${child.name}" is busy with something else (the person may be using it). Try again later.` }
-        }
         if (!presetWithin(child.permissionPreset, caller.permissionPreset)) {
           return {
             ok: false,
             error: `"${child.name}" now has more permissions (${child.permissionPreset}) than this session (${caller.permissionPreset}), so this session cannot give it work. Tell the person.`,
           }
         }
+        const from = { sessionId: callerId, name: labelOf(this.store, caller) }
+        if (d && !d.settled) {
+          const text = agentNoteFrame(from.name, opts.text ?? '')
+          if (!this.adapters.get(child.tool)?.capabilities.midTurnInput || !this.handles.get(child.id)?.sendTracked) {
+            return { ok: false, error: `"${child.name}" cannot take messages while working. Wait for it (action "wait") or stop it first.` }
+          }
+          const releaseHold = d.wait.holdInput()
+          const release = () => {
+            releaseHold()
+            this.applyDeferredRestart(child.id)
+          }
+          try {
+            await this.deliver(child.id, text, undefined, from, false, undefined, 'inline', (h, input) => {
+              const fail = (e: Error) => { d.wait.fail(e); release() }
+              void h.sendTracked!(input, { complete: release, fail }).then(release, fail)
+            })
+          } catch (e) {
+            release()
+            return { ok: false, error: `Could not send it: ${(e as Error).message}` }
+          }
+          // Keep the same outcome and any active wait. A send must not re-arm a report on top of that wait.
+          return this.agentWorking(d, false)
+        }
+        if (child.state === 'working' || child.state === 'waiting_approval' || (this.agentRuns.has(child.id) && !this.agentRuns.get(child.id)!.finished)) {
+          return { ok: false, error: `"${child.name}" is busy with something else (the person may be using it). Try again later.` }
+        }
+        // An answer the caller never came back for gives way to the new message
+        if (d) this.delegations.delete(key)
         const full = this.agentCeilingError(child.projectId ?? '')
         if (full) return { ok: false, error: full }
         const project = this.store.listProjects().find((p) => p.id === child.projectId)
         const cwd = this.store.sessionCwd(child.id) ?? child.worktree?.path ?? project?.path ?? ''
         const next = this.startDelegation(key, callerId, child.id, { id: child.projectId ?? '', name: project?.name ?? '', path: cwd }, true)
         try {
-          await this.deliver(child.id, opts.text ?? '', undefined, { sessionId: callerId, name: labelOf(this.store, caller) }, false)
+          await this.deliver(child.id, agentFrame(from.name, opts.text ?? ''), undefined, from, false)
         } catch (e) {
           this.delegations.delete(key)
           if (this.agentRuns.get(child.id) === next.wait) this.agentRuns.delete(child.id)
@@ -5900,7 +5946,7 @@ export class SessionManager {
       if (r === 'bound') return this.agentWorking(d)
       if (this.delegations.get(key) === d) this.delegations.delete(key)
       if (!r.ok) return { ok: false, error: `"${name()}" [${d.sessionId}] did not finish: ${r.error}. Tell the person, or give it a clearer task.` }
-      const answer = finalAnswer(this.store.loadMessages(d.sessionId, 50))
+      const answer = r.answer ?? finalAnswer(this.store.loadMessages(d.sessionId, 50))
       // Paths it names in its folder become readable to the caller, as ask_project's do: a child in another
       // folder (a worktree, #561 part 2) is outside the caller's own
       const { granted, outside } = readableGrants(pathsIn(answer), d.target.path)
@@ -6952,8 +6998,8 @@ type Delegation = {
   target: { id: string; name: string; path: string }
   wait: AgentRunWait
   /** The turn's outcome, never rejecting */
-  outcome: Promise<{ ok: true } | { ok: false; error: string }>
-  settled: boolean
+  outcome: Promise<{ ok: true; answer?: string } | { ok: false; error: string }>
+  readonly settled: boolean
   /** What the delegated session waits on, when it waits on the person */
   notice(): string | undefined
   /** Stops the delegated turn and ends the wait with the reason */

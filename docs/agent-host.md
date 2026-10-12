@@ -330,10 +330,45 @@ the person's settings) and project-trust settings sources. There is no Centralu-
 or network gap. A sandbox in the person's own Claude settings can still restrict commands; Centralu does
 not widen it here. Dependency preparation above applies to both adapters.
 
-`agent_session` acts only on a session whose `askedBy` is the caller, in its project. `send` is refused while a turn
-the caller gave it runs, while it works on something else (the person may be using it), and when the person has
-since raised its preset above the caller's (`presetWithin`). `stop` ends the turn the caller gave it; a turn the
-person started there is theirs.
+`agent_session` acts only on a session whose `askedBy` is the caller, in its project. `send` during the caller's turn
+uses the adapter's ordinary message path when it declares `capabilities.midTurnInput` and provides `sendTracked`:
+Codex 0.160 `turn/start`
+steers an already-active regular turn (confirmed by `TurnStartParams.turnTrigger`; compact/review messages keep
+their existing queue), and Claude queues a user message for the query's streaming prompt iterator. It returns
+`working` immediately and holds the original delegation until every note's completion receipt finishes. Codex
+binds a receipt through the input's `clientUserMessageId` / `userMessage.clientId` and the `turn/start` response's
+turn id, even if that response follows its completion notification;
+notes during compact/review can share a later turn. Claude stamps input UUIDs and uses the result's
+`user_message_uuids` to identify consumed notes, including folded batches. Receipts complete only by matching
+UUIDs: a sign-in-race retry can reorder delivery, and a capped list never proves an omitted input was consumed. At initialization, the adapter
+requires the verified CLI protocol (2.1.289 or newer) and its `interrupt_receipt_v1` and
+`interrupt_cancel_queued_v1` capabilities before exposing `sendTracked`. Older or unknown producers keep the
+mid-turn refusal: the single `user_message_uuid` names the turn's first input and cannot confirm a folded note.
+Results without input IDs belong to synthetic turns (including background-task notifications) and neither
+complete nor cancel a pending note. Stop cancels pending notes too
+(Claude's SDK `cancelQueued` / control-request `cancel_queued`; Codex removes queued notes and interrupts a turn
+named by an in-flight response after Stop). Claude reports person messages dropped from its local queue or
+listed as cancelled in the SDK interrupt receipt as **not delivered**, asking the person to resend them. A turn error instead cancels only parent notes, via the SDK's optional
+`cancelAsyncMessage` / `cancel_async_message`, and preserves the person's local/SDK queue. Without that SDK
+method the CLI queue is left intact; the failed delegation still receives the turn's error. SDK cancellation
+is also skipped while person input is pending: cancelling an already-dequeued representative UUID can drop its
+whole coalesced batch. Only batches without person input are eligible for per-UUID cancellation.
+
+The existing `wait` and report marker follow the whole delegation, so an intermediate turn cannot deliver an
+answer or detach the queued note from its parent. Each completed turn's answer is captured separately: queued
+input was already stored before the earlier answer, so those turns need not have a user row between them.
+The adapters notify the host synchronously **after recording the matched completion**, so later frames in the
+same event batch cannot overwrite that answer. Pending notes also make the child non-idle between turns, so the
+sleeper, CLI replacement and deferred settings/instructions restart cannot discard queued work. Deferred
+restart markers remain set while input is held. Since adapters complete receipts after emitting `turn_complete`,
+the last receipt re-checks the restart when the session is not mid-turn. New input waits for disposal and resume,
+so the next task uses the updated settings, app set and launch policy. The person's
+Stop is marked before calling the adapter, including adapters that reject receipts synchronously. A follow-up is framed as a **note about ongoing work**
+(`agentNoteFrame`), without the initial task/answer frame, and stored and shown with `from`.
+A `send` after the child finishes starts a new delegation and uses the task/return-answer frame (`agentFrame`).
+It is refused on an adapter without this capability, while the child works on something else
+(the person may be using it), or when the person has since raised its preset above the caller's (`presetWithin`).
+`stop` ends the turn the caller gave it; a turn the person started there is theirs.
 
 **Stop and delete.** The caller's call cancelled (Claude's MCP signal), or Stop on the caller while a call waits on
 a child, stops that child's turn. A child left running (`wait: false`, or past the bound) is its own session: the
@@ -486,6 +521,7 @@ interface AgentAdapter {
 interface SessionHandle {
   readonly externalId: string
   send(input: UserInput): void
+  sendTracked?(text: string, observer?: InputObserver): Promise<void> // host-only completion receipt (#592)
   respondApproval(requestId: string, decision: Decision, scope?: Scope): void
   interrupt(): void
   stopBackgroundTask?(taskId: string): Promise<void>  // #290: stop one background task alone
@@ -507,6 +543,7 @@ interface AdapterCapabilities {
   processModel: 'per-session' | 'shared-server' // whether one CLI process owns one or several conversations
   builtInSubagents: boolean     // child-agent events are normalized by this adapter
   peerMessaging: boolean        // the CLI has a direct session-to-session path (#575)
+  midTurnInput?: boolean         // send accepts a message during a running turn without interrupting it (#592)
   sleep?: boolean               // #568: an idle session may be put to sleep (resume measured to keep the cache); §4.6.1
 }
 ```

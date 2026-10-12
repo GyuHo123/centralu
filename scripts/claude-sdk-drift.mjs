@@ -68,6 +68,12 @@ const EXPORTS = [
 const TYPED = [
   // Query handle methods (index.ts QueryHandle — the slice of Query we depend on)
   'interrupt',
+  'cancel_queued', // interrupt's control request must cancel pending parent notes too
+  'cancel_async_message', // on a turn error, cancel notes individually without sweeping person messages
+  'interrupt_receipt_v1', // startup promises UUIDs of SDK-held person messages lost on Stop
+  'interrupt_cancel_queued_v1', // startup confirms queued notes can be stopped
+  'user_message_uuid', // identifies the prompt answered by a result
+  'user_message_uuids', // includes messages folded into an already-running turn
   'supportedCommands',
   'getContextUsage',
   'supportedModels', // models.ts — the model list is the SDK's, never hardcoded
