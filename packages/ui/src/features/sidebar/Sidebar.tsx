@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ProjectInfo, SessionState, ToolName } from '@cc/protocol'
 import type { SessionSummary } from '@cc/core'
-import { orderAsTree } from './tree.js'
+import { appSessionsNeedAttention, groupProjectAppSessions, orderAsTree } from './tree.js'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { isPlainEnter, isPlainEscape } from '../../app/keys.js'
 import { externalAppKey, handoffBlockedBy, useStore } from '../../store/store.js'
@@ -103,14 +103,15 @@ function SessionRow({
    * vertical guide line — hierarchy lives only in the sidebar (the grid is flat, a design
    * decision).
    */
-  nested?: boolean
+  nested?: boolean | number
   children: ReactNode
 }) {
+  const depth = nested === true ? 1 : typeof nested === 'number' ? nested : 0
   const drop = useDropLine(SESSION_MIME, onReorder)
   return (
     <li
-      data-nested={nested || undefined}
-      className={`group/row relative ${nested ? 'ml-4 border-l border-line/60' : ''} ${dropLine(drop.edge)}`}
+      data-nested={nested === true ? true : depth || undefined}
+      className={`group/row relative ${depth ? `${depth === 1 ? 'ml-4' : 'ml-8'} border-l border-line/60` : ''} ${dropLine(drop.edge)}`}
       draggable={draggable}
       onDragStart={(e) => {
         e.dataTransfer.setData(SESSION_MIME, id)
@@ -520,6 +521,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
   const askingTrust = useStore((s) => s.trustAsk === projectId)
   // This project's apps (M4 B-2) — stand below the sessions, in the same row shape
   const projectApps = useProjectApps(projectId)
+  const groupedSessions = useMemo(() => groupProjectAppSessions(sessions, projectApps.map((app) => app.appId)), [sessions, projectApps])
   const setProjectTrusted = useStore((s) => s.setProjectTrusted)
   /** Where the menu hangs from — the pressed button (not a corner of the sidebar) */
   const menuAnchor = useRef<HTMLSpanElement>(null)
@@ -741,7 +743,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
       */}
       {!folded && (
         <ul className="mt-1.5">
-          {orderAsTree(sessions).map(({ s, nested }) => {
+          {orderAsTree(groupedSessions.project).map(({ s, nested }) => {
             const unread = s.lastSeq > s.lastReadSeq
             const focused = focusedSessionId === s.id
             return (
@@ -757,7 +759,14 @@ function ProjectBlock({ projectId }: { projectId: string }) {
                  * and the screen would end up lying.
                  */
                 draggable={renaming !== s.id && !nested}
-                onReorder={(draggedId, before) =>
+                onReorder={(draggedId, before) => {
+                  // App-owned rows can still be dropped on the grid, but their appId — not list position — is their membership.
+                  if (
+                    [...groupedSessions.byApp.values()].some((owned) =>
+                      owned.some((session) => session.id === draggedId),
+                    )
+                  )
+                    return
                   void reorderSessions(
                     projectId,
                     moveTo(
@@ -767,7 +776,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
                       before,
                     ),
                   )
-                }
+                }}
               >
                 {renaming === s.id ? (
                   <SessionNameInput
@@ -918,7 +927,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
           })}
         </ul>
       )}
-      {!folded && <AppRows apps={projectApps} testId={`project-apps-${project.name}`} />}
+      {!folded && <AppRows apps={projectApps} sessionsByApp={groupedSessions.byApp} testId={`project-apps-${project.name}`} />}
 
       {newSessionOpen && <NewSessionDialog projectId={projectId} onClose={() => openNewSession(null)} />}
       {newAppOpen && <NewAppDialog projectId={projectId} onClose={() => setNewAppOpen(false)} />}
@@ -990,18 +999,145 @@ const APP_HINT: Partial<Record<ExternalAppStatus, string>> = {
   unconfirmed: 'not enabled',
 }
 
-function AppRows({ apps, testId }: { apps: ExternalCatalogApp[]; testId: string }) {
+function AppRows({ apps, sessionsByApp, testId }: { apps: ExternalCatalogApp[]; sessionsByApp?: Map<string, SessionSummary[]>; testId: string }) {
   if (apps.length === 0) return null
   return (
     <ul data-testid={testId}>
       {apps.map((a) => (
         <Fragment key={a.key}>
           <AppRow app={a} />
-          {/* A project app's sessions stand in its project's list; a user-folder app has no project to hold them */}
-          {a.projectId === null && <UserAppSessions appId={a.appId} machine={a.info.machine ?? null} />}
+          {a.projectId === null ? (
+            <UserAppSessions appId={a.appId} machine={a.info.machine ?? null} />
+          ) : (
+            <ProjectAppSessions sessions={sessionsByApp?.get(a.appId) ?? []} projectId={a.projectId} />
+          )}
         </Fragment>
       ))}
     </ul>
+  )
+}
+
+/** A listed project app owns these rows, so they cannot be reordered into the project's session list. */
+function ProjectAppSessions({ sessions, projectId }: { sessions: SessionSummary[]; projectId: string }) {
+  const selected = useSelectedSessionId()
+  const focusSession = useStore((s) => s.focusSession)
+  const renameSession = useStore((s) => s.rename)
+  const deleteSession = useStore((s) => s.deleteSession)
+  const handoffSession = useStore((s) => s.handoffSession)
+  const defaultTool = useStore((s) => s.projects[projectId]?.defaultTool ?? '')
+  const [confirming, setConfirming] = useState<string | null>(null)
+  const [handingOff, setHandingOff] = useState<string | null>(null)
+  const [sessionMenu, setSessionMenu] = useState<{ id: string; el: HTMLElement } | null>(null)
+  const [renaming, setRenaming] = useState<string | null>(null)
+  return (
+    <>
+      {orderAsTree(sessions).map(({ s, nested }) => {
+    const focused = selected === s.id
+    const unread = s.lastSeq > s.lastReadSeq
+    return (
+      <SessionRow
+        key={s.id}
+        id={s.id}
+        projectId={projectId}
+        nested={nested ? 2 : 1}
+        draggable={renaming !== s.id && !nested}
+        onReorder={() => {}}
+      >
+        {renaming === s.id ? (
+          <SessionNameInput
+            id={s.id}
+            initial={s.name}
+            onDone={(name) => {
+              setRenaming(null)
+              if (name && name !== s.name) void renameSession(s.id, name)
+            }}
+          />
+        ) : (
+          <>
+            <button
+              onClick={() => focusSession(s.id)}
+              onDoubleClick={() => setRenaming(s.id)}
+              data-testid={`app-session-row-${s.id}`}
+              aria-current={focused ? 'page' : undefined}
+              data-unread={(unread && !focused) || undefined}
+              className={`flex w-full items-center gap-2 border-l-2 py-1.5 pl-2.5 pr-14 text-left text-md transition-colors ${
+                focused
+                  ? 'border-l-ink-muted bg-surface-hover/40 text-ink'
+                  : 'border-l-transparent text-ink-muted hover:bg-surface-hover/20 hover:text-ink'
+              }`}
+            >
+              <ToolMark tool={s.tool} state={s.state} asleep={!s.live && !s.unreachable} />
+              <span className={`truncate ${unread && !focused ? 'text-ink' : ''}`}>{s.name}</span>
+              {s.merged && <span className="shrink-0 rounded-md border border-line px-1 text-2xs leading-body text-ink-faint" data-testid={`merged-badge-${s.id}`}>merged</span>}
+              {s.pr && !s.merged && <span className="shrink-0 rounded-md border border-line px-1 text-2xs leading-body text-ink-faint" data-testid={`pr-badge-${s.id}`} title={`Pull request #${s.pr.number} — ${s.pr.state}\n${s.pr.url}`}>PR #{s.pr.number}{s.pr.state === 'closed' ? ' ✕' : ''}</span>}
+              <BackgroundMark tasks={s.backgroundTasks} testId={`background-mark-${s.id}`} />
+            </button>
+            <span
+              className={`absolute right-3 top-1/2 flex -translate-y-1/2 items-center transition-opacity focus-within:opacity-100 group-hover/row:opacity-100 ${
+                sessionMenu?.id === s.id ? 'opacity-100' : 'opacity-0'
+              }`}
+              data-testid={`session-actions-${s.id}`}
+            >
+              <button
+                type="button"
+                aria-label={`Actions for ${s.name}`}
+                onClick={(e) => {
+                  const el = e.currentTarget
+                  setSessionMenu((cur) => (cur?.id === s.id ? null : { id: s.id, el }))
+                }}
+                data-testid={`session-menu-${s.id}`}
+                className="flex items-center justify-center rounded-md p-1 text-ink-faint transition-colors hover:bg-surface-hover/60 hover:text-ink"
+              >
+                <DotsIcon size={14} />
+              </button>
+            </span>
+            {sessionMenu?.id === s.id && (
+              <SessionMenu
+                session={s}
+                anchorEl={sessionMenu.el}
+                onClose={() => setSessionMenu(null)}
+                onRename={() => setRenaming(s.id)}
+                onHandoff={() => setHandingOff(s.id)}
+                onDelete={() => setConfirming(s.id)}
+              />
+            )}
+          </>
+        )}
+      </SessionRow>
+    )
+      })}
+      {confirming && (
+        <ConfirmDelete
+          sessionId={confirming}
+          name={sessions.find((s) => s.id === confirming)?.name ?? 'Session'}
+          tool={sessions.find((s) => s.id === confirming)?.tool ?? defaultTool}
+          onCancel={() => setConfirming(null)}
+          onConfirm={(deleteWorktree, deleteExternal) => {
+            void deleteSession(confirming, deleteWorktree, deleteExternal)
+            setConfirming(null)
+          }}
+        />
+      )}
+      {handingOff && (
+        <ConfirmHandoff
+          name={sessions.find((s) => s.id === handingOff)?.name ?? 'Session'}
+          tool={sessions.find((s) => s.id === handingOff)?.tool ?? defaultTool}
+          dead={(() => {
+            const s = sessions.find((x) => x.id === handingOff)
+            return s ? s.state === 'error' || !!s.limit : false
+          })()}
+          blocked={(() => {
+            const s = sessions.find((x) => x.id === handingOff)
+            return s ? handoffBlockedBy(s) : null
+          })()}
+          onCancel={() => setHandingOff(null)}
+          onConfirm={(tool, deleteOld, mode) => {
+            void handoffSession(handingOff, { tool, deleteOld, mode })
+            setHandingOff(null)
+          }}
+        />
+      )}
+    </>
   )
 }
 
@@ -1009,8 +1145,8 @@ function AppRows({ apps, testId }: { apps: ExternalCatalogApp[]; testId: string 
  * The sessions of a user-folder app, indented under its row: its builder and the agents its
  * `run_agent` stood up (both have no project and carry the app's id).
  *
- * This is their one place in the sidebar. A project app's sessions belong to its project and stand
- * in that list; a user-folder app's have no project, and the "No app" list that used to catch every
+ * This is their one place in the sidebar. Project apps use the same nested rows in their project's
+ * app list; user-folder apps have no project, and the "No app" list that used to catch every
  * session with no project is gone (2026-10-05). An agent an app started runs on `safe`, so it can
  * stop at an approval card, and a session waiting on the person must have a row to be found by.
  *
@@ -1077,7 +1213,15 @@ function AppRow({ app }: { app: ExternalCatalogApp }) {
   const asking = useStore(
     (s) => !remote && s.appQuestions.some((q) => q.origin.appId === app.appId && (q.origin.projectId ?? null) === app.projectId),
   )
-  const hint = asking ? 'asks you' : APP_HINT[app.info.status]
+  const sessionWaiting = useStore(
+    (s) =>
+      !remote &&
+      appSessionsNeedAttention(
+        Object.values(s.sessions).filter((session) => session.projectId === app.projectId && session.appId === app.appId),
+      ),
+  )
+  const waitsForYou = asking || sessionWaiting
+  const hint = waitsForYou ? 'asks you' : APP_HINT[app.info.status]
   const projectId = app.projectId
   return (
     <li
@@ -1115,9 +1259,9 @@ function AppRow({ app }: { app: ExternalCatalogApp }) {
         <span className="truncate">{app.title}</span>
         {hint && (
           <span
-            className={`readout ml-auto shrink-0 text-2xs ${asking || app.status.tone === 'alert' ? 'text-ink' : 'text-ink-faint'}`}
+            className={`readout ml-auto shrink-0 text-2xs ${waitsForYou || app.status.tone === 'alert' ? 'text-ink' : 'text-ink-faint'}`}
             data-testid="app-row-hint"
-            data-asking={asking || undefined}
+            data-asking={waitsForYou || undefined}
           >
             {hint}
           </span>
