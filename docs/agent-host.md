@@ -72,8 +72,9 @@ orchestrator reaches that session with `send_to_session`. Existing data: store v
 sessions `askedBy` = their parent, so it owns them as the agents it started; `worktrees.createManager` is refused with
 the reason (the protocol keeps it for an older window), and the slot's column stays until a later contract step.
 
-The `reader` set is read-only: its tools object refuses sending, creating and settings outright,
-not only by name. It is never given to an agent session an app stood up (M4 D-1), whose answer goes
+The reader's session access is read-only: its tools object refuses directing other sessions and changing
+settings outright, not only by name. Its update tool requires consent (§4.5). It is never given to an agent
+session an app stood up (M4 D-1), whose answer goes
 back to the app. Settings → Orchestrator turns it off (`sessionTools`, on by default): a new session
 then gets no bundle, and a live one's calls are refused at once. For provenance (#90) a reader is
 still an ordinary worker — `directs()` counts every profile but `reader`.
@@ -99,7 +100,9 @@ had measured the same for `send_to_session`, which is why its tools are `alwaysL
 from a guess about the app, and the orchestrator has the guide loaded. Codex has no deferral and
 gets all three. `orchestrator-tools.test.ts` fails if the serialized set and its instructions pass
 `READER_BUDGET_CHARS` (1,000 until #564 gave the set its 392 characters of instructions; 1,400 since,
-the set at 1,375).
+the set at 1,375). #581 adds the consented update tool, deferred on Claude like the guide, and its
+instructions pointer: 1,709 characters against a 1,750 ceiling. The full reader profile's resident
+and deferred figures for both CLIs are in [tool-cost.md](tool-cost.md) §11.
 
 The app-access tools (#371 part A: `find_apps`, `attach_app`, `detach_app`, apps.md §9.4) ride on
 the same server with their own ceiling, `APP_ACCESS_BUDGET_CHARS` (900; the set is 874), so neither
@@ -1023,7 +1026,7 @@ door, the host's switch to the new copy, and the old version's folder removed on
 
 The design is in [architecture.md](architecture.md) §4.5. The host's part is the install and one rule.
 
-**The install** (`updates.ts`). `updates.apply` runs `npm i -g centralu@<v>` and, when the installed app exists,
+**The install** (`updates.ts`). `updates.apply` runs `npm i -g --prefer-online centralu@<v>` and, when the installed app exists,
 `centralu install`, then reports `restart_required`; it never restarts anything. With `autoApply` on ("Apply updates
 automatically when idle", `updates.setAutoApply`, saved as `updates.autoApply` in the store's app settings, off by
 default) a check that finds a newer version starts the same install by itself, and turning the setting on with a newer
@@ -1037,6 +1040,20 @@ Both commands run without a shell, through `tool-launch.ts` (`commandFor` in `up
 launcher's `installedPaths()[0]` per platform (a test holds the two together). A failure says which half failed: npm's
 own last line (not its pointer to the log), or, when npm worked and only the copy did not, the launcher's first line,
 the copy's path and `centralu install` to finish by hand.
+
+**A release arriving at npm.** The `latest` tag can reach this host before the package version has reached the npm
+edge it installs from. On npm's narrow `ETARGET`/`notarget` response only, the host retries the exact install with
+`--prefer-online` for up to ten minutes, reporting `waiting_for_npm` and “Waiting for npm to serve <version>” between
+attempts. Other failures still fail at once; a bounded propagation wait must not hide a credential, disk or package
+error.
+
+**Agent updates (#581).** `update_centralu(action: "check" | "install")` reaches the same `UpdateService`
+methods as the window. In the commands tier it is discovered and run through `centralu_commands`, `centralu_help`
+and `centralu_run`; an ordinary session gets a minimal definition, deferred behind Claude's tool search
+like `app_guide` because updates are rare (Codex is offered it without a deferral flag). Its first call raises a consent card:
+allow once, or always for that session until the host restarts. It never calls `updates.setAutoApply`, so an agent
+cannot change the person's automatic-apply preference. An install starts the normal host install; the window still
+performs its own safe relaunch/switch step.
 
 **On Windows**, measured on Windows 11 on 2026-10-08 with a temporary npm prefix and a stand-in holding the same
 handles as the running app (an exe started from the folder, the host's `better-sqlite3` and `node-pty` modules mapped):
@@ -1110,6 +1127,17 @@ its background work.
 | The restart is the manager's `restartSession` | The same path as "Restart agent": the handle is disposed (under the keeper: stdin closed, then a signal, through the keeper), and the session resumes in a newly spawned process. Nothing is re-attached, so the new process is the new CLI (`sessions/agent-versions-restart.test.ts`) |
 | The conversation gets one line from Centralu, "Claude Code restarted on 2.1.290 (was 2.1.282). The conversation continues." | A process restarted by itself is never silent |
 | The installed versions last seen are kept (`agents.versionsSeen`) | An update made while the app was closed still counts as a change |
+
+**Tool definitions after a host switch (#581).**
+
+The keeper can preserve an agent process across a Centralu update, but that process also preserves the Centralu MCP
+definitions it was started with. `SessionManager.refreshToolDefinitions()` compares the profile's served definitions
+and instructions using `residentCost(...).prefixHash`; the adapter declares the serving form in
+the host-only `AgentAdapter.toolDefinitions`, rather than in protocol capabilities or the manager naming a CLI.
+The hash is kept in an app setting per session.
+On a changed hash, a live idle session restarts through the same resume path as #297; a working or approval-waiting
+session restarts after its turn; a sleeping session has no process and records the new hash for its next wake. Thus the
+conversation continues while the next process sees the new tools.
 
 **The capability check seam** (#270). On every change of an installed CLI's version the service calls
 `capabilityCheck({ tool, from, to })`. #270 proposes re-running the probes for what a tool could not do when its version

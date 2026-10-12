@@ -654,6 +654,11 @@ export const ApprovalDetail = z.discriminatedUnion('kind', [
     /** One line for a person to read: the task, cut short */
     text: z.string(),
   }),
+  /** An ordinary session asks to check or install Centralu itself (#581). */
+  z.object({
+    kind: z.literal('centralu_update'),
+    action: z.enum(['check', 'install']),
+  }),
   /**
    * The orchestrator asks to make a new project (#515, create_project) — raised by **the host** in the orchestrator's
    * session. Nothing exists until the person allows it: then the folder at `path` is made (empty) and registered as
@@ -1159,7 +1164,7 @@ export const UpdateStatus = z.object({
    * with `autoApply`, it does so by itself once no session is working or waiting and no
    * terminal or command is running — never mid-turn.
    */
-  phase: z.enum(['idle', 'checking', 'updating', 'restart_required', 'failed']).default('idle'),
+  phase: z.enum(['idle', 'checking', 'updating', 'waiting_for_npm', 'restart_required', 'failed']).default('idle'),
   /**
    * Why the last check or update did not work, or null when nothing went wrong.
    *
