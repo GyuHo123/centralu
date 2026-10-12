@@ -61,7 +61,8 @@ const exec = promisify(execFile)
  *
  * **Same principle** as the Claude side: for normal, we do not decide anything and defer to
  * the tool's own settings (`~/.codex/config.toml`) for approval and sandbox mode. Workspace-write
- * details follow the preset separately (sandboxConfig): only auto enables network (#582).
+ * details follow the preset separately (sandboxConfig). Auto runs without a sandbox, matching
+ * Claude's bypass permissions; safe and normal workspace-write keep network disabled (#582, #585).
  *
  * It matters that there were two things being overridden. Not just approvalPolicy — **sandbox
  * was also pinned** to 'workspace-write'. That meant even if the user had written
@@ -74,7 +75,7 @@ const exec = promisify(execFile)
  */
 function permissionOptionsFor(preset: PermissionPreset): Record<string, unknown> {
   if (preset === 'safe') return { approvalPolicy: 'untrusted', sandbox: 'workspace-write' } // asks about everything
-  if (preset === 'auto') return { approvalPolicy: 'never', sandbox: 'workspace-write' } // asks about nothing
+  if (preset === 'auto') return { approvalPolicy: 'never', sandbox: 'danger-full-access' } // asks about nothing
   return {} // defer to the user's own settings
 }
 
@@ -1687,7 +1688,8 @@ export class CodexAdapter implements AgentAdapter {
   launchSettingsFingerprint(settings: import('../contract.js').LaunchSettings): string {
     // The working directory participates in the sandbox roots. Bump the version when the
     // adapter derives a different sandbox, network or bridge launch policy from these settings.
-    return JSON.stringify({ v: 1, cwd: settings.cwd, permission: settings.permissionPreset, trusted: !!settings.projectTrusted, noSettings: !!settings.noSettingFiles })
+    // v2: #597 changes auto's sandbox to full access. Kept sessions must restart to pick it up.
+    return JSON.stringify({ v: 2, cwd: settings.cwd, permission: settings.permissionPreset, sandbox: permissionOptionsFor(settings.permissionPreset).sandbox, trusted: !!settings.projectTrusted, noSettings: !!settings.noSettingFiles })
   }
 
   /** The installed Codex CLI (#297), from npm's `package.json` where it came from npm, else `codex --version` */

@@ -45,9 +45,25 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe('Codex worktree sandbox (#582)', () => {
+  it('the launch fingerprint distinguishes auto from normal and changes from the previous sandbox policy', () => {
+    const adapter = new CodexAdapter()
+    const fingerprints = (['normal', 'auto'] as const).map((permissionPreset) => {
+      const fingerprint = adapter.launchSettingsFingerprint({
+        cwd: worktree, permissionPreset, projectTrusted: true,
+      })
+      expect(JSON.parse(fingerprint)).toMatchObject({ v: 2 })
+      expect(JSON.parse(fingerprint).sandbox).toBe(permissionPreset === 'auto' ? 'danger-full-access' : undefined)
+      expect(fingerprint).not.toBe(JSON.stringify({
+        v: 1, cwd: worktree, permission: permissionPreset, trusted: true, noSettings: false,
+      }))
+      return fingerprint
+    })
+    expect(fingerprints[0]).not.toBe(fingerprints[1])
+  })
+
   for (const preset of ['safe', 'normal', 'auto'] as const) {
     for (const resume of [false, true]) {
-      it(`${preset} ${resume ? 'resume' : 'start'}: includes the common git dir and network only for auto`, async () => {
+      it(`${preset} ${resume ? 'resume' : 'start'}: applies the preset's sandbox and approval policy`, async () => {
         const h = await new CodexAdapter().createSession({
           sessionId: 's1', cwd: worktree, permissionPreset: preset, projectTrusted: true,
           ...(resume ? { resumeExternalId: 'thread-582' } : {}),
@@ -58,7 +74,7 @@ describe('Codex worktree sandbox (#582)', () => {
           'sandbox_workspace_write.network_access': preset === 'auto',
         })
         expect(params.approvalPolicy).toBe(preset === 'safe' ? 'untrusted' : preset === 'auto' ? 'never' : undefined)
-        expect(params.sandbox).toBe(preset === 'normal' ? undefined : 'workspace-write')
+        expect(params.sandbox).toBe(preset === 'normal' ? undefined : preset === 'auto' ? 'danger-full-access' : 'workspace-write')
         await h.dispose()
       })
     }
@@ -101,10 +117,34 @@ describe('Codex worktree sandbox (#582)', () => {
     })
   }
 
-  it('normal preserves a personal full-access sandbox and does not claim its network is blocked', async () => {
-    state.sandbox = { type: 'dangerFullAccess' }
-    const h = await new CodexAdapter().createSession({ sessionId: 's1', cwd: worktree, permissionPreset: 'normal' }, () => {})
-    expect(h.delegationNotice?.()).toBeUndefined()
-    await h.dispose()
+  for (const resume of [false, true]) {
+    for (const preset of ['normal', 'auto'] as const) {
+      it(`${preset} ${resume ? 'resume' : 'start'}: full access does not report a network restriction to the parent`, async () => {
+        state.config = { sandbox_mode: 'danger-full-access' }
+        state.sandbox = { type: 'dangerFullAccess' }
+        const h = await new CodexAdapter().createSession({
+          sessionId: 's1', cwd: worktree, permissionPreset: preset, projectTrusted: true,
+          ...(resume ? { resumeExternalId: 'thread-582' } : {}),
+        }, () => {})
+        const params = state.requests.find((r) => r.method === (resume ? 'thread/resume' : 'thread/start'))!.params!
+        expect(params.sandbox).toBe(preset === 'normal' ? undefined : 'danger-full-access')
+        expect(h.delegationNotice?.()).toBeUndefined()
+        await h.dispose()
+      })
+    }
+  }
+
+  it('a changed preset takes effect when the same session resumes its next thread', async () => {
+    const adapter = new CodexAdapter()
+    for (const preset of ['safe', 'auto', 'normal', 'safe'] as const) {
+      state.requests.length = 0
+      const h = await adapter.createSession({
+        sessionId: 's1', cwd: worktree, permissionPreset: preset,
+        resumeExternalId: 'thread-582',
+      }, () => {})
+      const params = state.requests.find((r) => r.method === 'thread/resume')!.params!
+      expect(params.sandbox).toBe(preset === 'normal' ? undefined : preset === 'auto' ? 'danger-full-access' : 'workspace-write')
+      await h.dispose()
+    }
   })
 })
