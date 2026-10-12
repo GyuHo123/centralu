@@ -796,6 +796,7 @@ export type RequestInput = z.infer<typeof RequestInput>
  *   compaction         the conversation was compacted or cleared
  *   thread_restart     Codex's thread was restarted for its apps or settings
  *   instructions       the session's tools or instructions changed (apps attached, the orchestrator's skills)
+ *   launch_settings    retained launch settings changed or were not recorded by the previous build
  *   expired            idle longer than the cache lifetime the API reported
  *   probably_expired   idle more than 5 minutes, the lifetime unknown
  *   unknown            none of these
@@ -808,6 +809,7 @@ export const RebuildCause = z.enum([
   'compaction',
   'thread_restart',
   'instructions',
+  'launch_settings',
   'expired',
   'probably_expired',
   'unknown',
@@ -921,6 +923,20 @@ export const AdapterCapabilities = z.object({
    * The idle check (#297) needs that difference — a session whose background work is invisible is never called idle.
    */
   backgroundTasks: z.boolean().default(false),
+  /**
+   * Whether this tool can defer individual Centralu tool definitions until the model asks for
+   * them. This is a serving property, not a list of tool names: the host uses it when it counts
+   * the prefix a kept process was started with.
+   */
+  toolDeferral: z.boolean().optional(),
+  /** Where Centralu's tool instructions reach the model. */
+  instructionChannel: z.enum(['server', 'developer']).optional(),
+  /** How the adapter owns agent processes. A shared server may host several conversations. */
+  processModel: z.enum(['per-session', 'shared-server']).optional(),
+  /** Whether the CLI has child agents whose events the adapter normalizes for the host. */
+  builtInSubagents: z.boolean().optional(),
+  /** Whether the CLI has a direct peer-to-peer messaging path outside Centralu's own session tools. */
+  peerMessaging: z.boolean().optional(),
   /**
    * Whether an idle session of this tool may be put to sleep (#568): its process ended, the conversation resumed by
    * the next message. True only where that was measured to lose nothing a person would notice. Claude: a resumed

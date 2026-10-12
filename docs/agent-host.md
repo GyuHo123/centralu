@@ -250,8 +250,12 @@ own budget (`AGENT_TOOLS`, `AGENT_BUDGET_CHARS`).
 
 | Tool | Arguments → what comes back |
 |---|---|
-| `start_agent` | `{ task, tool?: claude\|codex, model?, effort?, wait?, worktree?, branch? }` → the child's id and name, and its answer (`done`) or `working` |
+| `start_agent` | `{ task, tool?: string, model?, effort?, wait?, worktree?, branch? }` → the child's id and name, and its answer (`done`) or `working` |
 | `agent_session` | `{ sessionId, action: status\|send\|wait\|stop\|delete, text? }` → the same states, plus `at_rest` (nothing the caller gave it runs; its last answer), `stopped` and `deleted` (a merged, clean worktree child cleaned up, part 3) |
+
+The optional `tool` is a registry name, accepted as a string by the schema and checked against the
+current registry at call time. An unknown name returns an error listing the installed tools; adding
+an adapter does not require changing this schema.
 
 What one `start_agent` call does (`SessionManager.startAgent`):
 
@@ -330,7 +334,7 @@ a child, stops that child's turn. A child left running (`wait: false`, or past t
 caller's Stop does not reach it, it has its own Stop. Deleting the caller drops its waits and its session consent;
 the children keep their turns and their link.
 
-**Size.** The two definitions are 992 characters (`AGENT_BUDGET_CHARS` 1,000; 918 before the worktree arguments, 974 before `delete`). Claude loads `start_agent` (a request
+**Size.** The two definitions are 956 characters (`AGENT_BUDGET_CHARS` 1,000; 992 before the registry-name schema, 918 before the worktree arguments, 974 before `delete`). Claude loads `start_agent` (a request
 made in words, like ask_project's, which deferred was not found) and defers `agent_session`, which every
 `start_agent` answer names; Codex reaches both through its `exec` tool. Measured in tool-cost.md §10: +170 tokens per ordinary Claude request (412 → 582); "Have Codex …" reached `start_agent` 3 of 3 on Claude, "another agent" went to each CLI's own sub-agents. No `name` argument: the child
 is named from its task and the person renames it.
@@ -492,6 +496,11 @@ interface AdapterCapabilities {
   verbosities: string[]         // response-length steps; empty = the tool has no such knob (#54)
   exclusiveWriter: boolean      // nobody else can write the conversation while we hold it
   backgroundTasks: boolean      // reports its background work as `background_tasks` (#290)
+  toolDeferral: boolean         // can individual Centralu definitions wait behind tool search
+  instructionChannel: 'server' | 'developer' // where Centralu's tool instructions reach the model (#525)
+  processModel: 'per-session' | 'shared-server' // whether one CLI process owns one or several conversations
+  builtInSubagents: boolean     // child-agent events are normalized by this adapter
+  peerMessaging: boolean        // the CLI has a direct session-to-session path (#575)
   sleep?: boolean               // #568: an idle session may be put to sleep (resume measured to keep the cache); §4.6.1
 }
 ```
@@ -1156,16 +1165,40 @@ its background work.
 | The conversation gets one line from Centralu, "Claude Code restarted on 2.1.290 (was 2.1.282). The conversation continues." | A process restarted by itself is never silent |
 | The installed versions last seen are kept (`agents.versionsSeen`) | An update made while the app was closed still counts as a change |
 
+**Default tool resolution (#573).**
+
+The registry resolves a saved tool only when its adapter is registered, otherwise the first registered adapter.
+An empty registry returns no tool (`null`): project listing and serving apps still work on a host with no agents.
+Creating a session without a tool fails with `tool_not_installed` and asks the person to install and configure an
+agent CLI. Linked projects keep a missing default too; creating a session there requires an available tool.
+
 **Tool definitions after a host switch (#581).**
 
 The keeper can preserve an agent process across a Centralu update, but that process also preserves the Centralu MCP
 definitions it was started with. `SessionManager.refreshToolDefinitions()` compares the profile's served definitions
 and instructions using `residentCost(...).prefixHash`; the adapter declares the serving form in
-the host-only `AgentAdapter.toolDefinitions`, rather than in protocol capabilities or the manager naming a CLI.
+the adapter capabilities (`toolDeferral` and `instructionChannel`), rather than the manager naming a CLI.
 The hash is kept in an app setting per session.
 On a changed hash, a live idle session restarts through the same resume path as #297; a working or approval-waiting
 session restarts after its turn; a sleeping session has no process and records the new hash for its next wake. Thus the
 conversation continues while the next process sees the new tools.
+
+**Launch settings after a host switch (#589).**
+
+The same keeper handoff can retain a process that was started with an older adapter policy: Codex sandbox roots and
+network settings, or Claude launch options and environment controls. Each adapter may report a versioned
+`launchSettingsFingerprint(settings)` for the stable, session-specific launch inputs. The manager keeps that value in
+an app setting per session and compares it after adopting keeper children. A mismatch restarts an idle process through
+the ordinary resume path, waits for a working or approval-waiting process to finish its turn, and is simply recorded
+for an asleep session with no process. The host never names a CLI or interprets the fingerprint; changing an adapter's
+derived launch policy means changing its own fingerprint.
+
+A missing stored fingerprint is also a mismatch: builds before this check kept processes with unknown
+launch settings. The update that introduces it therefore restarts each retained process once, at the
+same safe boundary, and records the new fingerprint. Later handoffs keep an unchanged process.
+Both changed and previously unrecorded launch settings use the `launch_settings` cache rebuild cause
+("launch settings changed"); the restart log says "launch settings changed or previously unrecorded".
+This is separate from `instructions` ("tools changed").
 
 **The capability check seam** (#270). On every change of an installed CLI's version the service calls
 `capabilityCheck({ tool, from, to })`. #270 proposes re-running the probes for what a tool could not do when its version
@@ -1798,6 +1831,7 @@ report from the API, and the screen's Rebuilds tooltip says so.
 | `compaction` compaction | A `compaction` event, or `conversation_reset` (Claude Code's /clear): the next request begins with a summary or nothing the cache has seen |
 | `thread_restart` thread restart | Codex's thread restarted so it takes an attached or detached app (`sessionAppsChanged`, at once or when the turn ends) |
 | `instructions` tools changed | Claude took an attached or detached app at once (its tool list is part of the prompt), or the orchestrator restarted for a skill or MCP change |
+| `launch_settings` launch settings changed | A keeper-retained process restarted because its adapter launch fingerprint changed or the previous build had not recorded one (#589); an idle process restarts now, a working process after its turn |
 | `expired` cache expired | Idle longer than the lifetime the API reported for this lane's last write (Claude's `cache_creation` split: `ephemeral_1h_input_tokens` or `ephemeral_5m_input_tokens`) |
 | `probably_expired` probably expired | Idle more than 5 minutes when no lifetime was reported (Codex never reports one; a Claude lane that has not written yet) |
 | `unknown` | None of these, including idle shorter than the reported lifetime |

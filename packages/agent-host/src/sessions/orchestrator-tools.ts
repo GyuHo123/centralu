@@ -313,10 +313,10 @@ export const DELEGATE_BUDGET_CHARS = 400
 export const AGENT_TOOLS = [
   {
     name: 'start_agent',
-    description: 'Has a new Claude or Codex session in this project do a job; returns its answer.',
+    description: 'Has a new agent session in this project do a job; returns its answer.',
     schema: z.object({
       task: z.string(),
-      tool: z.enum(['claude', 'codex']).optional(),
+      tool: z.string().optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
       wait: z.boolean().optional().describe('false: do not wait; you are told when it ends.'),
@@ -1189,6 +1189,15 @@ export function instructionsFor(profile: ToolProfile, tier: RareTier = rareTier)
 export function codexToolInstructionsFor(profile: ToolProfile, tier: RareTier = rareTier): string | undefined {
   const text = instructionsFor(profile, tier)
   return text ? `# How to use the ${ORCHESTRATOR_MCP_NAME} tools (mcp__${ORCHESTRATOR_MCP_NAME}__*)\n\n${text}` : undefined
+}
+
+/** The adapter decides the channel; this module only owns the shared wording. */
+export function toolInstructionsFor(
+  profile: ToolProfile,
+  channel: 'server' | 'developer',
+  tier: RareTier = rareTier,
+): string | undefined {
+  return channel === 'developer' ? codexToolInstructionsFor(profile, tier) : instructionsFor(profile, tier)
 }
 
 /**
