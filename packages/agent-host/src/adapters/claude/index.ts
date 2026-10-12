@@ -41,7 +41,7 @@ import { launchFor, toolExecutable, type ToolLaunch } from '../../tool-launch.js
 import { installedCliVersion } from '../../cli-version.js'
 import { ClaudeLinks, ClaudePlaceholderError, windowsStart, type ExeFs } from './exe-link.js'
 import { StartGate } from './start-gate.js'
-import { deleteClaudeSession, listClaudeSessions, readClaudeHistory } from './history.js'
+import { deleteClaudeSession, listClaudeSessions, readClaudeHistory, readClaudeTranscriptTail } from './history.js'
 import { readUsageFromAny, type UsageQuery } from './usage.js'
 import { ORCHESTRATOR_MCP_NAME, orchestratorMcp } from './orchestrator-mcp.js'
 import { appProxy, type AppProxy } from './app-proxy.js'
@@ -299,6 +299,9 @@ function settingSourcesFor(opts: Pick<CreateSessionOpts, 'noSettingFiles' | 'pro
  */
 const REFRESH_RACE = /another Claude Code process is refreshing/i
 
+/** How many of an adopted conversation's last messages are read for the timers it set (#568): a few /loop turns */
+const SCHEDULE_TAIL = 400
+
 type RaceMsg = { type?: string; subtype?: unknown; is_error?: unknown; result?: unknown; errors?: unknown; message?: { content?: unknown } }
 
 /** The text of a result or an assistant message, if it is the refresh race */
@@ -408,6 +411,20 @@ class ClaudeSession implements SessionHandle {
     this.stream.goal.seed(opts.knownGoal)
     // An adopted CLI announces its id only with its next turn's init; it is the conversation we resume
     if (opts.processSource?.adopt) this.externalId = opts.resumeExternalId ?? null
+    if (opts.processSource?.adopt && opts.resumeExternalId) void this.recoverSchedules(opts.resumeExternalId, opts.cwd)
+  }
+
+  /**
+   * An adopted process (#280 step 2) still holds the timers the previous host saw it set (`/loop`'s wake-ups, scheduled
+   * prompts, #568), but this host's stream never saw them. They are read back from the conversation's last messages,
+   * conservatively (a wake-up's time is taken as the asked delay from now), so the session is not put to sleep or
+   * restarted under them.
+   */
+  private async recoverSchedules(externalId: string, cwd: string): Promise<void> {
+    const tail = await readClaudeTranscriptTail(externalId, cwd, SCHEDULE_TAIL).catch(() => [])
+    if (this.closed || tail.length === 0) return
+    for (const e of this.stream.tasks.recover(tail as Record<string, unknown>[])) this.emit(e)
+    this.armScheduleLook()
   }
 
   async start(): Promise<void> {
@@ -737,6 +754,7 @@ class ClaudeSession implements SessionHandle {
           // The turn goes again instead of failing: its error marker would end the turn on screen
           if (retrying) events = events.filter((e) => e.type !== 'error')
           for (const e of events) this.emit(e)
+          this.armScheduleLook()
           // Once a turn ends, asks what is currently in the context window (FR-14).
           if (m.type === 'result' && !retrying) void this.reportContext(q)
         }
@@ -1275,7 +1293,31 @@ class ClaudeSession implements SessionHandle {
    * the process (#98) — and ends every background task the session listed (#290), for the same reason.
    */
   private releaseAgents(why: string): void {
+    if (this.scheduleLook) clearTimeout(this.scheduleLook)
+    this.scheduleLook = null
     for (const e of this.stream.release(why)) this.emit(e)
+  }
+
+  /** A look at the scheduled wake-ups when the next one is due (#568, `ClaudeSchedules`) */
+  private scheduleLook: ReturnType<typeof setTimeout> | null = null
+
+  /**
+   * The CLI's timers (`/loop`'s wake-ups, scheduled prompts) are listed as background work until they are due. Nothing
+   * arrives at that moment when the loop has ended without saying so, so the list is looked at again then: a second
+   * past the time, by which a wake-up that fired has started its turn.
+   */
+  private armScheduleLook(): void {
+    if (this.scheduleLook) clearTimeout(this.scheduleLook)
+    this.scheduleLook = null
+    const due = this.stream.tasks.nextDue()
+    if (due === null || this.closed) return
+    this.scheduleLook = setTimeout(() => {
+      this.scheduleLook = null
+      for (const e of this.stream.tasks.tick()) this.emit(e)
+      this.armScheduleLook()
+    }, Math.max(0, due - Date.now()) + 1000)
+    // A timer to look at is no reason to keep the host alive
+    this.scheduleLook.unref?.()
   }
 
   /**
@@ -1463,6 +1505,13 @@ export class ClaudeAdapter implements AgentAdapter {
     exclusiveWriter: false,
     // background_tasks_changed and the task messages (#290, ClaudeBackgroundTracker)
     backgroundTasks: true,
+    /*
+     * An idle session may be put to sleep (#568): a resumed process read the prompt cache as the live one did (~100% at
+     * 2, 6 and 10 min on the 1 h lifetime, CLI 2.1.29x with haiku, #561) for +0.7 s (p50) / +1.8 s (p95) before the first
+     * token, and ending the process frees all of its memory (240-300 MB after a few turns, growing while idle).
+     * `scripts/probe-resume-cache.mts` re-measures it on a CLI update.
+     */
+    sleep: true,
   }
 
   async detect(): Promise<DetectResult> {
