@@ -848,6 +848,30 @@ export class ClaudeBackgroundTracker {
     return this.schedules.recover(messages) ? [this.event()] : []
   }
 
+  /**
+   * The tasks the previous host last saw running in an adopted process (#648, `ProcessSource.adopt.backgroundTasks`).
+   * The CLI sends its level only when it changes, so without this a tracker over an adopted process would list nothing
+   * and, since only a task the level once listed counts as background work, report none of their endings either: the
+   * session would read as idle and be put to sleep, or restarted, over a running shell. The manager lists them itself;
+   * this only makes the tracker know them, so the next `task_notification` or level is read against them.
+   */
+  seed(tasks: readonly BackgroundTask[]): void {
+    for (const t of tasks) {
+      // A timer (`stoppable: false`, `ClaudeSchedules.live`) is not a CLI task: it is read back from the transcript
+      if (t.status !== 'running' || t.stoppable === false || this.seen.has(t.id)) continue
+      this.info.set(t.id, {
+        kind: t.kind,
+        description: t.description,
+        ...(t.parentCallId ? { parentCallId: t.parentCallId } : {}),
+        ...(t.ambient ? { ambient: true } : {}),
+        // `entry` derives stopsWithTurn from the kind unless the task is nested; a seeded one without it was nested
+        ...(t.stopsWithTurn === undefined && (t.kind === 'agent' || t.kind === 'shell') ? { nested: true } : {}),
+      })
+      this.live.push(t.id)
+      this.seen.add(t.id)
+    }
+  }
+
   /** Drops the wake-ups whose time has passed; the new level when that changed anything */
   tick(): NormalizedEvent[] {
     return this.schedules.prune() ? [this.event()] : []
@@ -876,7 +900,8 @@ export class ClaudeBackgroundTracker {
         this.live.push(id)
         this.seen.add(id)
       }
-      return [this.event()]
+      // The CLI's whole list: what an adopted process holds is known from here on (#648)
+      return [this.event(undefined, true)]
     }
     if (subtype === 'task_started' || subtype === 'task_updated') {
       const id = str(m.task_id)
@@ -947,9 +972,10 @@ export class ClaudeBackgroundTracker {
     }
   }
 
-  private event(ended?: BackgroundTask[]): NormalizedEvent {
+  private event(ended?: BackgroundTask[], snapshot?: true): NormalizedEvent {
     return {
       type: 'background_tasks',
+      ...(snapshot ? { snapshot } : {}),
       sessionId: this.sessionId,
       live: [...this.live.map((id) => this.entry(id, this.info.get(id))), ...this.schedules.live()],
       ...(ended ? { ended } : {}),

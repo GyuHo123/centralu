@@ -368,7 +368,17 @@ export const NormalizedEvent = z.discriminatedUnion('type', [
    * only came in lists and in answers to the window that woke a session, so another window, or a session woken by the
    * orchestrator or an app, kept showing the old value.
    */
-  z.object({ ...base, type: z.literal('session_live'), live: z.boolean(), reason: z.enum(['asleep']).optional() }),
+  z.object({
+    ...base,
+    type: z.literal('session_live'),
+    live: z.boolean(),
+    /**
+     * Why the process went away, when `live` is false (#568, #648): `asleep` (an idle session put to sleep),
+     * `restart_failed` (the host replaced the process and the new one did not come up), `crashed` (the process ended
+     * on its own). Absent when `live` is true.
+     */
+    reason: z.enum(['asleep', 'restart_failed', 'crashed']).optional(),
+  }),
   z.object({
     ...base,
     type: z.literal('usage_update'),
@@ -609,6 +619,12 @@ export const NormalizedEvent = z.discriminatedUnion('type', [
     live: z.array(BackgroundTask),
     ended: z.array(BackgroundTask).optional(),
     clearEnded: z.boolean().optional(),
+    /**
+     * `live` is the tool's own full list of what runs in the process (#648): Claude's `background_tasks_changed`. Only
+     * such a list settles what a process adopted from a previous host holds; a level built from what this host saw
+     * (an ending, a `/loop` timer) does not.
+     */
+    snapshot: z.boolean().optional(),
   }),
   /**
    * The version of the agent CLI this session's process runs (#297): Claude's init message (`claude_code_version`), the

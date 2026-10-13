@@ -29,6 +29,7 @@ import type {
   AppQuestion,
   AppReach,
   ApprovalDetail,
+  BackgroundTask,
   ProjectConsent,
   ProjectConsentKind,
   ModelOption,
@@ -60,6 +61,7 @@ import type {
 import {
   APP_SLUG,
   applyBackgroundTasks,
+  liveBackgroundTasks,
   DATA_DIR,
   // The frame's single-line field (#120) — lives in protocol (app-frames.ts) because the mock
   // also needs to put words into a session built with the same frame.
@@ -299,6 +301,18 @@ function isCompactionMarker(row: StoredMessage): boolean {
  * limit hit, error) means the turn is over (C-4) */
 const inTurn = (state: SessionState): boolean => state === 'working' || state === 'waiting_approval'
 
+/**
+ * How long an adopted session whose background work is unknown (#648, no record from the previous host) may stay quiet
+ * before it is taken as holding nothing: until then it is never put to sleep. Two hours is past any quiet a person
+ * leaves a running dev server in while still at the machine, and short of keeping a forgotten session awake all night.
+ */
+const BACKGROUND_UNKNOWN_MAX_MS = 2 * 60 * 60 * 1000
+/**
+ * How long a restart that changes nothing about safety (a model, an app set) waits for the session's background work
+ * to end before it is applied anyway (#648). A safety change does not wait at all (`applyDeferredRestart`).
+ */
+const BACKGROUND_HOLD_MAX_MS = 60 * 60 * 1000
+
 /** A path resolved through the nearest folder that exists, so a folder not made yet still compares with its parent's real path */
 function canonicalPath(path: string): string {
   const full = resolve(path)
@@ -457,6 +471,22 @@ export class SessionManager {
   private definitionsRestartAfterTurn = new Set<string>()
   /** A kept process was started with adapter settings from an older host build (#589). */
   private launchSettingsRestartAfterTurn = new Set<string>()
+  /**
+   * Sessions whose adopted process may hold background work this host knows nothing of (#648) -> when the session was
+   * last heard from. The previous host left no list of it (a build before the list was kept), and the tool says its
+   * level only when it changes. Until the tool's own full list arrives (`snapshot`), the session is never idle
+   * (`sessionIdle`: `background_unknown`), so it is not put to sleep over a shell nobody can see; after
+   * `BACKGROUND_UNKNOWN_MAX_MS` without a word it is taken as holding nothing (`backgroundKnown`). A safety restart does
+   * not wait for it (`applyDeferredRestart`). A fresh process starts known: it holds nothing yet.
+   */
+  private backgroundUnknown = new Map<string, number>()
+  /**
+   * A deferred restart that changes nothing about safety, waiting for the session's background work to end (#648) ->
+   * when the wait began, and the timer that applies it anyway `BACKGROUND_HOLD_MAX_MS` later. The entry outlives its
+   * timer until the restart is applied: a timer that fires mid-turn finds the turn running, and the turn's end applies
+   * the restart then, counting from `since` rather than starting a new hour.
+   */
+  private backgroundHolds = new Map<string, { since: number; timer: ReturnType<typeof setTimeout> }>()
   private updates: UpdateService | null = null
   /** Sessions allowed to update once per host; an "always" answer adds this session only. */
   private updateConsents = new Set<string>()
@@ -1599,6 +1629,8 @@ export class SessionManager {
       }
     }
     this.handles.set(id, handle)
+    // A new process holds no background work yet (#648)
+    this.rememberBackgroundTasks(info)
     // The cache's first request (§6.1): a new conversation, or one taken over from outside in a new process
     this.cacheLedger.note(id, params.resumeExternalId ? 'new_process' : 'cold_start')
     this.running.set(id, {
@@ -1922,15 +1954,100 @@ export class SessionManager {
     tool: ToolName,
     adopt?: AgentProcess,
     version?: string | null,
+    /** The background tasks the previous host last saw running in the adopted process (#648), if it kept a list */
+    kept?: readonly BackgroundTask[] | null,
   ): { processSource?: ProcessSource } {
     const host = this.keeperOpts.processes
     if (!host) return {}
     return {
       processSource: {
         spawn: (spec) => host.spawn(sessionId, tool, spec, version ?? undefined),
-        ...(adopt ? { adopt: { process: adopt, openCalls: this.openToolCalls(sessionId) } } : {}),
+        ...(adopt ? { adopt: { process: adopt, openCalls: this.openToolCalls(sessionId), backgroundTasks: kept ?? [] } } : {}),
       },
     }
+  }
+
+  /**
+   * The running background tasks of a session's process, kept in the store (#648) so the host that adopts the process
+   * after a swap knows what it holds: the tool lists its level only when it changes, and `close()` on a process kills
+   * its shells silently. Written on every change and when a process starts (empty). `null` when no host ever wrote it
+   * for this session, which an adopted process reads as "unknown".
+   */
+  private backgroundTasksKey(sessionId: string): string {
+    return `background_tasks:${sessionId}`
+  }
+
+  private keptBackgroundTasks(sessionId: string): BackgroundTask[] | null {
+    const raw = this.store.appSetting(this.backgroundTasksKey(sessionId))
+    if (raw === null) return null
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      return Array.isArray(parsed) ? (parsed as BackgroundTask[]).filter((t) => t && typeof t.id === 'string' && t.status === 'running') : []
+    } catch {
+      return []
+    }
+  }
+
+  private rememberBackgroundTasks(m: SessionInfo): void {
+    this.store.setAppSetting(this.backgroundTasksKey(m.id), JSON.stringify(m.backgroundTasks.filter((t) => t.status === 'running')))
+  }
+
+  /** Background work the session's process holds that ending it would end (#648): what its tool listed as running */
+  private backgroundRunning(sessionId: string): boolean {
+    const m = this.meta.get(sessionId)
+    return !!m && liveBackgroundTasks(m.backgroundTasks).length > 0
+  }
+
+  /**
+   * Whether what the session's process holds in the background is known (#648). An adopted process with no record is
+   * not, until its tool lists its work; after `BACKGROUND_UNKNOWN_MAX_MS` without a word from the session it is taken
+   * as holding nothing, said in the log, and recorded so the next host does not start from unknown again.
+   */
+  private backgroundKnown(sessionId: string): boolean {
+    const since = this.backgroundUnknown.get(sessionId)
+    if (since === undefined) return true
+    if (Date.now() - since < BACKGROUND_UNKNOWN_MAX_MS) return false
+    this.backgroundUnknown.delete(sessionId)
+    console.error(
+      `[sessions] ${sessionId.slice(0, 8)}: no word of its background work since it was adopted, for ` +
+        `${Math.round(BACKGROUND_UNKNOWN_MAX_MS / 3_600_000)} h; taking it as none`,
+    )
+    const m = this.meta.get(sessionId)
+    if (m) this.rememberBackgroundTasks(m)
+    return true
+  }
+
+  /** The session's process is gone for good (deleted): nothing of its background work is kept (#648) */
+  private forgetBackground(sessionId: string): void {
+    this.backgroundUnknown.delete(sessionId)
+    this.clearBackgroundHold(sessionId)
+    this.store.deleteAppSetting(this.backgroundTasksKey(sessionId))
+  }
+
+  /**
+   * Says in the conversation that a restart is about to end the session's background work (#648): the tool's own
+   * ending of each task follows in the list, but a person whose dev server stopped should read why where they look.
+   */
+  private noticeBackgroundStopped(sessionId: string, cause: RebuildCause | undefined): void {
+    const m = this.meta.get(sessionId)
+    if (!m || !this.handles.has(sessionId)) return
+    const why =
+      cause === 'launch_settings' ? 'changed launch settings'
+      : cause === 'instructions' ? "changed Centralu tool definitions"
+      : cause === 'thread_restart' ? 'a change of attached apps'
+      : cause === 'model_change' ? 'a model change'
+      : this.running.get(sessionId)?.permissionPreset !== m.permissionPreset ? 'a permission change'
+      : 'changed settings'
+    const tasks = liveBackgroundTasks(m.backgroundTasks)
+    const text =
+      tasks.length > 0
+        ? `Restarting the agent to apply ${why}. The background work it was running stops with it: ` +
+          `${tasks.map((t) => t.description).join(', ')}. Ask the agent to start it again if you still need it.`
+        : this.backgroundUnknown.has(sessionId)
+          ? `Restarting the agent to apply ${why}. Any background work it started before Centralu was updated ` +
+            `(a dev server, a watcher) stops with it; ask the agent to start it again if you still need it.`
+          : null
+    if (text) this.onEvent({ type: 'notice', sessionId, level: 'warning', from: 'Centralu', label: 'restart', text })
   }
 
   /** Tool calls the store holds for this session with no result after them (the newest 200 rows) */
@@ -2103,12 +2220,14 @@ export class SessionManager {
      * adopted one keeps the version its keeper tag gave (adoptKept) — it was started long before.
      */
     if (!adopt) m.agentVersion = this.versionHint?.(tool) ?? null
+    // What the previous host saw running in the process this one adopts (#648); null when it kept no list
+    const kept = adopt ? this.keptBackgroundTasks(sessionId) : null
     try {
       const creating = adapter.createSession(
         {
           sessionId,
           cwd,
-          ...this.processSourceFor(sessionId, tool, adopt, m.agentVersion),
+          ...this.processSourceFor(sessionId, tool, adopt, m.agentVersion, kept),
           model: launched.model ?? undefined,
           effort: launched.effort ?? undefined,
           verbosity: launched.verbosity ?? undefined,
@@ -2214,6 +2333,9 @@ export class SessionManager {
       if (!adopt) {
         this.rememberToolPrefix(sessionId)
         this.rememberLaunchSettings(m, cwd)
+        // A new process holds no background work yet (#648); whatever an earlier adopted one left unknown is over
+        this.backgroundUnknown.delete(sessionId)
+        this.rememberBackgroundTasks(m)
       }
       // Every window learns it is awake, not only the one that asked (#568)
       this.emit({ type: 'session_live', sessionId, live: true })
@@ -2232,6 +2354,15 @@ export class SessionManager {
          */
         this.store.upsertSession(m)
         this.emit({ type: 'state_change', sessionId, state: m.state, reason: 'reattached' })
+        /*
+         * And it keeps its background work (#648): the shells the previous host saw running still run in it, and the
+         * tool will not list them again until something changes. They are listed from the kept record, as the tool's
+         * own level would be; with no record (the previous host predates it), the session is held as unknown until
+         * the tool first speaks, rather than read as idle and put to sleep over a running dev server.
+         */
+        if (kept === null) this.backgroundUnknown.set(sessionId, Date.now())
+        // Listed through onEvent, which also keeps the record for the host after this one
+        else if (kept.length > 0) this.onEvent({ type: 'background_tasks', sessionId, live: kept })
       } else {
         m.state = 'idle'
         m.waitingSince = null
@@ -2443,6 +2574,8 @@ export class SessionManager {
       await handle.dispose().catch(() => {})
       this.handles.delete(sessionId)
     }
+    // Its process is gone with it, and a restored session starts a new one (#648)
+    this.forgetBackground(sessionId)
     /*
      * The message being streamed is written out, not dropped (#66 used to drop it, because the rows were about to go).
      * The rows now stay, and a trashed conversation that stops mid-sentence is not the one that was deleted. Written
@@ -2651,6 +2784,7 @@ export class SessionManager {
       const recoveryRemoval = await stageWorktreeRecoveryRemoval(sessionId)
       try {
         await this.store.purgeSession(sessionId)
+        this.forgetBackground(sessionId)
       } catch (e) {
         // Not swallowed: the folder left aside carries the session id, and the next start puts it back (#647)
         await recoveryRemoval.abort().catch((cause: Error) => console.error(`[trash] recovery files of ${sessionId.slice(0, 8)} could not be put back after a failed purge and stay aside until the next start: ${cause.message}`))
@@ -2932,6 +3066,8 @@ export class SessionManager {
         }
         const wasBusy = inTurn(m.state)
         this.applyStateHint(e, m)
+        // Heard from: an unknown background state is bounded by quiet, not by age (#648, `backgroundKnown`)
+        if (this.backgroundUnknown.has(m.id)) this.backgroundUnknown.set(m.id, Date.now())
         /*
          * A builder session's turn ended (M4 C-4) — this is the moment to relaunch that app from its
          * files. It happens once, right here, rather than every time the app's folder changes: an app
@@ -2967,6 +3103,8 @@ export class SessionManager {
           void dead.dispose().catch(() => {})
           this.handles.delete(e.sessionId)
           this.running.delete(e.sessionId)
+          // No process any more, and none coming by itself (#648): the windows stop showing it live
+          this.emit({ type: 'session_live', sessionId: e.sessionId, live: false, reason: 'crashed' })
         }
       }
     }
@@ -2992,12 +3130,30 @@ export class SessionManager {
     // A commit call still unanswered when its turn ends never will be: interrupted, or its process gone (#392)
     if (endedTurn && e.sessionId) this.forgetCommits(e.sessionId)
     if (endedTurn && e.sessionId) this.applyDeferredRestart(e.sessionId)
+    // A deferred restart also waits for the session's background work (#648): the moment it ends is a boundary too
+    if (e.type === 'background_tasks' && e.sessionId) this.applyDeferredRestart(e.sessionId)
   }
 
-  /** A note receipt follows turn_complete: re-check the same deferred change when the last hold is released. */
+  /**
+   * A note receipt follows turn_complete: re-check the same deferred change when the last hold is released.
+   *
+   * Background work (#648). A change of safety (the permission preset, the launch settings, the tool definitions a
+   * profile serves) is applied at the end of the turn whatever runs in the background: another turn under the old
+   * policy is worse than a stopped dev server, and the conversation says what stopped (`noticeBackgroundStopped`). Any
+   * other change (a model, an app set) waits while work the tool listed is running, as a sleep does, and is applied
+   * anyway after `BACKGROUND_HOLD_MAX_MS`.
+   */
   private applyDeferredRestart(sessionId: string): void {
     const session = this.meta.get(sessionId)
-    if (!session || inTurn(session.state) || this.deferredRestarts.has(sessionId) || this.agentRuns.get(sessionId)?.waitingForInputs || !this.restartAfterTurn.delete(sessionId)) return
+    if (!session || inTurn(session.state) || this.deferredRestarts.has(sessionId) || this.agentRuns.get(sessionId)?.waitingForInputs || !this.restartAfterTurn.has(sessionId)) return
+    const hold = this.backgroundHolds.get(sessionId)
+    const holdExpired = !!hold && Date.now() - hold.since >= BACKGROUND_HOLD_MAX_MS
+    if (!holdExpired && !this.safetyRestartPending(sessionId) && this.backgroundRunning(sessionId)) {
+      this.holdForBackground(sessionId)
+      return
+    }
+    this.restartAfterTurn.delete(sessionId)
+    this.clearBackgroundHold(sessionId)
     // An app attached or detached in this turn (#371 part A) is a reason of its own, settings or not.
     const apps = this.appsRestartAfterTurn.delete(sessionId)
     const definitions = this.definitionsRestartAfterTurn.delete(sessionId)
@@ -3010,6 +3166,35 @@ export class SessionManager {
     })
     this.deferredRestarts.set(sessionId, restarting)
     void restarting.catch(() => {})
+  }
+
+  /** A deferred restart changes what the process may do (#648): its permission preset, launch settings or tool set */
+  private safetyRestartPending(sessionId: string): boolean {
+    const m = this.meta.get(sessionId)
+    const live = this.running.get(sessionId)
+    return (
+      this.launchSettingsRestartAfterTurn.has(sessionId) ||
+      this.definitionsRestartAfterTurn.has(sessionId) ||
+      (!!m && !!live && live.permissionPreset !== m.permissionPreset)
+    )
+  }
+
+  /** Holds a non-safety restart for background work, at most `BACKGROUND_HOLD_MAX_MS` (#648) */
+  private holdForBackground(sessionId: string): void {
+    if (this.backgroundHolds.has(sessionId)) return
+    const timer = setTimeout(() => {
+      console.error(`[sessions] ${sessionId.slice(0, 8)}: a restart waited ${Math.round(BACKGROUND_HOLD_MAX_MS / 60_000)} min for background work; applying it at the next quiet moment`)
+      this.applyDeferredRestart(sessionId)
+    }, BACKGROUND_HOLD_MAX_MS)
+    timer.unref?.()
+    this.backgroundHolds.set(sessionId, { since: Date.now(), timer })
+  }
+
+  /** The wait is over: the restart was applied, or the session is gone (#648) */
+  private clearBackgroundHold(sessionId: string): void {
+    const hold = this.backgroundHolds.get(sessionId)
+    if (hold) clearTimeout(hold.timer)
+    this.backgroundHolds.delete(sessionId)
   }
 
   /**
@@ -3175,6 +3360,13 @@ export class SessionManager {
       case 'background_tasks':
         // The same merge the UI's reducer and the mock run (#290), so a reconnect reads back what the screen showed
         m.backgroundTasks = applyBackgroundTasks(m.backgroundTasks, e)
+        /*
+         * Kept for the host that may adopt this process (#648). Only the tool's own full list settles what an adopted
+         * process holds: a level built from an ending or a `/loop` timer says nothing of a shell this host never saw,
+         * and recording it would hand the next host a list it takes as complete.
+         */
+        if (e.snapshot) this.backgroundUnknown.delete(m.id)
+        if (!this.backgroundUnknown.has(m.id)) this.rememberBackgroundTasks(m)
         break
       case 'agent_version':
         // What the process says it runs (#297) replaces what was assumed when it started
@@ -4503,7 +4695,8 @@ export class SessionManager {
     if (this.agentRuns.get(sessionId)?.waitingForInputs) return { idle: false, reason: 'turn' }
     return sessionIdle(m, {
       running: this.handles.has(sessionId),
-      reportsBackground: !!this.adapters.get(m.tool)?.capabilities.backgroundTasks,
+      // An adopted process whose work the previous host did not record is as silent as a tool that cannot report (#648)
+      reportsBackground: !!this.adapters.get(m.tool)?.capabilities.backgroundTasks && this.backgroundKnown(sessionId),
     })
   }
 
@@ -4589,8 +4782,11 @@ export class SessionManager {
     this.appsRestartAfterTurn.delete(sessionId)
     this.definitionsRestartAfterTurn.delete(sessionId)
     this.launchSettingsRestartAfterTurn.delete(sessionId)
+    // A restart for any reason ends a wait for background work: whatever it was holding is applied now (#648)
+    this.clearBackgroundHold(sessionId)
     const h = this.handles.get(sessionId)
     if (h) {
+      this.noticeBackgroundStopped(sessionId, cause)
       await h.dispose().catch(() => {})
       // Stamped **after** dispose finishes — so even the outgoing process's last flush falls inside the
       // marker
@@ -4605,7 +4801,23 @@ export class SessionManager {
        */
       this.closeStream(sessionId)
     }
-    return this.resumeSession(sessionId)
+    /*
+     * A process was dropped and no new one took its place (#648): every window is told, as a sleep tells it. Before
+     * this, a restart the host itself started (a definitions or launch-settings refresh, a CLI move) that failed left
+     * the windows showing the session live, so the screen's wake stepped back and the person learnt only when a send
+     * failed. The answer below still names the reason to whoever asked.
+     */
+    const dropped = (reason: string) => {
+      if (!h || this.handles.has(sessionId)) return
+      console.error(`[sessions] restart of ${sessionId.slice(0, 8)} did not bring a process up: ${reason}`)
+      this.emit({ type: 'session_live', sessionId, live: false, reason: 'restart_failed' })
+    }
+    const r = await this.resumeSession(sessionId).catch((err: Error) => {
+      dropped(err.message)
+      throw err
+    })
+    if (!r.resumed) dropped(r.reason ?? 'unknown')
+    return r
   }
 
   /** The persisted prefix a process was started with. It is separate from SessionInfo: a screen never needs it. */
@@ -4672,6 +4884,10 @@ export class SessionManager {
         this.store.setAppSetting(this.toolPrefixKey(session.id), next)
         continue
       }
+      /*
+       * Only a turn holds this restart (#648): the definitions are what the process may call, so an idle session takes
+       * them now, background work or not, and the conversation says what stopped (`noticeBackgroundStopped`).
+       */
       if (inTurn(session.state)) {
         this.restartAfterTurn.add(session.id)
         this.definitionsRestartAfterTurn.add(session.id)
@@ -4697,6 +4913,7 @@ export class SessionManager {
         this.store.setAppSetting(this.launchSettingsKey(session.id), next)
         continue
       }
+      // A safety change too, so the same rule as the definitions above
       if (inTurn(session.state)) {
         this.restartAfterTurn.add(session.id)
         this.launchSettingsRestartAfterTurn.add(session.id)
