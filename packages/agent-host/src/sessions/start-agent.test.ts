@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PermissionPreset } from '@cc/protocol'
@@ -7,6 +7,8 @@ import { AGENT_TOOLS, runOrchestratorTool } from './orchestrator-tools.js'
 import { ASK_WAIT_MS } from './ask-project.js'
 import { CrossAdapter, crossWorld, type CrossWorld } from './cross-project.test-helpers.js'
 import { AGENT_CEILING, agentBranch, agentNoteFrame, presetWithin } from './start-agent.js'
+import { SessionManager } from './manager.js'
+import { createRpcHandler } from '../rpc.js'
 
 /**
  * start_agent and agent_session (#561): an ordinary session starts another agent in its own project — behind the
@@ -499,6 +501,165 @@ describe('starting another agent in the same project', () => {
     expect(handleOf(background)!.interrupted).toBe(0)
   })
 
+  describe('deleting a child without a worktree (#637)', () => {
+    describe.each(['safe', 'normal', 'auto'] as const)('protecting the person under %s', (preset) => {
+      it.each(['working', 'approval', 'question'] as const)('refuses delete during the person\'s %s after the delegated turn ends', async (activity) => {
+        allowProject()
+        const s = await session(preset)
+        const c = await startRunning(s)
+        const child = handleOf(c)!
+        child.answer('Delegated task complete.')
+        await w.mgr.agentSession(s, { sessionId: c, action: 'wait' })
+        await w.mgr.send(c, 'The person has another task')
+        if (activity === 'approval') child.event({ type: 'approval_request', sessionId: c, requestId: 'person-approval', detail: { kind: 'command', command: 'check', cwd: w.caller.path } })
+        if (activity === 'question') {
+          child.event({ type: 'state_change', sessionId: c, state: 'waiting_input' })
+          child.event({ type: 'question_request', sessionId: c, requestId: 'person-question', questions: [{ question: 'Which one?', header: '', options: [], multiSelect: false }] })
+        }
+        const before = structuredClone(w.mgr.listSessions().find((row) => row.id === c))
+        const dispose = vi.spyOn(child, 'dispose')
+        expect(await w.mgr.agentSession(s, { sessionId: c, action: 'delete' })).toMatchObject({ ok: false, error: expect.stringContaining('the person may be using it') })
+        expect(dispose).not.toHaveBeenCalled()
+        expect(w.mgr.listSessions().find((row) => row.id === c)).toEqual(before)
+        expect(w.store.trashedSession(c)).toBeNull()
+        child.answer('The person\'s task is complete.')
+        expect(await w.mgr.agentSession(s, { sessionId: c, action: 'delete' })).toMatchObject({ ok: true, state: 'deleted' })
+      })
+    })
+
+    it('auto ownership cannot delete a turn delegated by another caller', async () => {
+      const s = await session('auto')
+      const other = await session('auto')
+      const c = await startRunning(s)
+      const child = handleOf(c)!
+      child.answer('done')
+      await w.mgr.agentSession(s, { sessionId: c, action: 'wait' })
+      const working = w.mgr.agentSession(other, { sessionId: c, action: 'send', text: 'Another caller\'s task' })
+      await w.until(() => child.sent.length === 2)
+      try {
+        expect(await w.mgr.agentSession(s, { sessionId: c, action: 'delete' })).toMatchObject({ ok: false, error: expect.stringContaining('the person may be using it') })
+      } finally {
+        child.answer('done')
+        await working
+      }
+    })
+
+    it.each(['parent', 'sidebar'] as const)('shares one trash operation when %s deletes first and the other races disposal', async (first) => {
+      allowProject()
+      const s = await session()
+      const c = await startRunning(s)
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const dispose = vi.spyOn(handleOf(c)!, 'dispose').mockImplementation(() => gate)
+      const trash = vi.spyOn(w.store, 'trashSession')
+      const rpc = createRpcHandler(w.mgr, w.adapters)
+      const parent = () => w.mgr.agentSession(s, { sessionId: c, action: 'delete' })
+      const sidebar = () => rpc('agents.deleteSession', { sessionId: c })
+      const a = first === 'parent' ? parent() : sidebar()
+      await w.until(() => dispose.mock.calls.length === 1)
+      const b = first === 'parent' ? sidebar() : parent()
+      release()
+      const results = await Promise.all([a, b])
+      expect(results[first === 'parent' ? 0 : 1]).toMatchObject({ ok: true, state: 'deleted' })
+      expect(results[first === 'sidebar' ? 0 : 1]).toEqual({ ok: true })
+      expect(dispose).toHaveBeenCalledTimes(1)
+      expect(trash).toHaveBeenCalledTimes(1)
+      expect(w.events.filter((e) => e.type === 'session_deleted' && e.sessionId === c)).toHaveLength(1)
+      expect(w.store.trashedSession(c)?.record.projectId).toBe(w.caller.id)
+    })
+
+    it.each(['safe', 'normal', 'auto'] as const)('%s moves its completed child to the sidebar trash, preserving its history and creator link', async (preset) => {
+      allowProject()
+      const s = await session(preset)
+      const c = await startRunning(s)
+      handleOf(c)!.answer('Research complete.')
+      await w.mgr.agentSession(s, { sessionId: c, action: 'wait' })
+      expect(childrenOf(s)[0]).toMatchObject({ worktree: null, parentSessionId: null, askedBy: s })
+
+      const result = await w.mgr.runOrchestratorTool(s, 'agent_session', { sessionId: c, action: 'delete' })
+      expect(result).toEqual({ text: expect.stringContaining('to the trash. Tell the person in one line.') })
+      expect(result.text).not.toMatch(/worktree|branch|undefined/)
+      expect(w.mgr.listSessions().some((child) => child.id === c)).toBe(false)
+      expect(w.store.trashedSession(c)?.session).toMatchObject({ askedBy: s, parentSessionId: null })
+      expect(w.store.loadMessages(c, 50).some((m) => JSON.stringify(m.payload).includes('Research complete.'))).toBe(true)
+      expect(w.events).toContainEqual({ type: 'session_deleted', sessionId: c })
+      await w.mgr.restoreSession(c)
+      expect(childrenOf(s).map((child) => child.id)).toContain(c)
+    })
+
+    it.each(['safe', 'normal', 'auto'] as const)('refuses another caller\'s child and an unowned session under %s', async (preset) => {
+      allowProject()
+      const owner = await session()
+      const caller = await session(preset)
+      const c = await startRunning(owner)
+      for (const target of [c, owner]) {
+        const dispose = vi.spyOn(handleOf(target)!, 'dispose')
+        expect(await w.mgr.agentSession(caller, { sessionId: target, action: 'delete' })).toMatchObject({
+          ok: false, error: expect.stringContaining('not a session this session started'),
+        })
+        expect(dispose).not.toHaveBeenCalled()
+        expect(w.store.trashedSession(target)).toBeNull()
+      }
+    })
+
+    it('waits for child disposal mid-turn before trashing, without stopping the parent\'s own turn', async () => {
+      allowProject()
+      const s = await session()
+      await w.mgr.send(s, 'coordinate the research')
+      const c = await startRunning(s)
+      const child = handleOf(c)!
+      child.event({ type: 'message_delta', sessionId: c, role: 'assistant', text: 'Partial research' })
+      const waiting = w.mgr.agentSession(s, { sessionId: c, action: 'wait' })
+      const parentDispose = vi.spyOn(handleOf(s)!, 'dispose')
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const dispose = vi.spyOn(child, 'dispose').mockImplementation(() => gate)
+      const deleting = w.mgr.agentSession(s, { sessionId: c, action: 'delete' })
+      try {
+        await w.until(() => dispose.mock.calls.length === 1)
+        expect(w.store.trashedSession(c)).toBeNull()
+        expect(w.events.some((e) => e.type === 'session_deleted' && e.sessionId === c)).toBe(false)
+        // Output already in flight is flushed with the conversation before it goes to the trash.
+        child.event({ type: 'message_delta', sessionId: c, role: 'assistant', text: ' before stop' })
+      } finally {
+        release()
+      }
+      expect(await deleting).toMatchObject({ ok: true, state: 'deleted', sessionId: c })
+      expect(await waiting).toMatchObject({ ok: false, error: expect.stringContaining('deleted') })
+      expect(w.store.trashedSession(c)).not.toBeNull()
+      expect(w.store.loadMessages(c, 50).some((m) => JSON.stringify(m.payload).includes('Partial research before stop'))).toBe(true)
+      expect(w.mgr.isLive(c)).toBe(false)
+      expect(parentDispose).not.toHaveBeenCalled()
+      expect(handleOf(s)!.interrupted).toBe(0)
+      expect(w.mgr.listSessions().find((row) => row.id === s)?.state).toBe('working')
+      expect(handleOf(s)!.sent).toEqual(['coordinate the research'])
+      handleOf(s)!.answer('Coordination complete.')
+    })
+
+    it.each(['askedBy', 'parentSessionId'] as const)('recognizes an existing %s link after host handoff and keeps the deletion across reload', async (link) => {
+      allowProject()
+      const s = await session()
+      const c = await startRunning(s)
+      await w.mgr.detachAll()
+      const row = w.store.listSessions().find((child) => child.id === c)!
+      w.store.upsertSession({ ...row, askedBy: null, parentSessionId: null, [link]: s })
+      const next = new SessionManager(w.store, w.adapters, (e) => w.events.push(e))
+      try {
+        expect(await next.agentSession(s, { sessionId: c, action: 'delete' })).toMatchObject({ ok: true, state: 'deleted', sessionId: c })
+        expect(w.store.trashedSession(c)?.session).toMatchObject({ [link]: s })
+      } finally {
+        await next.detachAll()
+      }
+      const reloaded = new SessionManager(w.store, w.adapters, () => {})
+      try {
+        expect(reloaded.listSessions().some((child) => child.id === c)).toBe(false)
+        expect(reloaded.listSessions().some((parent) => parent.id === s)).toBe(true)
+      } finally {
+        await reloaded.disposeAll()
+      }
+    })
+  })
+
   it('the parent deleted, the child keeps its turn and its link', async () => {
     allowProject()
     const s = await session()
@@ -516,6 +677,30 @@ describe('starting another agent in the same project', () => {
       git(w.caller.path, 'add', '.')
       git(w.caller.path, 'commit', '-qm', 'init')
     }
+
+    it('keeps a missing worktree distinct from a same-folder child, including after reload', async () => {
+      repo()
+      allowProject()
+      const s = await session()
+      await w.mgr.startAgent(s, { task: 'worktree task', branch: 'feat/missing', wait: false })
+      const c = childrenOf(s)[0]!
+      const worktree = c.worktree!
+      rmSync(worktree.path, { recursive: true, force: true })
+      expect(await w.mgr.agentSession(s, { sessionId: c.id, action: 'delete' })).toMatchObject({ ok: false, error: expect.stringContaining('still working') })
+      handleOf(c.id)!.answer('done')
+      await w.mgr.agentSession(s, { sessionId: c.id, action: 'wait' })
+      await w.mgr.detachAll()
+      const next = new SessionManager(w.store, w.adapters, () => {})
+      try {
+        expect(next.listSessions().find((row) => row.id === c.id)?.worktree).toEqual(worktree)
+        expect(await next.agentSession(s, { sessionId: c.id, action: 'delete' })).toMatchObject({ ok: false, error: expect.stringContaining('worktree folder for') })
+        expect(w.store.trashedSession(c.id)).toBeNull()
+        expect(w.store.listSessions().find((row) => row.id === c.id)?.worktree).toEqual(worktree)
+        expect(git(w.caller.path, 'rev-parse', '--verify', 'refs/heads/feat/missing')).not.toBe('')
+      } finally {
+        await next.disposeAll()
+      }
+    })
 
     it('prepares installed JS dependencies before the child starts, without a configured setup command', async () => {
       repo()
