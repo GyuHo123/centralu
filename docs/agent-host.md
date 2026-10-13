@@ -1194,13 +1194,30 @@ door, the host's switch to the new copy, and the old version's folder removed on
 
 The design is in [architecture.md](architecture.md) §4.5. The host's part is the install and one rule.
 
-**The install** (`updates.ts`). `updates.apply` runs `npm i -g --prefer-online centralu@<v>` and, when the installed app exists,
+**Checking (#635).** Startup and the six-hour background interval remain unchanged. Opening Settings → Updates
+forces a check only with automatic checking on; with it off, use Check now. Focus/visibility restoration also
+checks only with automatic checking on, when the last successful check is more than an hour old; attempts are
+throttled for an hour, including failures and paired focus/visibility events. Checks leave an active install or pending apply alone. A failed install
+keeps its phase and error throughout later checks, until the next install attempt. Successful ordinary checks
+follow npm exactly, including a lower `latest` after a dist-tag rollback, and recompute whether it is newer.
+
+**The install** (`updates.ts`). Before installing, `updates.apply` refreshes the registry with the forced eight-second
+deadline unless a successful check is less than one minute old, avoiding a second request when a check starts
+auto-apply. Only during installation, a stored version seen less than one hour ago may win over a lower fresh
+answer to tolerate a stale npm edge. Retaining it preserves its original check time; an older stored version yields
+to the fresh tag so a release rollback takes effect. A target at or below the running version installs nothing.
+If the refresh fails, it installs the stored version and keeps a fallback notice during and after installation.
+Lookup, npm retries and bundle replacement are one busy operation; concurrent checks/clicks cannot replace its target or start a second install. It runs `npm i -g --prefer-online centralu@<v>` and, when the installed app exists,
 `centralu install`, then reports `restart_required`; it never restarts anything. With `autoApply` on ("Apply updates
 automatically when idle", `updates.setAutoApply`, saved as `updates.autoApply` in the store's app settings, off by
 default) a check that finds a newer version starts the same install by itself, and turning the setting on with a newer
 version already known starts it at once. Not over an install under way or one already finished: a check after it leaves
-`restart_required` alone, so it installs once. A failed install is retried by the next check that finds the version
-again, six hours later.
+`restart_required` alone, so it installs once. A failed install stays visible until another install attempt;
+a background or requested check does not retry it or erase its error.
+
+On host shutdown, pending lookups and npm waits cannot start another command or publish stale completion. A command
+already launched is not undone. After reconnect or a host swap, the window re-reads status without replaying the
+install, and ignores replies from the previous host lifetime.
 
 Both commands run without a shell, through `tool-launch.ts` (`commandFor` in `updates.ts`): on Windows `npm` and
 `centralu` are batch files, which `execFile` cannot start by name (ENOENT) or by path (EINVAL), so each is read for the

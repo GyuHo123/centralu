@@ -462,14 +462,21 @@ describe.each([
    */
   it('turning off automatic checking keeps automatic calls from reaching the registry (#43)', async () => {
     await h.platform.updates.setAuto(false)
-    h.offerUpdate('8888.0.0')
+    h.offerUpdate('9999.0.1')
     // The automatic call went nowhere — the previously known answer stays
     expect((await h.platform.updates.status(false)).latest).toBe('9999.0.0')
     // A click from a person still goes through
-    expect((await h.platform.updates.status(true)).latest).toBe('8888.0.0')
+    expect((await h.platform.updates.status(true)).latest).toBe('9999.0.1')
     // Turning it back on asks right there — someone who just turned it on wants to know now
-    h.offerUpdate('9999.0.0')
-    expect((await h.platform.updates.setAuto(true)).latest).toBe('9999.0.0')
+    h.offerUpdate('9999.0.2')
+    expect((await h.platform.updates.setAuto(true)).latest).toBe('9999.0.2')
+  })
+
+  it('ordinary checks follow npm after a dist-tag rollback (#636 rollback)', async () => {
+    h.offerUpdate('9999.0.2')
+    await h.platform.updates.status(true)
+    h.offerUpdate(APP_VERSION)
+    expect(await h.platform.updates.status(true)).toMatchObject({ latest: APP_VERSION, newer: false, phase: 'idle' })
   })
 
   /**

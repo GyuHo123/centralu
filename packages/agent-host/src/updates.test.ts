@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { APP_VERSION, type UpdateStatus } from '@cc/protocol'
 import { resolveCommand } from './tool-launch.js'
 import { UpdateService, commandFor, failureDetail, installedCopyPath, runCommand, type LatestResult } from './updates.js'
@@ -16,6 +16,7 @@ import { installedPaths } from '../../../packaging/npm/centralu/bin/platform.mjs
  */
 function make(
   opts: {
+    fetchLatest?: (timeoutMs: number) => Promise<LatestResult>
     registry?: string | null
     run?: (file: string, args: string[]) => Promise<void>
     autoApply?: boolean
@@ -29,9 +30,11 @@ function make(
   const saved: boolean[] = []
   let registry = opts.registry ?? null
   let fetches = 0
+  let now = 1000
   const svc = new UpdateService((s) => published.push(s), {
-    fetchLatest: async (): Promise<LatestResult> => {
+    fetchLatest: async (timeoutMs): Promise<LatestResult> => {
       fetches++
+      if (opts.fetchLatest) return opts.fetchLatest(timeoutMs)
       return registry === null ? { ok: false, reason: 'Could not reach the registry' } : { ok: true, version: registry }
     },
     run: async (file, args) => {
@@ -42,13 +45,14 @@ function make(
     readAutoApply: () => opts.autoApply ?? false,
     writeAutoApply: (enabled) => saved.push(enabled),
     wait: opts.wait,
-    now: opts.now,
+    now: opts.now ?? (() => now),
   })
   return {
     svc,
     published,
     calls,
     saved,
+    elapse: (ms: number) => { now += ms },
     get fetches() {
       return fetches
     },
@@ -58,12 +62,233 @@ function make(
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((r) => { resolve = r })
+  return { promise, resolve }
+}
+
 /** Waits until state settles into shape — installation finishes after this returns */
 async function settle(): Promise<void> {
   for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0))
 }
 
 describe('UpdateService', () => {
+  describe('fresh install target (#635)', () => {
+    it.each([false, true])('installs the newest of two releases in one pass (auto-apply=%s)', async (automatic) => {
+      const h = make({ registry: '9999.0.1' })
+      await h.svc.check(true)
+      h.elapse(60_000)
+      h.offer('9999.0.2')
+      if (automatic) h.svc.setAutoApply(true)
+      else h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      expect(h.calls).toEqual([['npm', ['i', '-g', '--prefer-online', 'centralu@9999.0.2']]])
+      expect(h.published).toContainEqual(expect.objectContaining({ phase: 'updating', latest: '9999.0.2' }))
+      h.svc.apply()
+      await h.svc.check(true)
+      await settle()
+      expect(h.calls).toHaveLength(1)
+    })
+
+    it('reuses the successful check that just triggered auto-apply (#636 review)', async () => {
+      const fetchLatest = vi.fn().mockResolvedValue({ ok: true, version: '9999.0.2' })
+      const h = make({ autoApply: true, fetchLatest })
+      await h.svc.check(false)
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      expect(fetchLatest.mock.calls).toEqual([[3000]])
+      expect(h.calls[0]?.[1]).toContain('centralu@9999.0.2')
+    })
+
+    it.each([0, 1, 30_000, 59_999, 60_000, 60_001, 120_000])('refreshes only when the successful check is at least one minute old: %s ms (#636 review)', async (age) => {
+      const fetchLatest = vi.fn().mockResolvedValue({ ok: true, version: '9999.0.2' })
+      const h = make({ fetchLatest })
+      await h.svc.check(false)
+      h.elapse(age)
+      h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      expect(fetchLatest.mock.calls).toEqual(age < 60_000 ? [[3000]] : [[3000], [8000]])
+    })
+
+    it('falls back visibly to the stored version when the refresh fails, including after npm retries', async () => {
+      let attempts = 0
+      const h = make({ registry: '9999.0.1', run: async () => {
+        if (++attempts === 1) throw new Error('ETARGET')
+      }, wait: async () => {} })
+      await h.svc.check(true)
+      h.elapse(60_000)
+      h.offer(null)
+      h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      expect(h.calls.every(([, args]) => args.includes('centralu@9999.0.1'))).toBe(true)
+      const notice = 'Could not refresh latest (Could not reach the registry); using previously checked 9999.0.1.'
+      expect(h.svc.current().error).toBe(notice)
+      expect(h.published).toContainEqual(expect.objectContaining({ phase: 'waiting_for_npm', error: expect.stringContaining(notice) }))
+      expect(h.published).toContainEqual(expect.objectContaining({ phase: 'updating', error: notice }))
+    })
+
+    it.each(['9999.0.0', APP_VERSION, '0.0.1'])('keeps the stored newer release when a stale edge returns %s (#636 review)', async (fresh) => {
+      const h = make({ registry: '9999.0.1' })
+      await h.svc.check(true)
+      h.elapse(60_000)
+      h.offer(fresh)
+      h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      expect(h.calls).toEqual([['npm', ['i', '-g', '--prefer-online', 'centralu@9999.0.1']]])
+      expect(h.svc.current()).toMatchObject({ latest: '9999.0.1', newer: true })
+    })
+
+    it.each([false, true])('ordinary checks follow a dist-tag rollback (forced=%s, #636 rollback)', async (force) => {
+      const h = make({ registry: '9999.0.1' })
+      await h.svc.check(true)
+      h.elapse(6 * 3600_000)
+      h.offer(APP_VERSION)
+      await h.svc.check(force)
+      expect(h.svc.current()).toMatchObject({ latest: APP_VERSION, newer: false, phase: 'idle' })
+      expect(h.calls).toEqual([])
+    })
+
+    it.each([60_000, 1800_000, 3599_999, 3600_000, 3600_001, 7200_000])('limits install-time stale-edge protection to a stored age of less than one hour: %s ms (#636 rollback)', async (age) => {
+      const h = make({ registry: '9999.0.2' })
+      await h.svc.check(true)
+      h.elapse(age)
+      h.offer('9999.0.1')
+      h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      const target = age < 3600_000 ? '9999.0.2' : '9999.0.1'
+      expect(h.calls).toEqual([['npm', ['i', '-g', '--prefer-online', `centralu@${target}`]]])
+      expect(h.svc.current().latest).toBe(target)
+    })
+
+    it.each([APP_VERSION, '0.0.1'])('does not install when an old stored version is replaced by a fresh tag at %s (#636 rollback)', async (fresh) => {
+      const h = make({ registry: '9999.0.1' })
+      await h.svc.check(true)
+      h.elapse(3600_001)
+      h.offer(fresh)
+      h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('idle'))
+      expect(h.svc.current()).toMatchObject({ latest: fresh, newer: false })
+      expect(h.calls).toEqual([])
+    })
+
+    it('retaining a newer install target does not renew when it was actually seen (#636 rollback)', async () => {
+      let fails = true
+      const h = make({ registry: '9999.0.2', run: async () => {
+        if (fails) throw new Error('EACCES')
+      } })
+      await h.svc.check(true)
+      const checkedAt = h.svc.current().checkedAt
+      h.elapse(3599_999)
+      h.offer('9999.0.1')
+      h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('failed'))
+      expect(h.svc.current().checkedAt).toBe(checkedAt)
+      h.elapse(2)
+      fails = false
+      h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      expect(h.calls[1]?.[1]).toContain('centralu@9999.0.1')
+    })
+
+    it.each(['9999.0.2', null])('keeps install errors through a forced check answering %s until another install (#636 review)', async (registry) => {
+      let fails = true
+      const h = make({ registry: '9999.0.1', run: async () => {
+        if (fails) throw new Error('EACCES: install denied')
+      } })
+      await h.svc.check(true)
+      h.svc.apply()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('failed'))
+      // Every status, including the in-flight one, must keep the failure visible.
+      h.offer(registry)
+      const original = h.svc.current()
+      const before = h.published.length
+      await h.svc.check(true)
+      expect(h.published.slice(before).every((s) => s.phase === 'failed' && s.error === original.error)).toBe(true)
+      expect(h.svc.current()).toMatchObject({ phase: 'failed', error: original.error })
+      fails = false
+      expect(h.svc.apply()).toMatchObject({ phase: 'updating', error: null })
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+    })
+
+    it('serializes an older check, a fresh lookup and duplicate clicks without changing an active target', async () => {
+      const old = deferred<LatestResult>()
+      const fresh = deferred<LatestResult>()
+      const npm = deferred<void>()
+      const fetchLatest = vi.fn()
+        .mockResolvedValueOnce({ ok: true, version: '9999.0.1' })
+        .mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise)
+      const h = make({ fetchLatest, run: () => npm.promise })
+      await h.svc.check(true)
+      h.elapse(60_000)
+      const checking = h.svc.check(true)
+      h.svc.apply()
+      h.svc.apply()
+      old.resolve({ ok: true, version: '9999.0.2' })
+      await checking
+      await vi.waitFor(() => expect(fetchLatest).toHaveBeenCalledTimes(3))
+      expect(h.svc.current().phase).toBe('updating')
+      h.svc.apply()
+      expect((await h.svc.check(true)).phase).toBe('updating')
+      fresh.resolve({ ok: true, version: '9999.0.3' })
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1))
+      h.svc.apply()
+      await h.svc.check(true)
+      expect(fetchLatest).toHaveBeenCalledTimes(3)
+      npm.resolve()
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      expect(h.calls).toEqual([['npm', ['i', '-g', '--prefer-online', 'centralu@9999.0.3']]])
+    })
+
+    it.each(['lookup', 'npm', 'retry'] as const)('starts no more commands or status events after shutdown during %s', async (stage) => {
+      const gate = deferred<void>()
+      let fetching = 0
+      let commands = 0
+      const h = make({ installedCopy: '/mock/Centralu', fetchLatest: async () => {
+        if (++fetching === 2 && stage === 'lookup') await gate.promise
+        return { ok: true, version: '9999.0.1' }
+      }, run: async () => {
+        if (stage === 'npm') await gate.promise
+        if (stage === 'retry' && ++commands === 1) throw new Error('ETARGET')
+      }, wait: () => gate.promise })
+      await h.svc.check(true)
+      h.elapse(60_000)
+      h.svc.apply()
+      await vi.waitFor(() => {
+        if (stage === 'lookup') expect(fetching).toBe(2)
+        else if (stage === 'retry') expect(h.svc.current().phase).toBe('waiting_for_npm')
+        else expect(h.calls).toHaveLength(1)
+      })
+      h.svc.stop()
+      const events = h.published.length
+      gate.resolve()
+      await settle()
+      h.svc.apply()
+      await h.svc.check(true)
+      expect(h.calls).toHaveLength(stage === 'lookup' ? 0 : 1)
+      expect(h.published).toHaveLength(events)
+    })
+
+    it('keeps the six-hour background interval and turning checks off does not cancel an install', async () => {
+      let now = 100
+      const h = make({ registry: '9999.0.1', now: () => now })
+      await h.svc.check(false)
+      for (const elapsed of [0, 1, 3600_000, 6 * 3600_000 - 1]) {
+        now = 100 + elapsed
+        await h.svc.check(false)
+        expect(h.fetches).toBe(1)
+      }
+      now++
+      await h.svc.check(false)
+      expect(h.fetches).toBe(2)
+      now += 60_000
+      h.offer('9999.0.2')
+      h.svc.apply()
+      await h.svc.setAuto(false)
+      await vi.waitFor(() => expect(h.svc.current().phase).toBe('restart_required'))
+      expect(h.calls[0]?.[1]).toContain('centralu@9999.0.2')
+    })
+  })
+
   /**
    * What is currently running is answered by a **build constant.**
    *
