@@ -1,5 +1,16 @@
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,6 +25,7 @@ import {
   nextVersion,
   pathMatches,
   releaseNotes,
+  versionLines,
   // @ts-expect-error — plain .mjs of a Centralu app (no installs, no types, by the app rules)
 } from '../.centralu/apps/project-board/versions.mjs'
 
@@ -28,16 +40,18 @@ import {
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url))
 const APP = join(REPO_ROOT, '.centralu/apps/project-board')
-const RELEASE = JSON.parse(readFileSync(join(APP, 'project.json'), 'utf8')).release as { source: { path: string; pattern: string }; versionFiles: string[] }
+const RELEASE = JSON.parse(readFileSync(join(APP, 'project.json'), 'utf8')).release as {
+  source: { path: string; pattern: string }
+  versionFiles: string[]
+  ignore: string[]
+}
 const TEMPLATE = readFileSync(join(REPO_ROOT, '.github/PULL_REQUEST_TEMPLATE.md'), 'utf8')
 const CONVENTIONS_DOC = readFileSync(join(REPO_ROOT, 'docs/commit-conventions.md'), 'utf8')
 
 const inRepo = (...args: string[]) => execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' })
-/** The files of this repository that carry the current version as a quoted string, found without the app. */
-const CARRIERS = inRepo('grep', '-l', '-F', '-e', `"${APP_VERSION}"`, '-e', `'${APP_VERSION}'`, '--')
-  .split('\n')
-  .filter(Boolean)
-  .sort()
+/** Scan every tracked text file, independently of the release tool's git prefilter. */
+const TRACKED = inRepo('ls-files', '-z').split('\0').filter(Boolean)
+const CARRIERS = filesNamed(RELEASE.versionFiles, TRACKED).sort() as string[]
 const NEXT = nextVersion(APP_VERSION) as string
 
 describe('the version rules', () => {
@@ -70,6 +84,55 @@ describe('the version rules', () => {
     })
   })
 
+  it.each(['1.0.0', '1.0.0-beta.21'])('matches %s itself and local/build extensions, not another prerelease', (version) => {
+    for (const value of [version, `v${version}`, `${version}.local.1`, `${version}+build`, `${version}+build.123`, version + '.local.${n}']) {
+      expect(versionLines(`const value = \`${value}\``, version), value).toEqual([1])
+    }
+    for (const suffix of ['-beta.21', '-rc', '-local.1', '+other', '+builder', '.1', '.local.0', '.local.01', '0', 'a']) {
+      expect(versionLines(`"${version}${suffix}"`, version), suffix).toEqual([])
+    }
+    expect(versionLines(`Released ${version}.\n`, version)).toEqual([1])
+  })
+
+  it.each(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'])('ignores ranges only in package.json %s values', (field) => {
+    const ranges = { a: '^1.0.0', b: '~1.0.0', c: '>= 1.0.0', d: 'workspace:^1.0.0' }
+    for (const space of [undefined, 2]) {
+      const text = JSON.stringify({ [field]: ranges }, null, space)
+      expect(versionLines(text, '1.0.0', 'nested/package.json')).toEqual([])
+      expect(versionLines(text, '1.0.0', 'nested/config.json').length).toBeGreaterThan(0)
+    }
+    expect(versionLines(JSON.stringify({ [field]: { ...ranges, pinned: '1.0.0' } }), '1.0.0', 'package.json')).toEqual([1])
+    expect(versionLines(JSON.stringify({ [field]: ranges, version: '1.0.0' }), '1.0.0', 'package.json')).toEqual([1])
+    expect(versionLines(JSON.stringify({ scripts: { check: '^1.0.0' }, [field]: ranges }), '1.0.0', 'package.json')).toEqual([1])
+    expect(versionLines(JSON.stringify({ nested: { [field]: ranges } }), '1.0.0', 'package.json')).toEqual([1])
+    const multiline = JSON.stringify({ [field]: ranges, version: '1.0.0' }, null, 2)
+    expect(versionLines(multiline, '1.0.0', 'package.json')).toEqual([8])
+    expect(versionLines('{"dependencies":{"a":"^1.0.0"}', '1.0.0', 'package.json')).toEqual([1])
+    expect(versionLines('{"dependencies":{"escaped":"\\u005e1.0.0","braces":"^1.0.0 {range}"}}', '1.0.0', 'package.json')).toEqual([])
+  })
+
+  it.each([
+    ['docs/releasing.md', 'The steps by hand:'],
+    ['docs/releasing.ko.md', '손으로 하는 단계:'],
+  ])('keeps the release guide lead-in attached to step one in %s', (path, lead) => {
+    expect(readFileSync(join(REPO_ROOT, path!), 'utf8')).toContain(`${lead}\n\n1. `)
+  })
+
+  it('keeps the Korean release explanation in Korean', () => {
+    const korean = readFileSync(join(REPO_ROOT, 'docs/releasing.ko.md'), 'utf8')
+    const section = korean.split('## 버전 릴리스하기')[1]!.split('\n1. ')[0]!
+    for (const paragraph of section.trim().split(/\n\s*\n/)) {
+      expect(paragraph.replace(/`[^`]*`/g, ''), paragraph).toMatch(/[가-힣]/)
+    }
+  })
+
+  it('requires every listed repository version file to carry the current quoted version', () => {
+    expect(CARRIERS.length).toBeGreaterThan(0)
+    for (const path of CARRIERS) {
+      expect(bumpText(readFileSync(join(REPO_ROOT, path), 'utf8'), APP_VERSION, NEXT).count, path).toBeGreaterThan(0)
+    }
+  })
+
   it('names files with * inside a folder and ** across folders', () => {
     expect(pathMatches('packaging/npm/*/package.json', 'packaging/npm/host-linux-x64/package.json')).toBe(true)
     expect(pathMatches('packaging/npm/*/package.json', 'packaging/npm/a/b/package.json')).toBe(false)
@@ -92,8 +155,12 @@ describe('the version rules', () => {
    * notice brand.ts). Fails when a version file is added without adding it to release.versionFiles.
    */
   it("names exactly the files of this repository that carry the version (project.json release.versionFiles)", () => {
-    const all = inRepo('ls-files').split('\n').filter(Boolean)
-    expect([...filesNamed(RELEASE.versionFiles, all)].sort()).toEqual(CARRIERS)
+    const unlisted = TRACKED.filter((p) => !CARRIERS.includes(p) && !filesNamed(RELEASE.ignore, [p]).length)
+    const hits = unlisted.flatMap((p) => {
+      const text = readFileSync(join(REPO_ROOT, p), 'utf8')
+      return text.includes('\0') ? [] : versionLines(text, APP_VERSION, p).map((line: number) => `${p}:${line}`)
+    })
+    expect(hits).toEqual([])
     expect(CARRIERS).toEqual(
       expect.arrayContaining([
         'packages/protocol/src/brand.ts',
@@ -217,9 +284,18 @@ afterEach(async () => {
   rmSync(root, { recursive: true, force: true })
 })
 
-function runtime() {
+function runtime(ignore?: string[]) {
+  let projectPath = REPO_ROOT
+  if (ignore) {
+    projectPath = join(root, 'project')
+    const app = join(projectPath, '.centralu/apps/project-board')
+    cpSync(APP, app, { recursive: true })
+    const config = JSON.parse(readFileSync(join(app, 'project.json'), 'utf8'))
+    config.release.ignore = ignore
+    writeFileSync(join(app, 'project.json'), JSON.stringify(config))
+  }
   rt = new ExternalApps({
-    projects: () => [{ id: 'p1', path: REPO_ROOT, trusted: true }],
+    projects: () => [{ id: 'p1', path: projectPath, trusted: true }],
     dataRoot: join(root, 'data'),
     reservedIds: [],
     env: { PATH: `${join(root, 'bin')}:${join(root, 'node')}`, HOME: root, FAKE_GH_STATE: statePath, FAKE_GH_LOG: logPath, GIT_CONFIG_NOSYSTEM: '1', PROJECT_BOARD_RUN_LOOK_MS: '10' },
@@ -268,7 +344,7 @@ type Repo = { work: string; origin: string; released: string; tip: string }
  *
  * - `bumped`: the bump to NEXT is merged too, untagged (the state before tag)
  */
-function repo({ bumped = false }: { bumped?: boolean } = {}): Repo {
+function repo({ bumped = false, version = APP_VERSION }: { bumped?: boolean; version?: string } = {}): Repo {
   const origin = join(root, 'origin.git')
   const work = join(root, 'work')
   g(root, 'init', '-q', '--bare', '-b', 'main', origin)
@@ -279,19 +355,19 @@ function repo({ bumped = false }: { bumped?: boolean } = {}): Repo {
   g(work, 'remote', 'add', 'origin', 'https://github.com/ijun17/centralu.git')
   g(work, 'config', `url.${origin}.insteadOf`, 'https://github.com/ijun17/centralu.git')
   g(work, 'config', 'remote.origin.pushurl', origin)
-  for (const f of CARRIERS) write(work, f, readFileSync(join(REPO_ROOT, f), 'utf8'))
-  write(work, 'docs/releasing.md', `Released ${APP_VERSION} on a Monday.\n`)
-  const released = commitAll(work, `chore(release): ${APP_VERSION} (#541)`)
-  g(work, 'tag', `v${APP_VERSION}`)
+  for (const f of CARRIERS) write(work, f, bumpText(readFileSync(join(REPO_ROOT, f), 'utf8'), APP_VERSION, version).text)
+  write(work, 'docs/releasing.md', `Released ${version} on a Monday.\n`)
+  const released = commitAll(work, `chore(release): ${version} (#541)`)
+  g(work, 'tag', `v${version}`)
   write(work, 'a.txt', 'one\n')
   commitAll(work, 'feat(ui): one (#10)')
   write(work, 'b.txt', 'two\n')
   let tip = commitAll(work, 'fix: two (#11)')
   if (bumped) {
-    for (const f of CARRIERS) write(work, f, bumpText(readFileSync(join(work, f), 'utf8'), APP_VERSION, NEXT).text)
+    for (const f of CARRIERS) write(work, f, bumpText(readFileSync(join(work, f), 'utf8'), version, NEXT).text)
     tip = commitAll(work, `chore(release): ${NEXT} (#900)`)
   }
-  g(work, 'push', '-q', 'origin', 'main', `v${APP_VERSION}`)
+  g(work, 'push', '-q', 'origin', 'main', `v${version}`)
   g(work, 'branch', '-q', '--set-upstream-to=origin/main')
   patchState((s) => (s.dispatchSha = tip))
   return { work, origin, released, tip }
@@ -398,6 +474,124 @@ describe.skipIf(process.platform === 'win32')('release', { timeout: 60_000 }, ()
     expect(checkout(s.work)).toEqual(before)
   })
 
+  it('dry-bumps a stable release past old prereleases and dependency ranges but refuses stable pins', async () => {
+    const s = repo({ version: '1.0.0' })
+    // This regression suite intentionally pins stable versions; its exact path is allowlisted.
+    write(s.work, 'tooling/project-board-release.test.ts', "const stableFixture = '1.0.0'\n")
+    write(s.work, 'old-prereleases', '1.0.0-beta.21\n1.0.0-rc\n1.0.0+other\n')
+    write(s.work, 'other/package.json', JSON.stringify({
+      dependencies: { a: '^1.0.0' }, devDependencies: { a: '~1.0.0' },
+      peerDependencies: { a: '>=1.0.0' }, optionalDependencies: { a: 'workspace:1.0.0' },
+    }))
+    commitAll(s.work, 'test: stable release dependencies')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    runtime()
+    const plan = await call('release', { step: 'bump', bump: 'patch', path: s.work })
+    expect(plan.isError, plan.text).toBe(false)
+    expect(plan.data.next).toBe('1.0.1')
+    expect(plan.data.pushed).toBe(false)
+
+    write(s.work, 'e2e/stable.ts', "'1.0.0'\n'1.0.0.local.1'\n`1.0.0+build`\n")
+    write(s.work, 'other/package.json', '{"dependencies":{"a":"^1.0.0"},\n"version":"1.0.0"}\n')
+    commitAll(s.work, 'test: stable release pins')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    const blocked = await call('release', { step: 'bump', bump: 'patch', path: s.work })
+    expect(blocked.isError).toBe(true)
+    expect(blocked.data.problems.map((p: string) => p.split(' carries ')[0])).toEqual([
+      'e2e/stable.ts:1', 'e2e/stable.ts:2', 'e2e/stable.ts:3', 'other/package.json:2',
+    ])
+    expect(ghWrites()).toEqual([])
+    expect(remoteHas(s.origin, 'refs/heads/chore/release-1.0.1')).toBeNull()
+  })
+
+  it('reports every embedded version by file and line in tracked text of any type', async () => {
+    const s = repo()
+    const pins: Record<string, string> = {
+      'e2e/control-loop.spec.ts': `// local update\nconst local = '${APP_VERSION}.local.1'\n`,
+      'src/candidate.ts': `const candidate = "${APP_VERSION}.local.3"\n`,
+      'src/build.ts': `const build = '${APP_VERSION}+build'\n`,
+      'src/template.ts': 'const template = `release v' + APP_VERSION + '.local.${n}`\n',
+      'scripts/check.sh': `#!/bin/sh\nversion=${APP_VERSION}\n`,
+      '.release-version': `v${APP_VERSION}\n`,
+      'custom/pin.unusual': `version: ${APP_VERSION}\n`,
+      'fixtures/unlisted.json': `"${APP_VERSION}"\n`,
+      'custom/spaces and:colon\nnewline': `header\n${APP_VERSION}.local.2\n`,
+      'src/multiple.ts': `// one\r\n'${APP_VERSION}' + '${APP_VERSION}+build'\r\n// two\r\n'${APP_VERSION}.local.4'\r\n`,
+    }
+    for (const [path, text] of Object.entries(pins)) write(s.work, path, text)
+    commitAll(s.work, 'test: embedded versions')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    const before = checkout(s.work)
+    runtime()
+    for (const confirm of [false, true]) {
+      const r = await call('release', { step: 'bump', path: s.work, confirm })
+      expect(r.isError).toBe(true)
+      expect(r.data.problems.map((p: string) => p.split(' carries ')[0]).sort()).toEqual(
+        [
+          'e2e/control-loop.spec.ts:2',
+          'src/candidate.ts:1',
+          'src/build.ts:1',
+          'src/template.ts:1',
+          'scripts/check.sh:2',
+          '.release-version:1',
+          'custom/pin.unusual:1',
+          'fixtures/unlisted.json:1',
+          'custom/spaces and:colon\nnewline:2',
+          'src/multiple.ts:2',
+          'src/multiple.ts:4',
+        ].sort(),
+      )
+      expect(r.data.problems.every((p: string) => p.includes('release.ignore'))).toBe(true)
+    }
+    expect(checkout(s.work)).toEqual(before)
+    expect(remoteHas(s.origin, `refs/heads/chore/release-${NEXT}`)).toBeNull()
+    expect(ghWrites()).toEqual([])
+  })
+
+  it('exempts configured history and intentional pins, not every fixture or lockfile version declaration', async () => {
+    const s = repo()
+    for (const path of [
+      'CHANGELOG.md',
+      'packages/other/CHANGELOG.txt',
+      'release-notes/recent/notes.md',
+      'docs/history.md',
+      'docs/releases/history.md',
+      'pnpm-lock.yaml',
+      'package-lock.json',
+      'npm-shrinkwrap.json',
+      'nested/yarn.lock',
+      'nested/Cargo.lock',
+      'fixtures/pinned.json',
+    ])
+      write(s.work, path, `Released "${APP_VERSION}" and ${APP_VERSION}.local.1\n`)
+    write(
+      s.work,
+      'different-versions',
+      `${APP_VERSION}0\n${APP_VERSION}a\n1${APP_VERSION}\n1.${APP_VERSION}\n`,
+    )
+    write(s.work, 'binary.dat', `\0${APP_VERSION}.local.1\n`)
+    write(s.work, '.gitignore', '/untracked\n')
+    commitAll(s.work, 'test: historical versions')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    write(s.work, 'untracked', `${APP_VERSION}.local.1\n`)
+    runtime([...RELEASE.ignore, 'fixtures/pinned.json'])
+    const r = await call('release', { step: 'bump', path: s.work })
+    expect(r.isError, r.text).toBe(false)
+    expect(r.data.lines).toContain('- apps/desktop/src-tauri/Cargo.lock: 2 places')
+    expect(r.data.pushed).toBe(false)
+    expect(ghWrites()).toEqual([])
+
+    // An ignore entry must never conceal a broken declaration in versionFiles.
+    write(s.work, 'apps/desktop/src-tauri/Cargo.lock', 'version = "0.0.1"\n')
+    commitAll(s.work, 'test: stale declared lockfile')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    const stale = await call('release', { step: 'bump', path: s.work })
+    expect(stale.isError).toBe(true)
+    expect(stale.data.problems).toEqual([
+      `apps/desktop/src-tauri/Cargo.lock is in release.versionFiles but does not carry "${APP_VERSION}"; it fell behind, or the list is wrong.`,
+    ])
+  })
+
   it('refuses a bump that would miss a file carrying the version, or names a file that lost it', async () => {
     const s = repo()
     write(s.work, 'packages/other/version.json', `{ "version": "${APP_VERSION}" }\n`)
@@ -409,7 +603,7 @@ describe.skipIf(process.platform === 'win32')('release', { timeout: 60_000 }, ()
     expect(r.isError).toBe(true)
     expect(r.data.problems).toEqual([
       `apps/desktop/package.json is in release.versionFiles but does not carry "${APP_VERSION}"; it fell behind, or the list is wrong.`,
-      `packages/other/version.json carries "${APP_VERSION}" but is not in project.json release.versionFiles; add it there (or to release.ignore if that string is not the version).`,
+      `packages/other/version.json:1 carries "${APP_VERSION}" but is not in project.json release.versionFiles; derive it from the version source, or add it to release.ignore if it intentionally pins a version.`,
     ])
     expect(r.data.summary).toBe('Release bump refused (2 reasons); nothing was pushed, tagged, started or approved.')
     expect(remoteHas(s.origin, `refs/heads/chore/release-${NEXT}`)).toBeNull()
