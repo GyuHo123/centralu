@@ -74,3 +74,28 @@ function split(raw: string): [number[], string | null] {
   const pre = dash === -1 ? null : v.slice(dash + 1)
   return [core, pre]
 }
+
+const LOCAL_BUILD = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*\.local\.[1-9]\d*$/
+
+/** A maintainer's local build: `<base>.local.N`, strict SemVer, with a prerelease base and a positive N (`scripts/local-manifest.mjs`). */
+export function isLocalBuildVersion(v: string | null | undefined): boolean {
+  return typeof v === 'string' && v.length <= 64 && LOCAL_BUILD.test(v)
+}
+
+/**
+ * Whether the copy `centralu install` made is kept rather than replaced by `target` (#645).
+ *
+ * npm is the source of truth for releases: any released version in the copy, even a higher one, is
+ * replaced by the target, so a release pulled from `latest` (a dist-tag rollback) does not survive in
+ * /Applications. The one exception is a maintainer's local build (`<base>.local.N`, `pnpm
+ * local-update`, #610/#613) newer than the target: it waits there for "Apply now", and putting the
+ * release it was cut from over it would undo it. The copy's version must be well-formed SemVer in
+ * that exact shape; anything unreadable or malformed (`garbage`, `$(VERSION)`, an empty file) is
+ * replaced, so a corrupt plist or version file can never block every later update.
+ *
+ * Mirrored in the launcher (`keepsInstalledCopy` in `packaging/npm/centralu/bin/semver.mjs`), where
+ * `centralu install` applies the same rule by itself, and pinned to it by `tooling/launcher-semver.test.ts`.
+ */
+export function keepsInstalledCopy(target: string, copyVersion: string | null | undefined): boolean {
+  return isLocalBuildVersion(copyVersion) && isNewerVersion(copyVersion as string, target)
+}

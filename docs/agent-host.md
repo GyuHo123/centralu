@@ -1272,17 +1272,35 @@ follow npm exactly, including a lower `latest` after a dist-tag rollback, and re
 
 **The install** (`updates.ts`). Before installing, `updates.apply` refreshes the registry with the forced eight-second
 deadline unless a successful check is less than one minute old, avoiding a second request when a check starts
-auto-apply. Only during installation, a stored version seen less than one hour ago may win over a lower fresh
+auto-apply. With nothing newer known (automatic checks off, or a stored "up to date" hours old) it refreshes first
+rather than refusing, reporting `checking` while it looks; nothing newer is then a result (`idle`, no error), never
+`failed` (#645). The call answers once the target is settled — after the lookup, as `npm i -g` is about to start, or
+with that result — not when the install is done. Only during installation, a stored version seen less than one hour ago may win over a lower fresh
 answer to tolerate a stale npm edge. Retaining it preserves its original check time; an older stored version yields
 to the fresh tag so a release rollback takes effect. A target at or below the running version installs nothing.
 If the refresh fails, it installs the stored version and keeps a fallback notice during and after installation.
 Lookup, npm retries and bundle replacement are one busy operation; concurrent checks/clicks cannot replace its target or start a second install. It runs `npm i -g --prefer-online centralu@<v>` and, when the installed app exists,
-`centralu install`, then reports `restart_required`; it never restarts anything. With `autoApply` on ("Apply updates
+`centralu install`, then reports `restart_required`; it never restarts anything. npm is the source of truth for
+releases, so the copy is replaced whatever released version it holds, a higher one too: a release pulled from
+`latest` must not survive in /Applications to be offered by "Apply now". The one copy left alone is a maintainer's
+local build (`<base>.local.N`, `pnpm local-update`, #610/#613) newer than the target, waiting for "Apply now";
+putting the release it was cut from over it would undo it (`keepsInstalledCopy`, mirrored in the launcher's
+`semver.mjs`). A version that cannot be read or is not well-formed SemVer in that shape is replaced, so a corrupt
+plist or version file cannot block updates. The version is read the same way as the launcher reads it
+(`readInstalledCopyVersion`: `plutil -extract CFBundleShortVersionString raw` on the bundle's `Info.plist`, XML or
+binary, on macOS; the launcher's `centralu-version.txt` on Windows; nothing on Linux). When a local build is kept,
+the package is still updated, `restart_required` carries a notice naming it, and the window's own bundle check offers
+to apply it. `centralu install` applies the same rule by itself and takes `--force` to replace such a copy on
+purpose (#645). With `autoApply` on ("Apply updates
 automatically when idle", `updates.setAutoApply`, saved as `updates.autoApply` in the store's app settings, off by
 default) a check that finds a newer version starts the same install by itself, and turning the setting on with a newer
 version already known starts it at once. Not over an install under way or one already finished: a check after it leaves
 `restart_required` alone, so it installs once. A failed install stays visible until another install attempt;
-a background or requested check does not retry it or erase its error.
+a background or requested check does not erase its error. With `autoApply` on, the host tries again by itself on a
+backoff — 10 minutes, then 1 hour, then every 6 hours — from a timer kept in memory (#645): a check that lands
+before the delay starts nothing, one after it retries too, and a release other than the one that failed is tried at
+once. The error stays on the line until the next attempt starts; success, turning the setting off and shutdown end
+the retries. Without the setting a failure is left for the person, as before.
 
 On host shutdown, pending lookups and npm waits cannot start another command or publish stale completion. A command
 already launched is not undone. After reconnect or a host swap, the window re-reads status without replaying the

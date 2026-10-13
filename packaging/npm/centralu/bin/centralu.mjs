@@ -23,9 +23,10 @@
  * being first exercised on someone's laptop.
  */
 import { execFileSync, spawn } from 'node:child_process'
-import { copyDiffers, isNewer } from './semver.mjs'
+import { copyDiffers, isNewer, keepsInstalledCopy } from './semver.mjs'
 import {
   asideCopies,
+  bundleVersionCommand,
   busyMessage,
   earlyExitMessage,
   executableIn,
@@ -65,7 +66,12 @@ const pkg = require('../package.json')
 
 const APP_NAME = 'Centralu'
 const BUNDLE = `${APP_NAME}.app`
-const INSTALLED = `/Applications/${BUNDLE}`
+/*
+ * `CENTRALU_INSTALLED_COPY` points `install` and the copy checks at another bundle path. It exists
+ * so the launcher's own tests can run `centralu install` against a temporary folder and never
+ * against the real /Applications (tooling/launcher-install.test.ts).
+ */
+const INSTALLED = process.env.CENTRALU_INSTALLED_COPY || `/Applications/${BUNDLE}`
 
 const PLATFORM = process.platform
 const HOME = homedir()
@@ -275,8 +281,22 @@ function queryRegistry(key) {
  * **Never done quietly through postinstall.** Writing silently into someone's `/Applications`
  * erodes trust, and pnpm blocks postinstall by default anyway. This is only run when the
  * person explicitly asks for it.
+ *
+ * **Never over a newer local build** (#645), unless `--force`. The in-app update runs this after
+ * `npm i -g` with the same rule (`keepsInstalledCopy`): a maintainer's local build
+ * (`0.2.0-beta.21.local.1`) waiting for "Apply now" would otherwise be replaced by npm's beta.21.
+ * Any released version is replaced, even a higher one: npm is the source of truth for releases,
+ * and a release pulled from `latest` must not survive here. The check comes before finding the app
+ * package, since keeping the copy needs nothing from it. `--force` replaces a local build on purpose.
  */
-function install() {
+function install(force) {
+  const copy = installedCopyVersion()
+  if (!force && keepsInstalledCopy(pkg.version, copy)) {
+    const where = PLATFORM === 'win32' ? WIN.dir : INSTALLED
+    console.log(`${where} holds the local build ${copy}, newer than this package (${pkg.version}), and was left as it is.`)
+    console.log('To replace it anyway: centralu install --force')
+    return
+  }
   const app = requireApp()
   if (PLATFORM === 'win32') return installWindows(app)
   if (PLATFORM !== 'darwin') return installDesktopEntry(app)
@@ -498,6 +518,7 @@ async function update() {
 
 /**
  * The version of the copy placed in /Applications. null if there is nothing to compare.
+ * (`bundleVersionCommand`: the in-app update reads it with the same command.)
  *
  * `defaults` is used because there is no guarantee Info.plist stays XML — Tauri just happens
  * to write it as XML today, and if it ever switches to a binary plist, anything reading it
@@ -517,7 +538,8 @@ function installedCopyVersion() {
   }
   if (PLATFORM !== 'darwin' || !existsSync(INSTALLED)) return null
   try {
-    const out = execFileSync('/usr/bin/defaults', ['read', join(INSTALLED, 'Contents/Info.plist'), 'CFBundleShortVersionString'], {
+    const read = bundleVersionCommand(INSTALLED)
+    const out = execFileSync(read.command, read.args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     })
@@ -561,7 +583,8 @@ const HELP = `${APP_NAME} ${pkg.version}
 
   centralu              Launches the app
   centralu install      Registers it in the app list (macOS: /Applications, Linux: a menu entry,
-                        Windows: %LOCALAPPDATA%\\Programs\\Centralu and a Start menu shortcut)
+                        Windows: %LOCALAPPDATA%\\Programs\\Centralu and a Start menu shortcut).
+                        A newer local build there is kept; --force replaces it anyway
   centralu uninstall    Removes that registration (conversation history is kept)
   centralu update       Upgrades if a new version is available
   centralu serve        Runs the host alone on this machine, for the app on another computer
@@ -573,7 +596,7 @@ Requires: Node 22+, and the claude or codex CLI (the app's first screen reports 
 const [cmd, ...rest] = process.argv.slice(2)
 switch (cmd) {
   case 'install':
-    install()
+    install(rest.includes('--force'))
     break
   case 'uninstall':
     uninstall()
