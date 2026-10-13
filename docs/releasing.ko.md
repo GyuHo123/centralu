@@ -87,6 +87,37 @@ shim은 플랫폼 패키지들을 *정확한* 버전으로 핀하므로, 그 전
 
 되돌려지는 것도 없고, 되돌릴 필요도 없다. 같은 실행(run)에서 실패한 잡을 다시 실행한다: 플랫폼 잡은 자기 빌드와 배포를 다시 돌리고, shim 잡은 모든 플랫폼이 green이 되면 혼자서 다시 돈다. 이 버전으로 이미 레지스트리에 있는 패키지는 재배포 시 잡이 실패할 뿐(`EPUBLISHCONFLICT`) 피해를 입히지 않는다 — 정말로 다시 빌드해야 하는 버전이라면 다음 prerelease로 올린다.
 
+The shim probes every platform and host-only package immediately, then up to twenty more
+times, 30 seconds apart (ten minutes of waits), matching the update installer's retry (#586).
+The previous nine waits (4 min 30 s) expired before 0.1.0-beta.18 became visible. A rehearsal
+probes once and warns without waiting.
+
+Before rehearsing, run `node .centralu/apps/project-board/bin/wait-checks.mjs --ref main`;
+`--ref <sha>` also works.
+The ref is resolved once; output includes its pinned SHA, such as `repo@main (abc1234)`.
+It allows workflow runs to register and waits for active runs to complete before deciding
+on checks, including jobs that register late.
+The `<pr|owner/repo#pr>` form still waits for a pull request.
+The default deadline is 90 minutes; use `--timeout-minutes <minutes>` with either form to
+change it. Waiting for approval (`waiting` or `action_required`) ends immediately with an
+action-needed message. No workflow runs and no checks for two minutes means "nothing to wait
+for". Cancelled runs have their own outcome; "superseded by a newer push (cancelled)" is shown
+only when a newer run on the same workflow, branch, event, and repository has a different SHA.
+A failed `gh` request gets three retries after 1, 2, and 4 seconds. Polling, retries, and `gh`
+subprocesses all share the overall deadline.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Checks passed |
+| 1 | Checks failed |
+| 2 | Invalid arguments or GitHub error after retries |
+| 3 | Approval or other action required |
+| 4 | Nothing to wait for after the registration grace period |
+| 5 | Cancelled, with supersession reported when confirmed |
+| 6 | Overall timeout |
+
+Release tools still enforce the required-check set.
+
 ### 수동 배포
 
 여전히 지원되며, Actions가 죽었을 때의 대비책이기도 하다. Apple Silicon Mac에서:

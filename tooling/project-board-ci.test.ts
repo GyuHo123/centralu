@@ -8,6 +8,7 @@ import {
   decideMerge,
   evaluateChecks,
   firstFailure,
+  failureLineIndex,
   matchKnownFailure,
   squashMessage,
   stripAttribution,
@@ -481,13 +482,47 @@ describe.skipIf(process.platform === 'win32')('the project board app: ci_status 
     expect(full.text).toContain('Not required: notify passed.')
   })
 
+  it('finds the Windows Vitest failure and its diff beyond setup-node noise (#587)', async () => {
+    const recorded = JSON.parse(readFileSync(new URL('./fixtures/project-board/windows-vitest.json', import.meta.url), 'utf8'))
+    runtime(ghState({ logs: { '12': recorded.lines.join('\r\n') } }))
+    const r = await call('read_failed_job', { job: 12 })
+    expect(r.isError).toBe(false)
+    expect(r.text).toContain('FAIL unit packages/agent-host/src/adapters/codex/sandbox.test.ts')
+    expect(r.text).toContain('safe start: includes the common git dir and network only for auto')
+    expect(r.text).toContain('AssertionError: expected')
+    expect(r.text).toContain('- Expected')
+    expect(r.text).toContain('+ Received')
+    expect(r.text).toContain('RUNNER~1')
+    expect(r.text).toContain('runneradmin')
+    expect(r.text).not.toContain('setup-node')
+    expect(r.text).not.toContain('2026-10-12T')
+    expect(r.text).not.toContain('\u001b')
+    expect((r.data.log as string[]).length).toBeLessThanOrEqual(40)
+  })
+
+  it.each([
+    { runner: 'Playwright', progress: '  ✘  1 [chromium] › example.spec.ts:5:1 › opens the dialog',
+      detail: ['  1) [chromium] › example.spec.ts:5:1 › opens the dialog', '    Error: locator was not visible', '    Expected: visible', '    Received: hidden'] },
+    { runner: 'Cargo', progress: 'test module::opens_dialog ... FAILED',
+      detail: ['---- module::opens_dialog stdout ----', "thread 'module::opens_dialog' panicked at src/lib.rs:4:5:", 'assertion failed: visible', 'left: false', 'right: true'] },
+    { runner: 'Cargo panic without a stdout header', progress: 'test module::opens_dialog ... FAILED',
+      detail: ["thread 'module::opens_dialog' (42) panicked at src/lib.rs:4:5:", 'assertion failed: visible', 'left: false', 'right: true'] },
+  ])('reads the $runner detail instead of distant progress output', async ({ progress, detail }) => {
+    const log = [progress, ...Array.from({ length: 60 }, () => 'passing test'), ...detail]
+    runtime(ghState({ logs: { '12': log.map(stamp).join('\n') } }))
+    const r = await call('read_failed_job', { job: 12 })
+    for (const line of detail) expect(r.text).toContain(line.trim())
+    expect(r.text).not.toContain(progress.trim())
+    expect(r.data.startLine).toBe(54)
+  })
+
   it('reads only the useful part of a failed job log', async () => {
     const prefix = Array.from({ length: 60 }, () => stamp('setup noise')).join('\n')
     const suffix = Array.from({ length: 60 }, () => stamp('cleanup noise')).join('\n')
     runtime(ghState({ logs: { '12': [prefix, VITEST_LOG, suffix].join('\n') } }))
     const r = await call('read_failed_job', { job: 12 })
     expect(r.isError).toBe(false)
-    expect(r.data.startLine).toBe(57)
+    expect(r.data.startLine).toBe(58)
     expect(r.data.log).toHaveLength(40)
     expect(r.text).toContain('FAIL app-runtime packages/agent-host/src/apps/external/lifecycle.test.ts')
     expect(r.text).toContain('Error: EBUSY:')
@@ -626,5 +661,23 @@ describe.skipIf(process.platform === 'win32')('the project board app: ci_status 
     expect(r.data.outcome).toBe('timeout')
     expect(r.text.split('\n')[0]).toMatch(/^Not merged: still not green after \d+ s of waiting \(limit 1 s\)\. Required checks still to pass: verify, windows tests \(not reported yet\), linux-x64 \(not reported yet\)\.$/)
     expect(merges()).toEqual([])
+  })
+})
+
+describe('failure excerpt fallbacks', () => {
+  it.each(['× failing test', '✗ failing test', 'AssertionError: mismatch', 'Error: build failed', '##[error]process failed'])(
+    'ignores setup prose before %s', (marker) => {
+      expect(failureLineIndex(['fail-on-cache-miss: false', 'retry on error', marker, 'later'])).toBe(2)
+    },
+  )
+  it('reports no marker for setup alone', () => {
+    expect(failureLineIndex(['fail-on-cache-miss: false', 'retry on error'])).toBe(-1)
+  })
+})
+
+describe('failure excerpts across runners', () => {
+  const summaries = ['FAIL unit example.test.ts > fails', '  1) [chromium] › example.spec.ts:5:1 › fails', '---- example::fails stdout ----', "thread 'example::fails' panicked at src/lib.rs:4:5:", 'src/main.ts(1,1): error TS1234: bad type', '  1:2 error bad lint']
+  it.each(summaries)('takes %s when it is the first detailed failure in log order', (first) => {
+    expect(failureLineIndex(['setup', first, ...summaries.filter((line) => line !== first)])).toBe(1)
   })
 })

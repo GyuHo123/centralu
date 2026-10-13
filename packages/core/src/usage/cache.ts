@@ -15,9 +15,13 @@ export function cacheHitRate(w: Input): number | null {
   return total > 0 ? w.cacheReadTokens / total : null
 }
 
-/** A rate as a whole percent, for reading at a glance */
-export function percentOf(rate: number): number {
-  return Math.round(rate * 100)
+/** Keep one decimal for every partial rate, without presenting a rounded rate as zero or perfect. */
+export function percentOf(rate: number): string {
+  if (rate === 0 || rate === 1) return String(rate * 100)
+  const percent = rate * 100
+  if (percent < 0.05) return '<0.1'
+  if (percent >= 99.95) return '>99.9'
+  return percent.toFixed(1)
 }
 
 /**
@@ -32,7 +36,7 @@ export function cacheWindowName(w: Pick<CacheWindowStats, 'label' | 'since'>, co
 }
 
 /**
- * The one line the usage gauge's tooltip carries: the hit rate over its first window ("Cache hit 94% · last 5 h").
+ * The one line the usage gauge's tooltip carries: the hit rate over its first window ("Cache hit 94.0% · last 5 h").
  * Null when the host did not say (one that predates the figures), so the tooltip stays as it was.
  */
 export function cacheTooltipLine(cache: CacheStats | undefined): string | null {
