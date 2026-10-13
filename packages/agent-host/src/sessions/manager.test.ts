@@ -17,6 +17,7 @@ import {
   symlinkSync,
   truncateSync,
   writeFileSync,
+  renameSync,
 } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -3613,7 +3614,7 @@ describe('worktree sessions', () => {
       writeFileSync(join(s.worktree!.path, 'wip'), 'local\n')
       expect((await remove(s, managerId)).isError).not.toBe(true)
       const recoveryModule = await import('../dev-services/worktree-recovery.js')
-      const cleanup = vi.spyOn(recoveryModule, 'clearWorktreeRecovery').mockRejectedValueOnce(new Error('cannot remove recovery files'))
+      const cleanup = vi.spyOn(recoveryModule, 'stageWorktreeRecoveryRemoval').mockRejectedValueOnce(new Error('cannot remove recovery files'))
       const result = await wtMgr.emptyTrash()
       expect(result.purged).toBe(0)
       expect(result.failed[0]!.error).toContain('cannot remove recovery files')
@@ -3621,6 +3622,228 @@ describe('worktree sessions', () => {
       expect(existsSync(saved(s).dir)).toBe(true)
       cleanup.mockRestore()
       expect(await wtMgr.emptyTrash()).toEqual({ purged: 1, failed: [] })
+    })
+
+    it('keeps the recovery files and the trash entry when the database step of a purge fails (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/purge-db-error')
+      writeFileSync(join(s.worktree!.path, 'wip'), 'local\n')
+      expect((await remove(s, managerId)).isError).not.toBe(true)
+      const { dir } = saved(s)
+      const purge = vi.spyOn(store, 'purgeSession').mockRejectedValueOnce(new Error('database locked'))
+      await expect(wtMgr.purgeSession(s.id)).rejects.toThrow('database locked')
+      purge.mockRestore()
+      expect(store.isTrashed(s.id)).toBe(true)
+      expect(existsSync(dir)).toBe(true)
+      expect((await wtMgr.listTrash()).sessions.find((t) => t.id === s.id)!.bytes).toBeGreaterThan(100)
+      const back = await wtMgr.restoreSession(s.id)
+      expect(readFileSync(join(back.session.worktree!.path, 'wip'), 'utf8')).toBe('local\n')
+      expect((await remove(back.session, managerId)).isError).not.toBe(true)
+      expect(await wtMgr.emptyTrash()).toEqual({ purged: 1, failed: [] })
+      expect(existsSync(worktreeRecoveryDir(s.id))).toBe(false)
+    })
+
+    it('refuses to remove a worktree while another live session works inside it (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/occupied-worktree')
+      // The child's own helper, started without a worktree: it works in the child's folder
+      const helper = await wtMgr.createSession({ projectId: project.id, cwd: join(s.worktree!.path, 'packages'), tool: 'claude', permissionPreset: 'normal', askedBy: s.id })
+      wtMgr.rename(helper.id, 'helper')
+      // A session in a sibling folder whose name merely starts the same way is not inside
+      const sibling = await wtMgr.createSession({ projectId: project.id, cwd: repo, tool: 'claude', permissionPreset: 'normal' })
+      wtMgr.rename(sibling.id, 'sibling')
+      store.setSessionCwd(sibling.id, `${s.worktree!.path}-old`)
+      const r = await remove(s, managerId)
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain(`"helper" is still in the worktree of "${s.name}"`)
+      expect(r.text).not.toContain('sibling')
+      expect(existsSync(s.worktree!.path)).toBe(true)
+      expect(store.isTrashed(s.id)).toBe(false)
+      expect(wtMgr.listSessions().find((x) => x.id === s.id)!.live).toBe(true)
+      await wtMgr.trashSession(helper.id)
+      expect((await remove(s, managerId)).isError).not.toBe(true)
+      expect(existsSync(s.worktree!.path)).toBe(false)
+    })
+
+    it('counts a session asleep in the worktree after a host swap (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/asleep-occupant')
+      const helper = await wtMgr.createSession({ projectId: project.id, cwd: s.worktree!.path, tool: 'claude', permissionPreset: 'normal', askedBy: s.id })
+      wtMgr.rename(helper.id, 'helper')
+      await wtMgr.detachAll()
+      const next = new SessionManager(store, new Map<ToolName, AgentAdapter>([['claude', adapter]]), (e) => events.push(e), undefined, wtRoot)
+      try {
+        expect(next.listSessions().find((x) => x.id === helper.id)!.live).toBe(false)
+        const r = await next.runOrchestratorTool(managerId, 'agent_session', { sessionId: s.id, action: 'delete' })
+        expect(r.isError).toBe(true)
+        expect(r.text).toContain('"helper" is still in the worktree')
+        expect(existsSync(s.worktree!.path)).toBe(true)
+        expect(store.isTrashed(s.id)).toBe(false)
+        await next.trashSession(helper.id)
+        expect((await next.runOrchestratorTool(managerId, 'agent_session', { sessionId: s.id, action: 'delete' })).isError).not.toBe(true)
+        expect(existsSync(s.worktree!.path)).toBe(false)
+      } finally {
+        await next.disposeAll()
+      }
+    })
+
+    it('keeps the worktree when a session comes into it during the snapshot, and does not wake that session meanwhile (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/late-occupant')
+      writeFileSync(join(s.worktree!.path, 'wip'), 'local\n')
+      const helper = await wtMgr.createSession({ projectId: project.id, cwd: s.worktree!.path, tool: 'claude', permissionPreset: 'normal', askedBy: s.id })
+      wtMgr.rename(helper.id, 'helper')
+      await wtMgr.trashSession(helper.id)
+      const recoveryModule = await import('../dev-services/worktree-recovery.js')
+      const save = recoveryModule.saveWorktreeRecovery
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const snapshot = vi.spyOn(recoveryModule, 'saveWorktreeRecovery').mockImplementationOnce(async (...args) => {
+        await gate
+        return save(...args)
+      })
+      const agent = remove(s, managerId)
+      await vi.waitFor(() => expect(snapshot).toHaveBeenCalledOnce())
+      await wtMgr.restoreSession(helper.id)
+      await expect(wtMgr.send(helper.id, 'wake up in the folder')).rejects.toThrow('worktree is being removed')
+      expect(wtMgr.listSessions().find((x) => x.id === helper.id)!.live).toBe(false)
+      release()
+      const r = await agent
+      snapshot.mockRestore()
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain('"helper" is still in the worktree')
+      expect(existsSync(s.worktree!.path)).toBe(true)
+      expect(store.isTrashed(s.id)).toBe(false)
+      expect(readFileSync(join(s.worktree!.path, 'wip'), 'utf8')).toBe('local\n')
+    })
+
+    it('drops the restore mark when a later cleanup deletes the recovery branch (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/mark-cleanup')
+      writeFileSync(join(s.worktree!.path, 'wip'), 'local\n')
+      expect((await remove(s, managerId)).isError).not.toBe(true)
+      g(repo, ['branch', 'feat/mark-cleanup', 'main'])
+      const back = await wtMgr.restoreSession(s.id)
+      expect(back.session.worktree!.branch).toBe(`recovered/${s.id}`)
+      expect(g(repo, ['for-each-ref', '--format=%(refname)', 'refs/centralu/']).trim()).toBe(`refs/centralu/recovered/recovered/${s.id}`)
+      expect((await remove(back.session, managerId)).isError).not.toBe(true)
+      expect(g(repo, ['for-each-ref', '--format=%(refname)', 'refs/heads/recovered/', 'refs/centralu/']).trim()).toBe('')
+    })
+
+    it('keeps the worktree when a session comes into it while the child is trashed (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/occupant-after-trash')
+      const helper = await wtMgr.createSession({ projectId: project.id, cwd: s.worktree!.path, tool: 'claude', permissionPreset: 'normal', askedBy: s.id })
+      wtMgr.rename(helper.id, 'helper')
+      await wtMgr.trashSession(helper.id)
+      const trash = wtMgr.trashSession.bind(wtMgr)
+      vi.spyOn(wtMgr, 'trashSession').mockImplementationOnce(async (...args) => {
+        await trash(...args)
+        await wtMgr.restoreSession(helper.id)
+      })
+      const r = await remove(s, managerId)
+      expect(r.isError).not.toBe(true)
+      expect(r.text).toContain('"helper" is still in the worktree')
+      expect(store.isTrashed(s.id)).toBe(true)
+      expect(existsSync(s.worktree!.path)).toBe(true)
+      expect(g(repo, ['rev-parse', '--verify', 'refs/heads/feat/occupant-after-trash']).trim()).toBeTruthy()
+    })
+
+    it('makes a restore at startup wait for the repair of a folder a crashed purge left aside (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/repair-race')
+      writeFileSync(join(s.worktree!.path, 'wip'), 'kept\n')
+      expect((await remove(s, managerId)).isError).not.toBe(true)
+      renameSync(worktreeRecoveryDir(s.id), `${worktreeRecoveryDir(s.id)}.purging-1`)
+      await wtMgr.detachAll()
+      const recoveryModule = await import('../dev-services/worktree-recovery.js')
+      const repair = recoveryModule.repairWorktreeRecoveryRemovals
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const spy = vi.spyOn(recoveryModule, 'repairWorktreeRecoveryRemovals').mockImplementationOnce(async (...args) => {
+        await gate
+        return repair(...args)
+      })
+      const next = new SessionManager(store, new Map<ToolName, AgentAdapter>([['claude', adapter]]), (e) => events.push(e), undefined, wtRoot)
+      spy.mockRestore()
+      try {
+        const restoring = next.restoreSession(s.id)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        release()
+        const back = await restoring
+        expect(readFileSync(join(back.session.worktree!.path, 'wip'), 'utf8')).toBe('kept\n')
+      } finally {
+        await next.disposeAll()
+      }
+    })
+
+    it('puts recovery folders a crashed purge left aside back at the next start, and removes those of purged entries (#647)', async () => {
+      const kept = await makeChild('feat/purge-crash-kept')
+      writeFileSync(join(kept.s.worktree!.path, 'wip'), 'kept\n')
+      expect((await remove(kept.s, kept.managerId)).isError).not.toBe(true)
+      const gone = await makeChild('feat/purge-crash-gone')
+      writeFileSync(join(gone.s.worktree!.path, 'wip'), 'gone\n')
+      expect((await remove(gone.s, gone.managerId)).isError).not.toBe(true)
+      // A crash between the move aside and the database step, and one after it
+      renameSync(worktreeRecoveryDir(kept.s.id), `${worktreeRecoveryDir(kept.s.id)}.purging-1`)
+      renameSync(worktreeRecoveryDir(gone.s.id), `${worktreeRecoveryDir(gone.s.id)}.purging-2`)
+      await store.purgeSession(gone.s.id)
+      await wtMgr.detachAll()
+      const next = new SessionManager(store, new Map<ToolName, AgentAdapter>([['claude', adapter]]), (e) => events.push(e), undefined, wtRoot)
+      try {
+        await vi.waitFor(() => expect(existsSync(`${worktreeRecoveryDir(gone.s.id)}.purging-2`)).toBe(false))
+        await vi.waitFor(() => expect(existsSync(saved(kept.s).dir)).toBe(true))
+        expect(existsSync(`${worktreeRecoveryDir(kept.s.id)}.purging-1`)).toBe(false)
+        const back = await next.restoreSession(kept.s.id)
+        expect(readFileSync(join(back.session.worktree!.path, 'wip'), 'utf8')).toBe('kept\n')
+      } finally {
+        await next.disposeAll()
+      }
+    })
+
+    it('says so when the recovery folder cannot be put back after a failed purge, and repairs it at the next start (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/purge-abort-error')
+      writeFileSync(join(s.worktree!.path, 'wip'), 'local\n')
+      expect((await remove(s, managerId)).isError).not.toBe(true)
+      const recoveryModule = await import('../dev-services/worktree-recovery.js')
+      const stage = recoveryModule.stageWorktreeRecoveryRemoval
+      vi.spyOn(recoveryModule, 'stageWorktreeRecoveryRemoval').mockImplementationOnce(async (id) => {
+        const removal = await stage(id)
+        return { ...removal, abort: async () => { throw new Error('folder locked') } }
+      })
+      vi.spyOn(store, 'purgeSession').mockRejectedValueOnce(new Error('database locked'))
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        await expect(wtMgr.purgeSession(s.id)).rejects.toThrow('database locked')
+        expect(log).toHaveBeenCalledWith(expect.stringContaining('could not be put back after a failed purge'))
+      } finally {
+        log.mockRestore()
+      }
+      expect(store.isTrashed(s.id)).toBe(true)
+      expect(existsSync(worktreeRecoveryDir(s.id))).toBe(false)
+      await wtMgr.detachAll()
+      const next = new SessionManager(store, new Map<ToolName, AgentAdapter>([['claude', adapter]]), (e) => events.push(e), undefined, wtRoot)
+      try {
+        await vi.waitFor(() => expect(existsSync(saved(s).dir)).toBe(true))
+        const back = await next.restoreSession(s.id)
+        expect(readFileSync(join(back.session.worktree!.path, 'wip'), 'utf8')).toBe('local\n')
+      } finally {
+        await next.disposeAll()
+      }
+    })
+
+    it('refuses worktree cleanup while a sidebar delete is under way, keeping the worktree (#647)', async () => {
+      const { s, managerId } = await makeChild('feat/sidebar-race')
+      writeFileSync(join(s.worktree!.path, 'wip'), 'local\n')
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const dispose = vi.spyOn(adapter.handleOf(s.id)!, 'dispose').mockImplementation(() => gate)
+      const sidebar = wtMgr.trashSession(s.id)
+      await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce())
+      const agent = remove(s, managerId)
+      release()
+      const [r] = await Promise.all([agent, sidebar])
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain('already being deleted')
+      expect(store.isTrashed(s.id)).toBe(true)
+      expect(store.trashedSession(s.id)!.record.recovery).toBeUndefined()
+      expect(existsSync(s.worktree!.path)).toBe(true)
+      expect(readFileSync(join(s.worktree!.path, 'wip'), 'utf8')).toBe('local\n')
+      expect(g(repo, ['rev-parse', '--verify', 'refs/heads/feat/sidebar-race']).trim()).toBeTruthy()
+      expect(existsSync(worktreeRecoveryDir(s.id))).toBe(false)
     })
 
     it('leaves the worktree and branch intact when recovery capture fails', async () => {

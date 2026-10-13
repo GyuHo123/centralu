@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { createReadStream, existsSync } from 'node:fs'
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { isSessionId } from '@cc/protocol'
@@ -22,6 +22,71 @@ export function worktreeRecoveryDir(sessionId: string): string {
 
 export async function clearWorktreeRecovery(sessionId: string): Promise<void> {
   await rm(worktreeRecoveryDir(sessionId), { recursive: true, force: true })
+}
+
+/**
+ * Removal in two steps, so a purge never leaves a trash entry without the files it needs (#647). `stage` moves the
+ * session's recovery folder aside before the rows go: it fails where a removal would (a file held open on
+ * Windows), and the entry stays retryable. Once the rows are gone, `commit` deletes the moved folder; when the
+ * database step fails, `abort` puts it back under its own name, where a restore finds it again.
+ */
+export async function stageWorktreeRecoveryRemoval(sessionId: string): Promise<{ commit: () => Promise<void>; abort: () => Promise<void> }> {
+  const dir = worktreeRecoveryDir(sessionId)
+  if (!existsSync(dir)) return { commit: async () => {}, abort: async () => {} }
+  const staged = `${dir}${PURGING}${randomUUID()}`
+  await rename(dir, staged)
+  return {
+    commit: () => rm(staged, { recursive: true, force: true, maxRetries: 3 }),
+    abort: () => rename(staged, dir),
+  }
+}
+
+const PURGING = '.purging-'
+
+/**
+ * Finishes what a purge interrupted by a crash left (#647): a folder moved aside goes back under its session's name
+ * while that session is still in the trash (its snapshots join any made since), and is deleted once the entry is gone.
+ * Run at startup, when no purge is under way.
+ */
+export async function repairWorktreeRecoveryRemovals(trashed: (sessionId: string) => boolean): Promise<void> {
+  const root = join(dataRoot(), 'worktree-recovery')
+  if (!existsSync(root)) return
+  for (const name of await readdir(root)) {
+    const at = name.indexOf(PURGING)
+    if (at === -1) continue
+    const sessionId = name.slice(0, at)
+    if (!isSessionId(sessionId)) continue
+    const staged = join(root, name)
+    // One folder that cannot be touched (a file held open on Windows) is left for the next start; the rest go on
+    try {
+      if (!trashed(sessionId)) {
+        await rm(staged, { recursive: true, force: true, maxRetries: 3 })
+        continue
+      }
+      const dir = join(root, sessionId)
+      if (!existsSync(dir)) {
+        await rename(staged, dir)
+        continue
+      }
+      for (const snapshot of await readdir(staged)) {
+        if (!existsSync(join(dir, snapshot))) await rename(join(staged, snapshot), join(dir, snapshot))
+      }
+      await rm(staged, { recursive: true, force: true, maxRetries: 3 })
+    } catch (e) {
+      console.error(`[trash] recovery folder ${name} left by an interrupted purge was not repaired, retried at the next start: ${(e as Error).message}`)
+    }
+  }
+}
+
+const MARK = 'refs/centralu/recovered/'
+
+/**
+ * Drops the mark restore left on a recovery branch (#647), together with the branch itself: a mark outliving its
+ * branch would keep the saved commits reachable for good. Nothing to drop for a branch restore did not name.
+ */
+export async function clearRecoveredBranchMark(repo: string, branch: string): Promise<void> {
+  if (!branch.startsWith('recovered/')) return
+  await runGit(repo, ['update-ref', '-d', `${MARK}${branch}`])
 }
 
 /** Read NUL records without imposing the subprocess stdout buffer limit on trees/history. */
@@ -280,11 +345,48 @@ export async function restoreWorktreeRecovery(
   }
   if (!existsSync(path)) {
     await rm(join(dir, 'patches-applied'), { force: true })
-    if (await runGit(repo, ['show-ref', '--verify', `refs/heads/${branch}`]).then(() => true).catch(() => false)) {
-      branch = `recovered/${sessionId}`
+    /*
+     * An occupied original name is left alone, whoever made it. A recovery name is taken over when it is free, or when
+     * this code made it (#647): `git worktree add -b` creates the branch before the folder, so a failed attempt leaves
+     * the branch behind, and a retry must find its own leftover reusable rather than fail on it forever. The mark is a
+     * ref under `refs/centralu/recovered/`; the mark and the branch are created together, both with the same one-time
+     * reflog message. Deleting a branch deletes its reflog, so a branch the person deletes and makes again at the
+     * same commit has no such entry: it is the person's, and a numbered name is used instead, so a later cleanup
+     * never deletes a branch the person made.
+     */
+    const tipOf = (ref: string) => runGit(repo, ['rev-parse', '--verify', ref]).then((s) => s.trim()).catch(() => null)
+    // The oldest reflog entry: the one written when the ref was created
+    const createdBy = (ref: string) => runGit(repo, ['log', '-g', '--format=%gs', ref, '--']).then((s) => s.trim().split('\n').at(-1) ?? '').catch(() => '')
+    const ours = async (name: string): Promise<boolean | null> => {
+      const existing = await tipOf(`refs/heads/${name}`)
+      if (!existing) return null
+      if (existing !== recovery.tip || (await tipOf(`${MARK}${name}`)) !== recovery.tip) return false
+      const made = await createdBy(`${MARK}${name}`)
+      if (!made.startsWith('centralu recovery ') || made !== await createdBy(`refs/heads/${name}`)) return false
+      return (await runGit(repo, ['for-each-ref', '--format=%(worktreepath)', `refs/heads/${name}`])).trim() === ''
+    }
+    let create = true
+    if (await tipOf(`refs/heads/${branch}`)) {
+      const base = `recovered/${sessionId}`
+      branch = base
+      for (let suffix = 1; ; suffix++) {
+        const state = await ours(branch)
+        if (state !== false) {
+          create = state === null
+          break
+        }
+        branch = `${base}-${suffix}`
+      }
     }
     if (root.bundle) await runGit(repo, ['fetch', join(dir, '0.bundle'), ...(root.refs ?? ['HEAD'])], { allowRepoPrograms: trust.trusted === true })
-    await runGit(repo, ['worktree', 'add', '-b', branch, path, recovery.tip], { allowRepoPrograms: trust.trusted === true })
+    if (create && branch.startsWith('recovered/')) {
+      const made = `centralu recovery ${randomUUID()}`
+      await runGit(repo, ['update-ref', '--create-reflog', '-m', made, `${MARK}${branch}`, recovery.tip])
+      // Created here rather than by `worktree add -b`, so its reflog carries the same message as the mark
+      await runGit(repo, ['update-ref', '--create-reflog', '-m', made, `refs/heads/${branch}`, recovery.tip, ''])
+      create = false
+    }
+    await runGit(repo, ['worktree', 'add', ...(create ? ['-b', branch, path, recovery.tip] : [path, branch])], { allowRepoPrograms: trust.trusted === true })
     if (root.patch || root.staged) {
       try {
         if (root.staged) await runGit(path, ['apply', '--cached', '--binary', join(dir, '0.staged.patch')])
