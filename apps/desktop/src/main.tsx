@@ -183,7 +183,12 @@ function DesktopRoot({ platform }: { platform: TauriPlatform }) {
   const [askSwitch, setAskSwitch] = useState(false)
   const [askRestart, setAskRestart] = useState(false)
   const [restarting, setRestarting] = useState(false)
-  const [switchError, setSwitchError] = useState<string | null>(platform.relaunchSwap.error ?? null)
+  const [switchError, setSwitchError] = useState<{
+    message: string
+    /** Present for a switch request, absent for a full restart failure. */
+    afterSwap?: { startedAt?: number }
+  } | null>(null)
+  const [relaunchError, setRelaunchError] = useState<string | null>(platform.relaunchSwap.error ?? null)
   const [dismissed, setDismissed] = useState(false)
   // A failed swap stays on the bar until dismissed; this remembers which one was
   const [dismissedSwap, setDismissedSwap] = useState<number | null>(null)
@@ -202,11 +207,27 @@ function DesktopRoot({ platform }: { platform: TauriPlatform }) {
       }
     })
   }, [])
+  useEffect(() => {
+    // A keeper carries its last swap across handoffs. Repeated reports of that old final
+    // state cannot settle a new request which was refused or has not started a swap yet.
+    const swap = build?.swap
+    const final = swap && (swap.phase === 'done' || swap.phase === 'failed')
+    if (build?.sameBuild || (final && swap.startedAt !== platform.relaunchSwap.previousSwapStartedAt)) {
+      setRelaunchError(null)
+    }
+    // A request can time out even though its swap continues. The new outcome supersedes
+    // that request error, including when the outcome arrived before the rejection.
+    if (final && switchError?.afterSwap && swap.startedAt !== switchError.afterSwap.startedAt) {
+      setSwitchError(null)
+    }
+  }, [build, platform.relaunchSwap.previousSwapStartedAt, switchError])
   const bar = build ? buildBar({ build, dismissed, dismissedSwap, dismissedShell }) : ({ kind: 'none' } as const)
   const plan = build ? switchPlan(build) : null
   const startSwitch = () => {
     setSwitchError(null)
-    void switchHostBuild().catch((e: Error) => setSwitchError(e.message))
+    setRelaunchError(null)
+    const afterSwap = { startedAt: build?.swap?.startedAt }
+    void switchHostBuild().catch((e: Error) => setSwitchError({ message: e.message, afterSwap }))
   }
   /*
    * Applying an update by itself (#352). A window started by "Apply now" (the keeper held on
@@ -226,7 +247,8 @@ function DesktopRoot({ platform }: { platform: TauriPlatform }) {
     if (next === 'switch') {
       autoTried.current = true
       setSwitchError(null)
-      void switchHostBuild().catch((e: Error) => setSwitchError(e.message))
+      const afterSwap = { startedAt: build.swap?.startedAt }
+      void switchHostBuild().catch((e: Error) => setSwitchError({ message: e.message, afterSwap }))
     } else if (next === 'ask') {
       autoTried.current = true
       setAskSwitch(true)
@@ -284,7 +306,7 @@ function DesktopRoot({ platform }: { platform: TauriPlatform }) {
       <BuildBarView
         build={build}
         bar={bar}
-        error={switchError}
+        error={switchError?.message ?? relaunchError}
         restarting={restarting}
         onSwitch={() => {
           setSwitchError(null)
@@ -372,7 +394,7 @@ function DesktopRoot({ platform }: { platform: TauriPlatform }) {
             setRestarting(true)
             void restartKeeper().catch((e: Error) => {
               setRestarting(false)
-              setSwitchError(e.message)
+              setSwitchError({ message: e.message })
             })
           }}
         />

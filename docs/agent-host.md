@@ -1227,6 +1227,17 @@ rule, `sessionIdle` (§4.6).
 drains this host and starts the new build's (§4.2), after the keeper has handed itself over (§4.4). The new host's
 update status starts fresh at its own version.
 
+The desktop waits for its automatic relaunch swap before mounting the app (#580). If that attempt
+fails or times out, it opens on the attached host and remembers the attempt so `DesktopRoot` does
+not repeat it automatically. The platform records the attached swap's `startedAt` before requesting
+another switch: the keeper retains its last swap across handoffs. Only a matching host build or a
+final swap with a different `startedAt` supersedes the startup error. A failed new swap shows its
+reason once, and a late success clears the timeout; an old final swap cannot hide a new refusal.
+Later switch requests record the same boundary, so a new final swap clears their request timeout
+even if it arrives before the timeout. Repeated old reports and full restart errors stay independent.
+The browser regression in `e2e/relaunch.spec.ts` boots the real desktop entry with a mocked shell
+boundary.
+
 ### 4.6 Moving sessions to a newly installed agent CLI (#297)
 
 Every session runs its own agent process, started from the CLI installed at the time, and an update to `claude` or
