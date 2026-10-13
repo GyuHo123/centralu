@@ -409,8 +409,26 @@ tool's conversation remains. The answer reports the uncommitted file and commit 
 needed setting aside. A saved notice also offers the recovery directory in the trashed conversation. Counts
 count the union of HEAD and the stored branch against the configured local trunk (project HEAD if unset),
 not a GitHub merge badge; squash/rebase commits may therefore be kept conservatively. An unreadable trunk
-keeps all reachable commits. Submodules count local HEAD/branch commits absent from their remote refs,
-even when the child superproject already records those commits.
+keeps all reachable commits. Submodules count local HEAD/branch commits and gitlink targets from the
+index, HEAD tree, and every unmerged superproject commit against their remote refs. Candidate gitlinks
+are batch-checked in each module repository; unfetched objects are skipped because removing this
+checkout cannot lose them. Existence checks set `GIT_NO_LAZY_FETCH=1` and disable transports with
+`GIT_ALLOW_PROTOCOL=`; the latter also prevents network access on Git versions that predate the lazy-fetch
+switch. A single raw log scan and one HEAD tree listing stream to temporary files,
+so history length does not require one process per commit or fit in the stdout buffer. Historical
+`.gitmodules` names associate renamed paths with their initialized module; each distinct manifest is read
+once. Capture includes intermediate commits and the stored branch even after the submodule HEAD moves away. Gitlink-only targets get
+temporary named refs in the bundle so they remain fetchable after the private module repository is removed;
+the temporary refs are removed from the live repository after bundling. Revision lists, bundle refs, and
+temporary ref updates use stdin, keeping large module histories below Windows command-line limits.
+The raw log explicitly uses `--diff-merges=separate`, independent of the person's `log.diffMerges` setting.
+
+**Git compatibility.** This repository does not otherwise pin a minimum Git version. Recovery capture
+requires Git 2.31 or newer: that release introduced both `--diff-merges` and `bundle --stdin`
+([upstream release notes](https://raw.githubusercontent.com/git/git/v2.31.0/Documentation/RelNotes/2.31.0.txt)).
+Older Git fails capture before deletion; upgrade Git to use recovery. The lazy-fetch switch arrived in
+[Git 2.45](https://raw.githubusercontent.com/git/git/v2.45.0/Documentation/RelNotes/2.45.0.txt);
+on 2.31–2.44 the empty protocol allowlist still prevents existence checks from reaching a remote.
 
 The trash's optional `recovery` JSON field remembers the snapshot id, tip and counts; this is additive and
 needs no schema migration. Files live at `<data>/worktree-recovery/<session id>/<snapshot id>/`:
@@ -427,12 +445,20 @@ or bundle. Trash byte totals include recovery files.
 
 Restore recreates the root branch/worktree at its saved tip and attempts both patches before making the
 session live (its CLI remains stopped). If the original branch name is occupied, it uses `recovered/<session id>`.
+If HEAD and the bundled stored branch differ, restore also creates `recovered/<session id>-stored-branch`
+at the stored tip and names it in the notice. An occupied recovery name gets a numeric suffix; a retry
+reuses a branch already at that tip. Existing branches are never overwritten.
 A notice offers the recovery paths and `git apply` / `git fetch <bundle> <ref>:<branch>` (`git bundle list-heads` lists saved refs) instructions; patches
 that cannot be applied and all submodule recovery remain available for manual recovery. A restore interrupted
-after creating the worktree does not reapply patches on retry. Each later deletion uses a new snapshot so
-earlier files are retained. Deleting for good, including empty trash, removes the entire session recovery
-directory; cleanup failure leaves the trash entry retryable. No automatic trash expiry is implemented; expiry
-must use `purgeSession` if added. Writes by other programs during capture are outside this session's lock.
+after creating the worktree does not reapply patches on retry, to preserve possible edits since the interruption.
+A `patches-applied` marker records the worktree path after both patches succeed. On retry the notice
+reports that prior success, preserving any subsequent edits. Without that marker it explicitly says
+patches were not applied on this retry and may need manual recovery. Recreating a missing worktree
+clears the old marker before applying patches again. Each later deletion uses a new snapshot so earlier
+files are retained. Deleting for good, including empty trash, removes the entire session recovery directory; cleanup failure leaves the trash entry retryable. No automatic trash expiry is implemented; expiry
+must use `purgeSession` if added. Gitlinks found only in older merged superproject history remain a
+follow-up ([#623](https://github.com/ijun17/centralu/issues/623)); a superproject merge does not prove
+that module commits were pushed. Writes by other programs during capture are outside this session's lock.
 
 **Size.** The two definitions are 956 characters (`AGENT_BUDGET_CHARS` 1,000; 992 before the registry-name schema, 918 before the worktree arguments, 974 before `delete`). Claude loads `start_agent` (a request
 made in words, like ask_project's, which deferred was not found) and defers `agent_session`, which every
