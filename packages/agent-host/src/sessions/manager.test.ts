@@ -1316,6 +1316,54 @@ describe('a record unchanged outside is not read again', () => {
  * for approval (dogfooding: "I switched permissions to auto, why is it still asking me").
  */
 describe('a settings change actually takes effect', () => {
+  /*
+   * #659: the answer goes to the caller only, so every other window (and the person's own window when an agent made
+   * the call) kept the old model and permission preset until a re-list. The sink here stands for every subscriber.
+   */
+  it('tells every subscriber the new model and permission preset, not only the caller (#659)', async () => {
+    const p = await addProject()
+    const s = (await rpc('agents.createSession', {
+      projectId: p.id, cwd: tmpdir(), tool: 'claude', model: 'fable', permissionPreset: 'normal',
+    })) as { id: string }
+    events.length = 0
+
+    await rpc('agents.updateSettings', { sessionId: s.id, model: 'opus', permissionPreset: 'auto' })
+
+    const changed = events.filter((e) => e.type === 'settings_changed' && e.sessionId === s.id)
+    expect(changed).toHaveLength(1)
+    expect(changed[0]).toMatchObject({ model: 'opus', permissionPreset: 'auto', person: true })
+    expect(changed[0]).not.toHaveProperty('by')
+    // What goes out is a valid frame, the way the transport checks it
+    expect(NormalizedEventSchema.safeParse(changed[0]).success).toBe(true)
+
+    // The next change is a full snapshot again, so a window that missed the first one still ends up right
+    events.length = 0
+    await rpc('agents.updateSettings', { sessionId: s.id, effort: 'high' })
+    expect(events.filter((e) => e.type === 'settings_changed')).toMatchObject([{ model: 'opus', effort: 'high', permissionPreset: 'auto' }])
+  })
+
+  /*
+   * #659 review: the orchestrator's settings tool on a linked machine reaches that machine's `agents.updateSettings`.
+   * Without its origin the machine announced the change as a person's, and the hub's window raised no toast.
+   */
+  it("announces a change as the orchestrator's when the call says so, with no person flag (#659)", async () => {
+    const p = await addProject()
+    const s = (await rpc('agents.createSession', { projectId: p.id, cwd: tmpdir(), tool: 'claude', model: 'fable' })) as { id: string }
+    events.length = 0
+
+    await rpc('agents.updateSettings', { sessionId: s.id, model: 'opus', by: 'orchestrator' })
+
+    const changed = events.filter((e) => e.type === 'settings_changed')
+    expect(changed).toMatchObject([{ model: 'opus', by: 'orchestrator' }])
+    expect(changed[0]).not.toHaveProperty('person')
+  })
+
+  it('sends nothing for a session that does not exist (#659)', async () => {
+    events.length = 0
+    await expect(mgr.updateSettings('nope', { model: 'opus' })).rejects.toMatchObject({ code: 'session_not_found' })
+    expect(events.filter((e) => e.type === 'settings_changed')).toEqual([])
+  })
+
   it('changing permissions swaps out the live agent', async () => {
     const p = await addProject()
     const s = (await rpc('agents.createSession', {
@@ -5795,6 +5843,9 @@ describe('resets, notices and switches the tool made (#304)', () => {
     const { s, h } = await start('opus')
     await rpc('agents.send', { sessionId: s.id, text: 'work' })
     await rpc('agents.updateSettings', { sessionId: s.id, model: 'haiku' })
+    // The person's own save was announced (#659); the tool's switch after it is not, since nothing was recorded
+    expect(events.filter((e) => e.type === 'settings_changed')).toMatchObject([{ model: 'haiku', person: true }])
+    events.length = 0
     h.emitEvent({
       type: 'settings_changed', sessionId: s.id, model: 'claude-sonnet-4-6', effort: null, verbosity: null, serviceTier: null, by: 'tool',
     })

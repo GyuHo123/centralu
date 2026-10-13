@@ -7,6 +7,7 @@ import {
   Attachment,
   ApprovalDetail,
   ProtocolError,
+  PermissionPreset,
   Question,
   RequestInput,
   SessionActivity,
@@ -549,6 +550,11 @@ export const NormalizedEvent = z.discriminatedUnion('type', [
     /** Response speed. Follows the same snapshot rule as the three above — optional since old frames lack it */
     serviceTier: z.string().nullable().optional(),
     /**
+     * The permission preset after the change (#659). A snapshot like the four above; absent on frames that
+     * predate it and on a tool's own switch, which never touches it. The receiving side keeps its value then.
+     */
+    permissionPreset: PermissionPreset.optional(),
+    /**
      * Whose hand it was (#304). Absent means the orchestrator, the only author this event had before.
      *
      * `tool` means the agent tool switched by itself, mid-session: Claude Code falling back to another model after a
@@ -559,6 +565,17 @@ export const NormalizedEvent = z.discriminatedUnion('type', [
      * the process was launched with, and re-sends its full snapshot.
      */
     by: z.enum(['orchestrator', 'tool']).optional(),
+    /**
+     * A client changed it through `agents.updateSettings` (#659). The caller already has the answer, but every other
+     * window, linked machine and the person's own window (when an agent made the call) only learns it from this event.
+     * It updates the values shown without the "Orchestrator changed" toast: nobody else's hand was involved, and the
+     * caller's own toast states what it did.
+     *
+     * **A separate flag, not a third `by` word**: a build from before it parses this frame against a `by` enum without
+     * the new word, and a frame that fails to parse is dropped whole. As a flag it is stripped as an unknown key, and
+     * that build still updates the values (and raises one toast, as it did for any change not made by a tool).
+     */
+    person: z.boolean().optional(),
   }),
   z.object({ ...base, type: z.literal('history_synced'), added: z.number() }),
   /** The session was deleted — the list must stay correct in other windows and after a reconnect too */
