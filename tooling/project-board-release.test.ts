@@ -186,9 +186,22 @@ const save = () => fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(st
 const fail = (stderr, code = 1, stdout = '') => { process.stdout.write(stdout); process.stderr.write(stderr); process.exit(code) }
 const json = (v) => { process.stdout.write(JSON.stringify(v)); process.exit(0) }
 const R = 'repos/ijun17/centralu'
+const association = (p) => ({ number: p.number, head: { sha: p.headRefOid, ref: p.headRefName }, base: { ref: p.baseRefName } })
 if (args[0] === 'pr' && args[1] === 'list') {
   const head = args[args.indexOf('--head') + 1]
   json(st.prs.filter((p) => p.headRefName === head))
+}
+if (args[0] === 'api' && args[1] === '--paginate' && args[2] === '--slurp') {
+  const [path, query] = args[3].split('?')
+  const q = new URLSearchParams(query)
+  if (path === R + '/actions/workflows/build.yml/runs') {
+    const pr = st.prs.find((p) => p.headRefOid === q.get('head_sha'))
+    const event = pr ? 'pull_request' : 'push'
+    const branch = pr ? pr.headRefName : 'main'
+    const current = { id: 1, check_suite_id: 11, head_sha: q.get('head_sha'), event, head_branch: branch, head_repository: { full_name: 'ijun17/centralu' }, status: 'completed', conclusion: 'success', run_attempt: 1, pull_requests: [], ...st.ciRunOverrides?.[q.get('head_sha')] }
+    // Return mismatching metadata too, to exercise the client-side identity guard.
+    json([{ workflow_runs: [current, ...(st.staleAttempt ? [{ ...current, run_attempt: 1, conclusion: 'cancelled' }] : [])] }])
+  }
 }
 if (args[0] === 'api' && args[1] === '-X') {
   const [method, path] = [args[2], args[3]]
@@ -216,12 +229,19 @@ if (args[0] === 'api' && args[1] === '-H') {
 if (args[0] === 'api') {
   const [path, query] = args[1].split('?')
   const q = new URLSearchParams(query || '')
+  if (path === R + '/commits/main') json({ sha: st.dispatchSha })
+  if (/\/commits\/[0-9a-f]+\/pulls$/.test(path)) json(st.commitPrOverrides || st.prs.map(association))
   if (path === R) json({ default_branch: 'main', permissions: st.permissions })
   if (path === R + '/branches/main/protection/required_status_checks') json({ contexts: ['build'], checks: [] })
   if (path === R + '/rules/branches/main') json([])
   if (/\/commits\/[0-9a-f]+\/check-runs$/.test(path)) {
-    const c = { green: ['completed', 'success'], failing: ['completed', 'failure'], pending: ['in_progress', null] }[st.ci]
-    json({ check_runs: [{ id: 1, name: 'build', status: c[0], conclusion: c[1], html_url: 'https://github.com/ijun17/centralu/actions/runs/1/job/1', app: { slug: 'github-actions' } }] })
+    const sha = path.split('/').at(-2)
+    const verdict = st.ciBySha?.[sha] || (st.prs.some((p) => p.headRefOid === sha) ? st.prCi : st.ci)
+    const collision = st.collidingReleaseChecks === true || st.collidingReleaseChecks === (st.prs.some((p) => p.headRefOid === sha) ? 'PR' : 'main')
+    const releaseChecks = collision ? [{ id: 99, name: 'build', status: 'completed', conclusion: 'success', started_at: '2026-10-13T12:00:00Z', check_suite: { id: 99 }, app: { slug: 'github-actions' } }] : []
+    if (verdict === 'none') json({ check_runs: releaseChecks })
+    const c = { green: ['completed', 'success'], failing: ['completed', 'failure'], pending: ['in_progress', null], cancelled: ['completed', 'cancelled'] }[verdict]
+    json({ check_runs: [{ id: 1, name: 'build', status: c[0], conclusion: c[1], html_url: 'https://github.com/ijun17/centralu/actions/runs/1/job/1', started_at: '2026-10-13T10:00:00Z', check_suite: { id: 11 }, app: { slug: st.ciApp || 'github-actions' } }, ...releaseChecks] })
   }
   if (/\/commits\/[0-9a-f]+\/status$/.test(path)) json({ statuses: [] })
   if (path === R + '/actions/workflows/release.yml/runs')
@@ -237,9 +257,16 @@ fail('fake gh: unexpected call ' + JSON.stringify(args) + '\n')
 type Run = { id: number; status: string; conclusion: string | null; event: string; head_branch: string; head_sha: string; html_url: string; created_at: string }
 type State = {
   permissions: Record<string, boolean>
-  ci: 'green' | 'failing' | 'pending'
+  ci: 'green' | 'failing' | 'pending' | 'none'
+  prCi?: 'green' | 'failing' | 'pending' | 'none'
+  collidingReleaseChecks?: boolean | 'main' | 'PR'
+  ciApp?: string
+  ciBySha?: Record<string, string>
+  ciRunOverrides?: Record<string, Record<string, unknown>>
+  commitPrOverrides?: unknown[]
+  staleAttempt?: boolean
   files: Record<string, string>
-  prs: { number: number; state: string; headRefName: string }[]
+  prs: { number: number; state: string; headRefName: string; baseRefName?: string; headRefOid?: string; mergeCommit?: { oid: string } }[]
   runs: Run[]
   jobs: Record<string, { name: string; status: string; conclusion: string | null }[]>
   pending: Record<string, unknown[]>
@@ -359,6 +386,7 @@ function repo({ bumped = false, version = APP_VERSION }: { bumped?: boolean; ver
   write(work, 'docs/releasing.md', `Released ${version} on a Monday.\n`)
   const released = commitAll(work, `chore(release): ${version} (#541)`)
   g(work, 'tag', `v${version}`)
+  write(work, '.github/workflows/build.yml', 'on:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo test\n')
   write(work, 'a.txt', 'one\n')
   commitAll(work, 'feat(ui): one (#10)')
   write(work, 'b.txt', 'two\n')
@@ -394,7 +422,314 @@ const run = (extra: Partial<Run>): Run => ({
   ...extra,
 })
 
+/** Distinct PR head and squash commit, with real trees and a fetchable remote PR head. */
+function bumpEvidence(s: Repo, { differentTree = false } = {}) {
+  const tree = g(s.work, 'rev-parse', `${differentTree ? s.released : s.tip}^{tree}`)
+  const prHead = g(s.work, 'commit-tree', tree, '-p', s.released, '-m', 'chore(release): bump candidate')
+  g(s.work, 'push', '-q', 'origin', `${prHead}:refs/pull/900/head`)
+  patchState((st) => {
+    st.ci = 'pending'
+    st.prCi = 'green'
+    st.prs.push({ number: 900, state: 'MERGED', headRefName: `chore/release-${NEXT}`, baseRefName: 'main', headRefOid: prHead, mergeCommit: { oid: s.tip } })
+  })
+  return prHead
+}
+
 describe.skipIf(process.platform === 'win32')('release', { timeout: 60_000 }, () => {
+  it.each(['pending', 'none'] as const)('accepts the bump PR same tree when main CI is %s, in both steps', async (ci) => {
+    const s = repo({ bumped: true })
+    // Release jobs can share CI names; their separate event is not PR CI evidence.
+    write(s.work, '.github/workflows/release.yml', 'on:\n  workflow_dispatch:\njobs:\n  build:\n    runs-on: ubuntu-latest\n')
+    s.tip = commitAll(s.work, 'ci: add a separate release workflow')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    patchState((st) => { st.dispatchSha = s.tip })
+    const prHead = bumpEvidence(s)
+    patchState((st) => { st.ci = ci })
+    expect(prHead).not.toBe(s.tip)
+    runtime()
+    for (const step of ['rehearse', 'tag']) {
+      const r = await call('release', { step, path: s.work, skipRehearsal: true, confirm: true })
+      expect(r.isError, r.text).toBe(false)
+      expect(r.data.lines.join(' ')).toContain("CI: PR #900's run on the same tree")
+    }
+    expect(remoteHas(s.origin, `refs/tags/v${NEXT}`)).toBe(s.tip)
+  })
+
+  it('reports the same PR evidence in status and uses main green CI directly when it arrives', async () => {
+    const s = repo({ bumped: true })
+    bumpEvidence(s)
+    runtime()
+    const status = await call('release_status', { path: s.work })
+    expect(status.data.lines.join(' ')).toContain("CI: PR #900's run on the same tree")
+    patchState((st) => { st.ci = 'green'; st.prCi = 'failing' })
+    for (const step of ['rehearse', 'tag', 'status']) {
+      const r = await call(step === 'status' ? 'release_status' : 'release', { step, path: s.work, skipRehearsal: true })
+      expect(r.isError, r.text).toBe(false)
+      expect(r.data.lines.join(' ')).toContain("CI: main's own checks")
+    }
+  })
+
+  it.each([
+    ['different tree', 'different tree'],
+    ['later merge', "merge commit is not main's head"],
+    ['main failing', 'Main CI failed'],
+    ['PR failing', 'head checks are not all green'],
+    ['PR pending', 'head checks are not all green'],
+    ['PR missing', 'head checks are not all green'],
+    ['event job', 'uses event or branch context'],
+    ['push-only job', 'does not run on both push and pull_request'],
+  ])('refuses %s in both steps and reports the reason in status', async (scenario, reason) => {
+    const s = repo({ bumped: true })
+    if (scenario === 'event job' || scenario === 'push-only job') {
+      const file = '.github/workflows/build.yml'
+      const workflow = readFileSync(join(s.work, file), 'utf8')
+      write(s.work, file, scenario === 'event job' ? workflow.replace('    runs-on:', "    if: github.event_name == 'push'\n    runs-on:") : workflow.replace('  pull_request:\n', ''))
+      s.tip = commitAll(s.work, 'ci: change required build')
+      g(s.work, 'push', '-q', 'origin', 'main')
+    }
+    bumpEvidence(s, { differentTree: scenario === 'different tree' })
+    if (scenario === 'later merge') {
+      // Even an empty subsequent merge with the identical tree invalidates the exemption.
+      g(s.work, 'commit', '--allow-empty', '-q', '-m', 'docs: later merge (#901)')
+      g(s.work, 'push', '-q', 'origin', 'main')
+    }
+    patchState((st) => {
+      if (scenario === 'main failing') st.ci = 'failing'
+      if (scenario === 'PR failing') st.prCi = 'failing'
+      if (scenario === 'PR pending') st.prCi = 'pending'
+      if (scenario === 'PR missing') st.prCi = 'none'
+    })
+    runtime()
+    for (const step of ['rehearse', 'tag']) {
+      const r = await call('release', { step, path: s.work, skipRehearsal: true, confirm: true })
+      expect(r.isError, r.text).toBe(true)
+      expect(r.data.problems.join(' ')).toContain(reason)
+    }
+    const status = await call('release_status', { path: s.work })
+    expect(status.data.lines.join(' ')).toContain(reason)
+    expect(status.data.summary).toContain('Wait for green CI')
+    expect(ghWrites()).toEqual([])
+    expect(remoteHas(s.origin, `refs/tags/v${NEXT}`)).toBeNull()
+  })
+
+  it('blocks tagging when pending main CI fails after rehearsal accepted the PR evidence', async () => {
+    const s = repo({ bumped: true })
+    bumpEvidence(s)
+    runtime()
+    const rehearsal = await call('release', { step: 'rehearse', path: s.work, confirm: true })
+    expect(rehearsal.isError, rehearsal.text).toBe(false)
+    patchState((st) => { st.ci = 'failing' })
+    const tag = await call('release', { step: 'tag', path: s.work, skipRehearsal: true, confirm: true })
+    expect(tag.isError, tag.text).toBe(true)
+    expect(tag.data.problems.join(' ')).toContain('Main CI failed')
+    expect(remoteHas(s.origin, `refs/tags/v${NEXT}`)).toBeNull()
+  })
+
+  it.each(['main', 'PR'] as const)('ignores newer passing release checks with the same name as failing %s CI', async (source) => {
+    const s = repo({ bumped: true })
+    bumpEvidence(s)
+    patchState((st) => {
+      st.collidingReleaseChecks = source
+      if (source === 'main') st.ci = 'failing'
+      else st.prCi = 'failing'
+    })
+    runtime()
+    const reason = source === 'main' ? 'Main CI failed' : 'head checks are not all green'
+    for (const step of ['rehearse', 'tag']) {
+      const r = await call('release', { step, path: s.work, skipRehearsal: true, confirm: true })
+      expect(r.isError, r.text).toBe(true)
+      expect(r.data.problems.join(' ')).toContain(reason)
+    }
+    const status = await call('release_status', { path: s.work })
+    expect(status.data.lines.join(' ')).toContain(reason)
+    expect(ghWrites()).toEqual([])
+  })
+
+  it('refuses checks from another app even when their suite id and name match CI', async () => {
+    const s = repo({ bumped: true })
+    bumpEvidence(s)
+    patchState((st) => { st.ci = 'green'; st.ciApp = 'another-app' })
+    runtime()
+    const r = await call('release', { step: 'tag', path: s.work, skipRehearsal: true, confirm: true })
+    expect(r.isError, r.text).toBe(true)
+    expect(ghWrites()).toEqual([])
+  })
+
+  it.each(['multiple parents', 'different base'])('refuses bump PR evidence with %s', async (scenario) => {
+    const s = repo({ bumped: true })
+    if (scenario === 'multiple parents') {
+      const merge = g(s.work, 'commit-tree', g(s.work, 'rev-parse', `${s.tip}^{tree}`), '-p', s.tip, '-p', s.released, '-m', 'chore(release): merge bump')
+      g(s.work, 'reset', '--hard', merge)
+      g(s.work, 'push', '-q', 'origin', 'main')
+      s.tip = merge
+    }
+    bumpEvidence(s)
+    if (scenario === 'different base') patchState((st) => { st.prs[0]!.baseRefName = 'other-base' })
+    runtime()
+    for (const step of ['rehearse', 'tag']) {
+      const r = await call('release', { step, path: s.work, skipRehearsal: true, confirm: true })
+      expect(r.isError, r.text).toBe(true)
+      expect(r.data.problems.join(' ')).toContain(scenario === 'multiple parents' ? 'did not land as a squash commit' : 'No merged bump PR')
+    }
+    expect(ghWrites()).toEqual([])
+  })
+
+  it.each(['pending', 'failing', 'none'] as const)('blocks every publication approval while main CI is %s despite green PR and release checks', async (ci) => {
+    const s = repo({ bumped: true })
+    bumpEvidence(s)
+    g(s.work, 'push', '-q', 'origin', `${s.tip}:refs/tags/v${NEXT}`)
+    patchState((st) => {
+      st.ci = ci
+      st.collidingReleaseChecks = true
+      st.runs.push(run({ id: 61, event: 'push', head_branch: `v${NEXT}`, head_sha: s.tip, status: 'waiting', conclusion: null }))
+      st.pending['61'] = [{ environment: { id: 7, name: 'npm-publish' }, current_user_can_approve: true, reviewers: [] }]
+    })
+    runtime()
+    for (const job of ['linux-x64', 'centralu (shim)']) {
+      patchState((st) => { st.jobs['61'] = [{ name: job, status: 'waiting', conclusion: null }] })
+      for (const confirm of [false, true]) {
+        const r = await call('release', { step: 'approve', path: s.work, confirm })
+        expect(r.isError, r.text).toBe(true)
+        expect(r.data.problems.join(' ')).toContain('must be green before npm-publish approval')
+      }
+    }
+    const status = await call('release_status', { path: s.work })
+    expect(status.data.summary).toContain('Wait for green CI')
+    expect(status.data.summary).toContain('PR evidence cannot authorize publication')
+    expect(status.data.lines.join(' ')).toContain(`The tagged commit's own CI at ${s.tip.slice(0, 7)}: ${ci}.`)
+    expect(ghWrites()).toEqual([])
+    patchState((st) => { st.ci = 'green' })
+    const approved = await call('release', { step: 'approve', path: s.work, confirm: true })
+    expect(approved.isError, approved.text).toBe(false)
+    expect(approved.data.approved).toBe(true)
+    expect(ghWrites()).toHaveLength(1)
+    // Every call rechecks CI, including the shim's later approval.
+    patchState((st) => { st.ci = 'failing' })
+    const again = await call('release', { step: 'approve', path: s.work, confirm: true })
+    expect(again.isError, again.text).toBe(true)
+    expect(ghWrites()).toHaveLength(1)
+  })
+
+  it('does not let a newer green main authorize a tag whose own main CI failed', async () => {
+    const s = repo({ bumped: true })
+    const tagged = s.tip
+    g(s.work, 'push', '-q', 'origin', `${tagged}:refs/tags/v${NEXT}`)
+    g(s.work, 'commit', '--allow-empty', '-q', '-m', 'docs: later change')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    patchState((st) => {
+      st.ci = 'green'
+      st.ciBySha = { [tagged]: 'failing' }
+      st.runs.push(run({ id: 61, event: 'push', head_branch: `v${NEXT}`, head_sha: tagged, status: 'waiting', conclusion: null }))
+      st.pending['61'] = [{ environment: { id: 7, name: 'npm-publish' }, current_user_can_approve: true, reviewers: [] }]
+    })
+    runtime()
+    const r = await call('release', { step: 'approve', path: s.work, confirm: true })
+    expect(r.isError, r.text).toBe(true)
+    expect(r.data.problems.join(' ')).toContain("The tagged commit's own CI")
+    const status = await call('release_status', { path: s.work })
+    expect(status.data.summary).toContain("The tagged commit's own CI")
+    expect(ghWrites()).toEqual([])
+  })
+
+  it.each(['event', 'branch'])('rejects a CI suite with the wrong %s even when its jobs pass', async (field) => {
+    const s = repo({ bumped: true })
+    runtime()
+    expect((await call('release', { step: 'rehearse', path: s.work })).isError).toBe(false)
+    patchState((st) => { st.ciRunOverrides = { [s.tip]: field === 'event' ? { event: 'workflow_dispatch' } : { head_branch: 'another-branch' } } })
+    const r = await call('release', { step: 'rehearse', path: s.work, confirm: true })
+    expect(r.isError, r.text).toBe(true)
+    expect(ghWrites()).toEqual([])
+  })
+
+  it.each(['number', 'base'])('requires the PR run to match the bump PR %s', async (field) => {
+    const s = repo({ bumped: true })
+    const prHead = bumpEvidence(s)
+    patchState((st) => {
+      st.ciRunOverrides = { [prHead]: { pull_requests: [{ number: field === 'number' ? 901 : 900, head: { sha: prHead, ref: `chore/release-${NEXT}` }, base: { ref: field === 'base' ? 'other-base' : 'main' } }] } }
+    })
+    runtime()
+    const r = await call('release', { step: 'rehearse', path: s.work, confirm: true })
+    expect(r.isError, r.text).toBe(true)
+    expect(r.data.problems.join(' ')).toContain('head checks are not all green')
+    expect(ghWrites()).toEqual([])
+  })
+
+  it('refuses ambiguous commit associations when GitHub drops the merged PR from its run', async () => {
+    const s = repo({ bumped: true })
+    const prHead = bumpEvidence(s)
+    patchState((st) => { st.commitPrOverrides = [900, 901].map((number) => ({ number, head: { sha: prHead, ref: `chore/release-${NEXT}` }, base: { ref: 'main' } })) })
+    runtime()
+    const r = await call('release', { step: 'rehearse', path: s.work, confirm: true })
+    expect(r.isError, r.text).toBe(true)
+    expect(r.data.problems.join(' ')).toContain('head checks are not all green')
+  })
+
+  it('ci_status main ignores newer passing release checks with colliding build names', async () => {
+    repo({ bumped: true })
+    patchState((st) => { st.ci = 'failing'; st.collidingReleaseChecks = true })
+    runtime()
+    const r = await call('ci_status', { ref: 'main' })
+    expect(r.data.verdict, r.text).toBe('failing')
+    expect(r.data.checks.join(' ')).toContain('build: failed')
+    expect(ghWrites()).toEqual([])
+  })
+
+  it('approves platforms and then the shim from the tag even after an unrelated red merge', async () => {
+    const s = repo({ bumped: true })
+    const tagged = s.tip
+    g(s.work, 'push', '-q', 'origin', `${tagged}:refs/tags/v${NEXT}`)
+    patchState((st) => {
+      st.runs.push(run({ id: 61, event: 'push', head_branch: `v${NEXT}`, head_sha: tagged, status: 'waiting', conclusion: null }))
+      st.pending['61'] = [{ environment: { id: 7, name: 'npm-publish' }, current_user_can_approve: true, reviewers: [] }]
+      st.jobs['61'] = [{ name: 'linux-x64', status: 'waiting', conclusion: null }]
+    })
+    runtime()
+    expect((await call('release', { step: 'approve', path: s.work, confirm: true })).data.approved).toBe(true)
+    g(s.work, 'commit', '--allow-empty', '-q', '-m', 'fix: unrelated merge')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    patchState((st) => {
+      st.ci = 'failing'
+      st.ciBySha = { [tagged]: 'green' }
+      st.jobs['61'] = [{ name: 'centralu (shim)', status: 'waiting', conclusion: null }]
+    })
+    const shim = await call('release', { step: 'approve', path: s.work, confirm: true })
+    expect(shim.data.approved, shim.text).toBe(true)
+    expect(ghWrites()).toHaveLength(2)
+    const status = await call('release_status', { path: s.work })
+    expect(status.data.summary).toContain('Approve with release step approve')
+    expect(status.data.lines.join(' ')).toContain(`The tagged commit's own CI at ${tagged.slice(0, 7)}: green.`)
+  })
+
+  it('explains a cancelled tagged build with its rerun command and accepts the successful new attempt', async () => {
+    const s = repo({ bumped: true })
+    const tagged = s.tip
+    g(s.work, 'push', '-q', 'origin', `${tagged}:refs/tags/v${NEXT}`)
+    g(s.work, 'commit', '--allow-empty', '-q', '-m', 'fix: newer push cancels older build')
+    g(s.work, 'push', '-q', 'origin', 'main')
+    patchState((st) => {
+      st.ciBySha = { [tagged]: 'cancelled' }
+      st.ciRunOverrides = { [tagged]: { id: 42, status: 'completed', conclusion: 'cancelled', run_attempt: 1 } }
+      st.runs.push(run({ id: 61, event: 'push', head_branch: `v${NEXT}`, head_sha: tagged, status: 'waiting', conclusion: null }))
+      st.pending['61'] = [{ environment: { id: 7, name: 'npm-publish' }, current_user_can_approve: true, reviewers: [] }]
+    })
+    runtime()
+    const recovery = `The build for ${tagged} was cancelled by a newer push; re-run it: gh run rerun 42`
+    const blocked = await call('release', { step: 'approve', path: s.work, confirm: true })
+    expect(blocked.isError).toBe(true)
+    expect(blocked.data.problems.join(' ')).toContain(recovery)
+    expect((await call('release_status', { path: s.work })).data.summary).toContain(recovery)
+    expect(ghWrites()).toEqual([])
+    patchState((st) => {
+      st.ciBySha = { [tagged]: 'green' }
+      st.ciRunOverrides![tagged] = { id: 42, status: 'completed', conclusion: 'success', run_attempt: 2 }
+      st.staleAttempt = true
+    })
+    const approved = await call('release', { step: 'approve', path: s.work, confirm: true })
+    expect(approved.data.approved, approved.text).toBe(true)
+    expect(remoteHas(s.origin, `refs/tags/v${NEXT}`)).toBe(tagged)
+    expect(ghWrites()).toHaveLength(1)
+  })
+
   it('passes check, with the status open to the screen and the steps to agents', async () => {
     const r = await runtime().check(ref)
     expect(r.text.split('\n').filter((l) => l.startsWith('- problem'))).toEqual([])
@@ -411,7 +746,7 @@ describe.skipIf(process.platform === 'win32')('release', { timeout: 60_000 }, ()
     expect(r.data).toMatchObject({ ok: true, phase: 'released', version: APP_VERSION, head: s.tip })
     expect(r.data.summary).toBe(`main at ${s.tip.slice(0, 7)} carries ${APP_VERSION}: released as v${APP_VERSION}. Next: ${APP_VERSION} is released. 2 changes since: bump with release step bump.`)
     expect(r.data.lines).toEqual([
-      `CI on main at ${s.tip.slice(0, 7)}: green.`,
+      `The tagged commit's own CI at ${s.released.slice(0, 7)}: green.`,
       `Checkout: clean, on main at ${s.tip.slice(0, 7)}.`,
       `Release run for v${APP_VERSION}: succeeded, https://github.com/ijun17/centralu/actions/runs/60.`,
       `Merged since v${APP_VERSION} (2):`,
@@ -694,7 +1029,7 @@ describe.skipIf(process.platform === 'win32')('release', { timeout: 60_000 }, ()
     expect(remoteHas(s.origin, `refs/tags/v${NEXT}`)).toBeNull()
     const skipped = await call('release', { step: 'tag', path: s.work, skipRehearsal: true })
     expect(skipped.isError).toBe(false)
-    expect(skipped.data.lines[1]).toBe('Rehearsal: skipped (skipRehearsal: true).')
+    expect(skipped.data.lines).toContain('Rehearsal: skipped (skipRehearsal: true).')
   })
 
   it('tags main after a rehearsal, pushes only the tag, and answers the release run', async () => {

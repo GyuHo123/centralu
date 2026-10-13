@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +15,7 @@ import {
   stripAttribution,
   summarizeDescription,
   workflowCheckNames,
+  workflowEventJobs,
   // @ts-expect-error — plain .mjs of a Centralu app (no installs, no types, by the app rules)
 } from '../.centralu/apps/project-board/ci.mjs'
 
@@ -702,4 +704,44 @@ describe('failure excerpts across runners', () => {
   it.each(summaries)('takes %s when it is the first detailed failure in log order', (first) => {
     expect(failureLineIndex(['setup', first, ...summaries.filter((line) => line !== first)])).toBe(1)
   })
+})
+
+describe('release CI event audit', () => {
+  it('finds no event-dependent jobs in the release CI workflow', () => {
+    const jobs = workflowEventJobs(readFileSync(join(REPO_ROOT, '.github/workflows/build.yml'), 'utf8'))
+    expect(jobs.length).toBeGreaterThan(0)
+    expect(jobs.every((j: { reason: string | null }) => j.reason === null)).toBe(true)
+  })
+
+  it.each(["    if: github.event_name == 'push'", '    steps:\n      - run: |\n          if [ "$GITHUB_EVENT_NAME" = push ]; then echo check; fi', '    env:\n      BRANCH: ${{ github.ref }}'])('requires main for event-dependent job content: %s', (body) => {
+    expect(workflowEventJobs(`on:\n  push:\n  pull_request:\njobs:\n  verify:\n${body}\n`)).toEqual([
+      { names: ['verify'], unresolved: [], reason: 'uses event or branch context' },
+    ])
+  })
+})
+
+
+it('documents that called scripts need manual event review in both release guides', () => {
+  const workflow = 'on:\n  push:\n  pull_request:\njobs:\n  verify:\n    steps:\n      - run: node scripts/check.mjs\n'
+  expect(workflowEventJobs(workflow)[0].reason).toBeNull()
+  for (const file of ['docs/releasing.md', 'docs/releasing.ko.md']) {
+    const doc = readFileSync(join(REPO_ROOT, file), 'utf8')
+    expect(doc).toContain('The automated event audit does not follow scripts called by workflow steps')
+    expect(doc).toContain('Those need manual\nreview for event-dependent behavior')
+  }
+})
+
+
+it('keeps release bump builds out of the concurrency group cancelled by ordinary main pushes', () => {
+  const workflow = readFileSync(join(REPO_ROOT, '.github/workflows/build.yml'), 'utf8')
+  const template = /^ {2}group: (.+)$/m.exec(workflow)![1]!
+  const group = (message: string, sha: string, event = 'push', ref = 'refs/heads/main') => template.replace(/\$\{\{(.*?)\}\}/g, (_, expression: string) => String(runInNewContext(expression, {
+    github: { ref, sha, event_name: event, event: { head_commit: { message } } },
+    startsWith: (text: string, prefix: string) => text.startsWith(prefix),
+    format: (text: string, value: string) => text.replace('{0}', value),
+  })))
+  expect(group('fix(ui): one', 'a')).toBe(group('fix(ui): two', 'b'))
+  expect(group('chore(release): next (#900)', 'a')).not.toBe(group('fix(ui): two', 'b'))
+  expect(group('chore(release): next (#900)', 'a')).not.toBe(group('chore(release): later (#901)', 'b'))
+  expect(group('chore(release): next', 'a', 'pull_request', 'refs/pull/900/merge')).toBe(group('chore(release): next', 'b', 'pull_request', 'refs/pull/900/merge'))
 })
