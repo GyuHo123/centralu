@@ -267,6 +267,125 @@ verifies and starts the keeper from ([plans/thin-shell.md](plans/thin-shell.md) 
   upload cannot fail the job.
 - To check one by hand: `pnpm exec tsx scripts/content-manifest.mts verify <folder>`.
 
+## Local maintainer updates (#610)
+
+`pnpm local-update` normally builds and installs macOS arm64 content on the maintainer's
+selected machine. Only `content-manifest.json` (at most 60,000 UTF-8 bytes) is sent to
+`.github/workflows/local-content-sign.yml`; the command uploads no executables. This is
+an intended workflow, not a machine restriction: a signed manifest and its matching files
+can be copied to any other `darwin-arm64` machine trusting the key with a lower highest-seen
+version. The signature is not machine-bound. Full npm releases remain the public update path.
+
+```bash
+pnpm local-update --plan        # read the installed version and check the version bounds
+pnpm local-update --dry-run     # local build + throwaway signing; no dispatch or install
+pnpm local-update               # build, dispatch, wait for approval, verify, install
+# For a copy running from a different location:
+pnpm local-update --target /path/to/Centralu.app
+```
+
+The default target is `/Applications/Centralu.app`, exactly the copy `centralu install`
+replaces. The command builds in a disposable checkout below the system temporary directory,
+stamps the local version into the UI/host, Rust workspace and Tauri bundle, and runs the
+release's `tauri build --bundles app` path (including host and frontend bundling). It reuses
+a temporary Cargo cache for incremental updates. Dirty and unpushed source is allowed:
+the signed manifest records the original commit and dirty flag, base version, reported
+installed version, next release bound and a unique request id. Generated local version
+changes do not change that original dirty flag. The tracked and nonignored untracked files
+are copied; ignored build inputs are not. Keep the checkout still while the snapshot is taken.
+No host is launched and any build subprocess receives a temporary `CC_DATA_DIR`.
+
+**Version bounds are enforced twice**, before building and immediately before installing:
+`<current>.local.N` must be strictly above the installed copy and below the next release.
+For example, `0.1.0-beta.20 < 0.1.0-beta.20.local.1 < 0.1.0-beta.21` under the existing
+SemVer rules. `N` is positive and increments from the installed local copy; `--version`
+can request an explicit counter. Moving from `beta.19.local.128` to a `beta.20` checkout
+starts at `beta.20.local.1`. The next release increments the final numeric release
+identifier (`beta.20` → `beta.21`). Invalid versions, the old `-local.N` spelling,
+equal/older candidates and candidates at or beyond the next release are refused. This
+format needs a prerelease base: appending `.local.N` to a stable `1.2.3` is not SemVer
+and is refused rather than changing the shell/keeper's version rules.
+
+The command dispatches from `main`, so the workflow must first be merged there. A tiny job
+validates the JSON and uploads only those exact bytes; its summary shows the manifest hash,
+version and reported source provenance. It allows only format 1, shell 1, `darwin-arm64`,
+a bounded sorted file list containing the keeper and required host entry points, safe paths,
+file sizes, SHA-256 hashes and executable bits. Both validation passes read `APP_VERSION`
+from `packages/protocol/src/brand.ts` in the checked-out main commit, require the reported
+base to match it, and derive the next release and upper bound from it. Uploaded claims cannot
+choose a future base such as `beta.999`. The signing job validates again after download,
+then uses `signatureBytes` in `scripts/content-manifest.mts`, the same Ed25519 routine as
+`release.yml`. It installs no dependencies and executes no uploaded code. The unmodified
+workflow checks `GITHUB_REF == main` for real signing, uses the existing `CONTENT_SIGNING_KEY`,
+and waits on `npm-publish` approval. That check in workflow code is advisory; the enforcement
+is the environment's deployment policy, which since 2026-10-13 admits only the `main` branch
+and `v*` tags (a repository setting, not in this repository's files). A branch carrying an
+edited workflow cannot receive the key even after approval. Keep that policy if the
+environment is ever recreated.
+No npm token or private key reaches the local command; no shell identity, public keys or
+keeper trust rules change.
+
+**Local content signing (#610).** Whoever can dispatch on main and approve `npm-publish` can
+get arbitrary unreviewed dirty-tree code signed with the release key. The manifest's commit,
+dirty flag and installed version are self-reported; the signature proves the listed hashes,
+not a reviewed source checkout. Approval is exercised with the owner's `gh` token. The
+reviewed environment has one required reviewer, allows self-review, and lets administrators
+bypass protection: dispatch and approval can use the same token. A local signature is not
+machine-bound and verifies with the matching files on any `darwin-arm64` machine trusting
+the same key whose highest-seen version is lower. See [Signed content](security-boundaries.md#local-content-signing-610)
+for this trust boundary.
+
+The command prints the run URL and waits; it never approves itself. The maintainer or their
+agent reviews the validation job's summary and approves the pending deployment:
+
+```bash
+gh api repos/ijun17/centralu/actions/runs/RUN_ID/pending_deployments
+# Use the npm-publish environment id from that response:
+gh api --method POST repos/ijun17/centralu/actions/runs/RUN_ID/pending_deployments \
+  -F 'environment_ids[]=ENVIRONMENT_ID' -f state=approved \
+  -f comment='Approve the reviewed local content manifest'
+```
+
+Only `local-content-signature` is downloaded. The command verifies the exact manifest and
+all local files against `packaging/shell/keys.json`, carries the existing pinned shell from
+`shell.lock`, stages and checks the bundle, then copies it with `ditto` and the npm launcher's
+atomic swap. Rejection, a failed run, a mismatched signature or a newly installed higher
+version stops before replacement. The command keeps build artifacts in the temporary folder
+it prints. An interruption may leave its `lock` directory: remove only that directory after
+confirming the previous command has ended. The app and keeper are never stopped by the command.
+
+A window running from the replaced target checks its bundle on focus and every five seconds
+while visible and offers **Apply now**, even without an npm install event. Automatic apply
+keeps the existing setting and idle/typing checks. Existing keeper verification and handoff
+still decide what runs.
+
+**Applying this change for the first time.** A window built before this PR only checks the
+bundle after the host reports an npm install (`restart_required`). A local install emits
+no such host event, and replacing files on disk cannot replace the UI code already loaded
+in that window. If it already offers **Apply now**, use that button: no separate bootstrap
+restart is needed. Otherwise load the newly installed window once by closing and reopening
+it. With agents active, first enable Settings → Background → **Keep agents running after
+Centralu quits**, and use **Quit**, not **Quit completely**; otherwise wait until they finish.
+The reopened window attaches to the existing keeper; use its **Switch to this build** action
+to apply the new keeper/host. This is the first application of the new window code, not an
+additional **Restart completely**, a shell rebuild or a permission reset. Subsequent local
+installs are detected by that window and offer **Apply now**. There is no existing CLI or
+app-link endpoint for requesting the old window's relaunch; the command does not force it
+to exit or forge an npm-install event.
+
+To rehearse the workflow without the real key after it is available on the default branch:
+
+```bash
+# Use the manifest path printed by the local dry run; preserve its exact bytes.
+node --input-type=module -e 'import {readFileSync} from "node:fs"; console.log(JSON.stringify({manifest:readFileSync(process.argv[1],"utf8"),dry_run:"true"}))' \
+  /temporary/build/content/content-manifest.json | gh workflow run local-content-sign.yml --ref main --json
+```
+
+`dry_run` defaults to true, skips the environment and its secrets, signs with an in-memory
+throwaway key, and verifies the signature inside that process. Its artifact is deliberately
+untrusted and cannot be installed by `local-update`. CI steps can also be rehearsed locally:
+`node --experimental-strip-types scripts/content-manifest.mts sign-local /temporary/content-manifest.json --dry-run`.
+
 ## The Node remotes run (#82)
 
 A host the hub installs on another machine runs on a Node the hub downloads there, not on that
