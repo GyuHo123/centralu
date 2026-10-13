@@ -37,6 +37,7 @@ Linux 패키지는 번들 호스트를 한 번 더, 풀린 채로 AppImage 옆�
 ## CI가 하는 일
 
 - `.github/workflows/build.yml` — 모든 push와 PR에서 모든 플랫폼을 빌드하고 번들을 아티팩트로 업로드한다. 프로젝트에 Linux 머신을 가진 사람이 없으므로, Linux 빌드가 실제로 돌아가는 곳은 여기뿐이다. 써 보려면 아티팩트를 내려받는다. GitHub 아티팩트는 zip이라 실행 비트가 사라지므로, 압축을 푼 뒤 AppImage에 `chmod +x`를 해 준다.
+- macOS에서 CI는 `--bundles app`을 넘겨 빌드하고, 앱의 실행 비트와 서명을 보존한 `Centralu-app.tar.gz`를 업로드한다. DMG는 더 이상 만들거나 업로드하지 않는다(#628): `bundle_dmg.sh`의 간헐적인 실패가 정상 빌드를 막았고, 그 이미지를 사용하는 워크플로도 없기 때문이다. `release.yml`은 `release-npm.mts`로 앱을 따로 빌드한다. npm이 배포하는 것은 스테이징을 마친 `.app`이며 DMG가 아니므로, 릴리스에는 재시도할 DMG 단계도 없다.
 - 같은 워크플로가 **windows-x64**(#14)도 빌드해 아티팩트 두 개를 올린다: 포터블 폴더 `centralu-windows-x64`(`Centralu\centralu.exe` 옆에 `Centralu\resources\host\`)와 NSIS 설치 파일 `centralu-windows-x64-setup`(사용자별 설치, 관리자 권한 불필요). 둘 다 서명되어 있지 않다. 별도의 `windows tests` 잡이 `pnpm verify`의 네 부분을 돌리며, 다른 플랫폼처럼 모두 막는다(단위 테스트 단계는 #307의 W2 목록이 고쳐질 때까지 막지 않았다). npm 패키지 `@centralu/win32-x64`는 같은 폴더를 싣고, `release.yml`의 Windows 잡이 따로 다시 빌드한다(아래 [Windows](#windows-14-w3) 참고).
 - 같은 워크플로가 Playwright 시나리오(`e2e/`)를 ubuntu-24.04에서 데스크톱 앱이 그려지는 두 엔진, WebKit과 Chromium으로 돌린다. 엔진마다 나란히 도는 샤드로 나눈다(`e2e (webkit i/n)`, `e2e (chromium i/n)` 잡). 샤드가 실패하면 `e2e report`가 엔진마다 샤드 리포트를 트레이스가 담긴 HTML 리포트 하나로 합쳐, 엔진별 폴더가 든 `e2e-report` 아티팩트로 올린다.
 - `.github/workflows/release.yml` — **릴리스 그 자체.** `v*` 태그 push가 모든 패키지를 순서대로, 한 번의 실행에서 배포한다. `workflow_dispatch`는 태그 없이 같은 것을 리허설한다(`dry_run`, 기본 켜짐). 아래에서 설명한다.
@@ -137,7 +138,7 @@ pnpm release:npm --publish             # publishes @centralu/darwin-arm64, then 
 
 Linux와 Windows는 먼저 CI에서 나와야 한다 (`dry_run`을 끈 `release.yml`). 두 번째 명령은 핀된 플랫폼 패키지 중 하나라도 이 버전으로 레지스트리에 없는 동안에는 shim 배포를 거부하기 때문이다.
 
-릴리스 빌드는 `.app`만 만들고, 일반 `pnpm app` 빌드가 함께 만드는 `.dmg`는 만들지 않는다. 이것은 두 겹으로 의도된 것이다: 릴리스는 배포하는 것만 빌드해야 하고, DMG 단계는 코드와 무관한 이유로 실패할 수 있는 단계다 — Tauri의 `bundle_dmg.sh`는 `osascript`로 Finder를 조작하므로, 뒤에 GUI 세션이 없는 셸(에이전트, ssh 세션)은 Automation 접근이 거부되어 64로 종료한다. 올바르게 빌드되고 서명된 `.app`이 이미 놓여 있는데 그것 때문에 릴리스를 잃는 것은 할 만한 거래가 아니다. CI는 여전히 `.dmg`를 빌드하며, DMG의 진짜 고장은 거기서 드러나야 한다.
+릴리스 빌드는 `.app`만 만들고, 일반 `pnpm app` 빌드가 함께 만드는 `.dmg`는 만들지 않는다. 릴리스는 배포하는 것만 빌드해야 하고, Tauri의 `bundle_dmg.sh`는 코드와 무관한 이유로 실패할 수 있기 때문이다: `osascript`로 Finder를 조작하므로, GUI 세션이 없으면 Automation 접근이 거부될 수 있다. PR과 main의 CI도 이제 `.app`만 빌드한다. 기본 로컬 Tauri 설정에는 여전히 `.dmg`가 포함되지만, CI와 npm 릴리스 모두 DMG를 배포하지 않는다. 로컬 DMG는 `bundle-stage.mts`가 실행되기 전에 만들어지므로, 스테이징된 셸과 서명된 콘텐츠를 싣지 않는다.
 
 플래그:
 
