@@ -7322,7 +7322,7 @@ const QUESTIONS = [
   },
 ]
 
-test('Clicking an option to answer sends that answer to the session', async ({ page }) => {
+test('Clicking the option of a single-choice question answers at once, with no Answer click (#543)', async ({ page }) => {
   await setup(page, { projects: ['/tmp/alpha'] })
   await newSession(page, 'alpha', 'q')
   await emitEvent(page, 0, { type: 'question_request', requestId: 'q1', questions: [QUESTIONS[0]] })
@@ -7333,10 +7333,90 @@ test('Clicking an option to answer sends that answer to the session', async ({ p
   await expect(page.getByTestId('question-card')).toContainText('Warm')
 
   await page.getByTestId('question-option').filter({ hasText: 'Ramen' }).click()
-  await page.getByTestId('question-submit').click()
 
   await expect(page.getByTestId('chat-stream')).toContainText('Answer received: Ramen')
   await expect(page.getByTestId('question-card')).toHaveCount(0)
+})
+
+test('Enter on a focused option of a single-choice question answers it (#543)', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', 'q')
+  await emitEvent(page, 0, { type: 'question_request', requestId: 'q1', questions: [QUESTIONS[0]] })
+
+  await page.getByTestId('question-option').filter({ hasText: 'Kimbap' }).focus()
+  await page.keyboard.press('Enter')
+
+  await expect(page.getByTestId('chat-stream')).toContainText('Answer received: Kimbap')
+  await expect(page.getByTestId('question-card')).toHaveCount(0)
+})
+
+test('Two clicks, or a click and Enter, on a single-choice option send one answer even on a slow host (#543)', async ({
+  page,
+}) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', 'q')
+  // A host that takes its time: the card stays up while the answer is on its way
+  await page.evaluate(() => {
+    const m = (window as any).__mock
+    const calls: unknown[] = []
+    ;(window as any).__answerCalls = calls
+    const real = m.agents.answerQuestion.bind(m.agents)
+    m.agents.answerQuestion = async (...args: unknown[]) => {
+      calls.push(args)
+      await new Promise((r) => setTimeout(r, 400))
+      return real(...args)
+    }
+  })
+  await emitEvent(page, 0, { type: 'question_request', requestId: 'q1', questions: [QUESTIONS[0]] })
+
+  // Both land before React has re-rendered, so state alone could not tell the second one apart
+  await page.getByTestId('question-option').filter({ hasText: 'Kimbap' }).evaluate((el) => {
+    ;(el as HTMLButtonElement).click()
+    ;(el as HTMLButtonElement).click()
+  })
+  // A later click on the other option and Enter on the first one, still while it is sending
+  await page.getByTestId('question-option').filter({ hasText: 'Ramen' }).click()
+  await page.keyboard.press('Enter')
+
+  await expect(page.getByTestId('chat-stream')).toContainText('Answer received: Kimbap')
+  await expect(page.getByTestId('question-card')).toHaveCount(0)
+  expect(await page.evaluate(() => (window as any).__answerCalls.length)).toBe(1)
+  await expect(page.getByTestId('chat-stream')).not.toContainText('Answer received: Ramen')
+})
+
+test('A single-choice question still opens "Other" without sending, and Answer sends the typed text (#543)', async ({
+  page,
+}) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', 'q')
+  await emitEvent(page, 0, { type: 'question_request', requestId: 'q1', questions: [QUESTIONS[0]] })
+
+  await page.getByTestId('question-other').click()
+  await expect(page.getByTestId('question-other-input')).toBeFocused()
+  await expect(page.getByTestId('question-card')).toBeVisible()
+  await expect(page.getByTestId('chat-stream')).not.toContainText('Answer received')
+
+  await page.getByTestId('question-other-input').fill('Something else')
+  await page.getByTestId('question-submit').click()
+  await expect(page.getByTestId('chat-stream')).toContainText('Answer received: Something else')
+})
+
+test('A multiple-choice question keeps Answer: picking options sends nothing (#543)', async ({ page }) => {
+  await setup(page, { projects: ['/tmp/alpha'] })
+  await newSession(page, 'alpha', 'q')
+  await emitEvent(page, 0, {
+    type: 'question_request',
+    requestId: 'q1',
+    questions: [{ ...QUESTIONS[0], multiSelect: true }],
+  })
+
+  await page.getByTestId('question-option').filter({ hasText: 'Kimbap' }).click()
+  await page.getByTestId('question-option').filter({ hasText: 'Ramen' }).click()
+  await expect(page.getByTestId('question-card')).toBeVisible()
+  await expect(page.getByTestId('chat-stream')).not.toContainText('Answer received')
+
+  await page.getByTestId('question-submit').click()
+  await expect(page.getByTestId('chat-stream')).toContainText('Answer received: Kimbap+Ramen')
 })
 
 test('Multiple questions split into tabs, and sending requires answering all of them', async ({ page }) => {

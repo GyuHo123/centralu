@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { Question, QuestionAnswer } from '@cc/protocol'
 import { useStore } from '../../store/store.js'
 
@@ -20,6 +20,18 @@ import { useStore } from '../../store/store.js'
  * shows which still need one. A single question keeps the flat layout — a tab row of one
  * would be decoration.
  */
+/**
+ * Whether a click on an option is the whole answer (issue #543, item 5).
+ *
+ * That holds for exactly one question with one choice: the pick *is* the decision, and a
+ * separate Answer button was a second decision (`M P B B`, 2.6 s) with nothing left to
+ * decide. Several questions need every one answered before anything is sent, and a
+ * multiple-choice question has no way to say the last option was picked — those keep Answer.
+ */
+export function answersOnPick(questions: Question[]): boolean {
+  return questions.length === 1 && !questions[0]!.multiSelect
+}
+
 export function QuestionCard({
   sessionId,
   requestId,
@@ -43,6 +55,11 @@ export function QuestionCard({
   const [otherText, setOtherText] = useState<Record<number, string>>({})
   const [active, setActive] = useState(0)
   const [sending, setSending] = useState(false)
+  /*
+   * `sending` is state, so two clicks (or a click and Enter) handled before React re-renders
+   * would both still read it as false. The ref changes at once and gates every send.
+   */
+  const inFlight = useRef(false)
 
   const toggle = (qi: number, label: string, multi: boolean) => {
     setPicked((p) => {
@@ -70,15 +87,44 @@ export function QuestionCard({
   const ready = answered.every(Boolean)
   const tabbed = questions.length > 1
 
-  const submit = async () => {
-    if (!ready || sending) return
+  const quick = answersOnPick(questions)
+
+  const send = async (answers: QuestionAnswer[]) => {
+    if (inFlight.current) return
+    inFlight.current = true
     setSending(true)
-    const answers: QuestionAnswer[] = questions.map((q, i) => ({
-      question: q.question,
-      answers: answersFor(i),
-    }))
-    await answer(sessionId, requestId, answers)
-    setSending(false)
+    try {
+      await answer(sessionId, requestId, answers)
+    } finally {
+      inFlight.current = false
+      setSending(false)
+    }
+  }
+
+  const submit = async () => {
+    if (!ready) return
+    await send(
+      questions.map((q, i) => ({
+        question: q.question,
+        answers: answersFor(i),
+      })),
+    )
+  }
+
+  /*
+   * An option on a single-choice question answers at once. It is still recorded as the pick
+   * first, so a send that fails leaves the card showing what was chosen. "Other" never takes
+   * this path: it opens the text field, and Answer sends what is typed. A pick made while
+   * the previous answer is still on its way is ignored, so a double click sends once.
+   */
+  const pick = (qi: number, label: string, multi: boolean) => {
+    if (quick) {
+      if (inFlight.current) return
+      toggle(qi, label, multi)
+      void send([{ question: questions[qi]!.question, answers: [label] }])
+      return
+    }
+    toggle(qi, label, multi)
   }
 
   return (
@@ -146,7 +192,7 @@ export function QuestionCard({
                       key={o.label}
                       type="button"
                       data-testid="question-option"
-                      onClick={() => toggle(qi, o.label, q.multiSelect)}
+                      onClick={() => pick(qi, o.label, q.multiSelect)}
                       className={`rounded-md border px-2.5 py-1.5 text-left transition-colors ${
                         on ? 'border-ink-signal bg-surface-selected' : 'border-line hover:bg-surface-selected/50'
                       }`}
@@ -204,7 +250,9 @@ export function QuestionCard({
             ? 'Sends your choice back to the agent'
             : tabbed
               ? `${answered.filter(Boolean).length} of ${questions.length} answered`
-              : 'Choose an option'}
+              : quick
+                ? 'Click an option to answer, or write your own'
+                : 'Choose an option'}
         </span>
       </div>
     </div>
