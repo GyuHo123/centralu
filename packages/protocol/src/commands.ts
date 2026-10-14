@@ -1987,6 +1987,24 @@ export const RpcMethods = {
     result: UpdateStatus,
   },
   /**
+   * A window's answer to `update_apply_request` (#665): whether its "Apply now" could relaunch into the installed build
+   * right now, and why not. The first window that is ready gets a ticket; every other answer, and any answer after the
+   * host stopped asking, gets null.
+   */
+  'updates.answerApply': {
+    params: z.object({ requestId: z.string(), ready: z.boolean(), reason: z.string().optional(), version: z.string().optional() }),
+    result: z.object({ ticket: z.string().nullable() }),
+  },
+  /**
+   * The picked window's outcome (#665): `started` right before it relaunches, then with `error` when it did not, or
+   * with neither once the shell accepted the relaunch. A relaunching window may close before that last report; the
+   * host reads its connection ending as the relaunch only after `started`.
+   */
+  'updates.reportApply': {
+    params: z.object({ requestId: z.string(), ticket: z.string(), started: z.boolean().optional(), error: z.string().optional() }),
+    result: z.object({}),
+  },
+  /**
    * Reads screen settings (UiPreferences).
    *
    * **Lives on the startup path.** A slow response does not just end up being slow — the

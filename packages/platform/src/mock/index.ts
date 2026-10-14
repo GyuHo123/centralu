@@ -2807,6 +2807,52 @@ export class MockPlatform implements Platform {
       return { ...this.updateStatus }
     },
     apply: async () => this.installUpdate(),
+    // An agent's "Apply now" (#665): the window's half, answered the way update-apply.ts in the host does for one window
+    answerApply: async (a) => {
+      this.applyAnswers.push(a)
+      const waiting = this.applyWaits.get(a.requestId)
+      if (!waiting) return { ticket: null }
+      this.applyWaits.delete(a.requestId)
+      const ticket = a.ready ? `ticket-${a.requestId}` : null
+      waiting(ticket ? { ticket } : { error: a.reason ?? 'not ready' })
+      return { ticket }
+    },
+    reportApply: async (r) => {
+      this.applyReports.push(r)
+      // "Started" is the last word before the relaunch; the outcome is what follows it
+      if (r.started) return
+      this.applyOutcomes.get(r.ticket)?.(r.error)
+      this.applyOutcomes.delete(r.ticket)
+    },
+  }
+
+  /** For tests (#665): what the window answered to an agent's "Apply now", and what it reported after the go */
+  applyAnswers: { requestId: string; ready: boolean; reason?: string; version?: string }[] = []
+  applyReports: { requestId: string; ticket: string; started?: boolean; error?: string }[] = []
+  private applyWaits = new Map<string, (r: { ticket: string } | { error: string }) => void>()
+  private applyOutcomes = new Map<string, (error: string | undefined) => void>()
+  private applyRequests = 0
+
+  /**
+   * Scenario helper (#665): as if an agent called `update_centralu` with action "apply" and was allowed. The request
+   * goes out as the host sends it; the window that answers ready is told to go. Resolves with what the tool would say:
+   * the relaunch started, or why not.
+   */
+  async agentApply(): Promise<{ ok: true } | { ok: false; error: string }> {
+    const requestId = `apply-${++this.applyRequests}`
+    const answer = await new Promise<{ ticket: string } | { error: string }>((resolve) => {
+      this.applyWaits.set(requestId, resolve)
+      setTimeout(() => {
+        if (this.applyWaits.delete(requestId)) resolve({ error: 'No Centralu window answered.' })
+      }, 5_000)
+      this.emit({ type: 'update_apply_request', requestId })
+    })
+    if ('error' in answer) return { ok: false, error: answer.error }
+    const error = await new Promise<string | undefined>((resolve) => {
+      this.applyOutcomes.set(answer.ticket, resolve)
+      this.emit({ type: 'update_apply_go', requestId, ticket: answer.ticket })
+    })
+    return error ? { ok: false, error } : { ok: true }
   }
 
   private installIfAutomatic(): void {
@@ -2867,7 +2913,16 @@ export class MockPlatform implements Platform {
   private busyWatchers = new Set<(busy: boolean | null) => void>()
 
   readonly relaunch: RelaunchPort = {
-    check: async () => ({ ...this.relaunchCheck }),
+    /*
+     * The real shell reads the version out of the bundle on disk (#665 review), which an install just replaced: a test
+     * that says only `ready` gets the version it installed. One that names a `version` gets that one, an older bundle
+     * included.
+     */
+    check: async () => {
+      const c = { ...this.relaunchCheck }
+      const installed = this.updateStatus.phase === 'restart_required' ? this.updateStatus.latest : null
+      return c.ready && c.version === undefined && installed ? { ...c, version: installed } : c
+    },
     relaunch: async () => {
       if (this.relaunchFails) throw new Error(this.relaunchFails)
       this.relaunches++

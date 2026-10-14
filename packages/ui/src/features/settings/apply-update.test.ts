@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { UpdateStatus } from '@cc/protocol'
-import { applyOffer, installedUpdate, autoApplyDecision, updateStateText, type AutoApplyInput } from './apply-update.js'
+import { agentApplyVerdict, applyOffer, installedUpdate, autoApplyDecision, updateStateText, type AutoApplyInput } from './apply-update.js'
 
 /**
  * Applying an installed update (#352): what the update line offers, and when the automatic mode
@@ -17,7 +17,8 @@ const installed: UpdateStatus = {
   checkedAt: 1,
 }
 const OLD_WINDOW = '0.1.0-beta.10'
-const ready = { ready: true }
+/** The shell's answer when the bundle on disk is the installed build: ready, and the version its Info.plist names */
+const ready = { ready: true, version: '0.1.0-beta.11' }
 
 describe('external installs', () => {
   it('offers the newer bundle on disk even before an npm status arrives', () => {
@@ -58,6 +59,28 @@ describe('applyOffer', () => {
    * The relaunched window is the new build while the host is still the old one, which still says
    * `restart_required`. Offering a relaunch there would relaunch into the same build forever.
    */
+  /*
+   * #665 review: the shell's `ready` means only "another build than this window". Measured: host latest 0.3.0, window
+   * 0.2.0, bundle on disk 0.0.5 answered ready with version 0.0.5, and the button offered a relaunch into the past.
+   */
+  it('offers Apply now only into the installed version, read from the bundle, and only forward', () => {
+    const host = { ...installed, latest: '0.3.0' }
+    expect(applyOffer(host, '0.2.0', { ready: true, version: '0.0.5' })).toMatchObject({ kind: 'restart', reason: expect.stringContaining('0.0.5, not newer') })
+    expect(applyOffer(host, '0.2.0', { ready: true, version: '0.2.0' })).toMatchObject({ kind: 'restart' })
+    // Newer than the window but not what the host installed
+    expect(applyOffer(host, '0.2.0', { ready: true, version: '0.2.5' })).toMatchObject({ kind: 'restart', reason: expect.stringContaining('not the installed 0.3.0') })
+    // A bundle that does not say its version
+    expect(applyOffer(host, '0.2.0', { ready: true })).toMatchObject({ kind: 'restart' })
+    expect(applyOffer(host, '0.2.0', { ready: true, version: '0.3.0' })).toEqual({ kind: 'apply' })
+    // Equal by the comparison's rule, not as strings
+    expect(applyOffer(host, '0.2.0', { ready: true, version: 'v0.3.0+abc' })).toEqual({ kind: 'apply' })
+    // A local build orders as a prerelease identifier of its base
+    const local = { ...installed, latest: '0.4.0-beta.3.local.2' }
+    expect(applyOffer(local, '0.4.0-beta.3.local.1', { ready: true, version: '0.4.0-beta.3.local.2' })).toEqual({ kind: 'apply' })
+    expect(applyOffer(local, '0.4.0-beta.3.local.3', { ready: true, version: '0.4.0-beta.3.local.2' })).toEqual({ kind: 'current' })
+    expect(applyOffer({ ...installed, latest: '0.4.0-beta.3' }, '0.4.0-beta.3.local.1', { ready: true, version: '0.4.0-beta.3' })).toEqual({ kind: 'current' })
+  })
+
   it('offers nothing to a window that already runs the installed version', () => {
     expect(applyOffer(installed, '0.1.0-beta.11', ready)).toEqual({ kind: 'current' })
   })
@@ -152,5 +175,45 @@ describe('updateStateText', () => {
 
   it('says nothing was checked while no check has succeeded or failed', () => {
     expect(updateStateText({ ...everything, newer: false, error: null, latest: null }, null)).toBe('Not checked yet')
+  })
+})
+
+/**
+ * An agent's "Apply now" (#665) gets exactly the button's checks: what the update line would offer, read fresh from
+ * the shell, with a reason the agent can pass on whenever the button would not be there.
+ */
+describe('agentApplyVerdict', () => {
+  const port = (check: { ready: boolean; reason?: string; version?: string } | Error) => ({
+    check: async () => {
+      if (check instanceof Error) throw check
+      return check
+    },
+    relaunch: async () => {},
+    watchBusy: () => () => {},
+  })
+
+  it('is ready exactly when the update line offers Apply now', async () => {
+    expect(applyOffer(installed, OLD_WINDOW, ready)).toEqual({ kind: 'apply' })
+    expect(await agentApplyVerdict(port(ready), installed, OLD_WINDOW)).toEqual({ ready: true, version: installed.latest })
+    expect(await agentApplyVerdict(port({ ready: true, version: '0.1.0-beta.12' }), null, OLD_WINDOW)).toEqual({ ready: true, version: '0.1.0-beta.12' })
+  })
+
+  it('says why not, for every case the button is not offered', async () => {
+    const cases: [Parameters<typeof agentApplyVerdict>, string][] = [
+      [[undefined, installed, OLD_WINDOW], 'cannot relaunch itself'],
+      [[port({ ready: false }), null, OLD_WINDOW], 'No update is installed'],
+      [[port({ ready: false }), { ...installed, phase: 'idle' }, OLD_WINDOW], 'No update is installed'],
+      // The review's case: the host installed one version, the bundle on disk is an older build
+      [[port({ ready: true, version: '0.0.5' }), installed, OLD_WINDOW], 'not newer than this window'],
+      [[port(ready), { ...installed, phase: 'updating' }, OLD_WINDOW], 'still running'],
+      [[port(ready), installed, installed.latest!], 'already runs'],
+      [[port({ ready: false, reason: 'the bundle was not replaced' }), installed, OLD_WINDOW], 'the bundle was not replaced'],
+      [[port(new Error('shell gone')), installed, OLD_WINDOW], 'shell gone'],
+    ]
+    for (const [args, why] of cases) {
+      const v = await agentApplyVerdict(...args)
+      expect(v.ready).toBe(false)
+      expect(v.ready === false && v.reason).toContain(why)
+    }
   })
 })

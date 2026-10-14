@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { ApprovalDetail } from '@cc/protocol'
-import { agentStartQuestion, findMatchingRule, matchesRule, previewMatches, projectAccessQuestion, projectCreateQuestion, suggestMatcher } from './approval.js'
+import { CENTRALU_APPLY, CENTRALU_APPLY_QUESTION, isCentraluApply, type ApprovalDetail } from '@cc/protocol'
+import { agentStartQuestion, centraluUpdateQuestion, findMatchingRule, matchesRule, previewMatches, projectAccessQuestion, projectCreateQuestion, suggestMatcher } from './approval.js'
 
 describe('the new-project question (#515)', () => {
   it('names the linked machine whose disk the path is on, and no machine for this computer (#82 phase 4)', () => {
@@ -111,5 +111,22 @@ describe('rule preview (making the result visible instead of limiting what can b
     expect(matchesRule('rm -rf /', suggested)).toBe(false)
     // Appending * is not safe either — chaining breaks through it
     expect(matchesRule('rm -rf node_modules; rm -rf /', suggested)).toBe(false)
+  })
+})
+
+describe('update cards (#581, #665)', () => {
+  it('says what check and install ask', () => {
+    expect(centraluUpdateQuestion({ kind: 'centralu_update', action: 'check' })).toBe('Allow this session to check for a Centralu update?')
+    expect(centraluUpdateQuestion({ kind: 'centralu_update', action: 'install' })).toBe('Allow this session to install a Centralu update?')
+  })
+
+  // #665 review: "running agents keep going" alone hid what the host switch right after the relaunch stops
+  it('says that applying relaunches the window and that the host switch after it stops long Centralu tool calls', () => {
+    expect(CENTRALU_APPLY_QUESTION).toContain('running agents keep going')
+    expect(CENTRALU_APPLY_QUESTION).toContain('switches the agent host')
+    expect(CENTRALU_APPLY_QUESTION).toContain('after 10 seconds')
+    expect(CENTRALU_APPLY_QUESTION).toContain('child agents')
+    expect(isCentraluApply({ kind: 'other', raw: CENTRALU_APPLY_QUESTION, about: CENTRALU_APPLY })).toBe(true)
+    expect(isCentraluApply({ kind: 'other', raw: 'a tool the adapter did not recognise' })).toBe(false)
   })
 })

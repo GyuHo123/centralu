@@ -102,6 +102,11 @@ export function agentStartQuestion(d: Extract<ApprovalDetail, { kind: 'agent_sta
   return `Start ${d.tool}${d.model ? ` (${d.model})` : ''} in ${where} with ${d.preset} permissions, to ${d.text}?`
 }
 
+/** The question an update card asks (#581) */
+export function centraluUpdateQuestion(d: Extract<ApprovalDetail, { kind: 'centralu_update' }>): string {
+  return `Allow this session to ${d.action === 'check' ? 'check for' : 'install'} a Centralu update?`
+}
+
 /**
  * The question a new-project card asks (#515) — the full path is the whole of what is being agreed to, so it is in
  * the sentence wherever the question stands: the card, the conversation row, a notification.
