@@ -1736,6 +1736,48 @@
       "breaches": []
     },
     {
+      "id": "open-file.mouse-tool-card",
+      "task": "Open a file the agent named",
+      "path": "mouse",
+      "access": "discoverable",
+      "operators": "H M P B B",
+      "counts": {
+        "K": 0,
+        "P": 1,
+        "B": 2,
+        "H": 1,
+        "M": 1,
+        "R": 1
+      },
+      "seconds": 3.07,
+      "waitMs": 370,
+      "travelPx": 167,
+      "steps": [
+        {
+          "kind": "click",
+          "label": "tool-card",
+          "operators": "H M P B B",
+          "seconds": 3.07,
+          "pointer": {
+            "D": 167,
+            "W": 21,
+            "ID": 3.17
+          }
+        },
+        {
+          "kind": "wait",
+          "label": "goal",
+          "operators": "R",
+          "seconds": 0,
+          "waitMs": 370
+        }
+      ],
+      "notes": [
+        "The path in a tool card (\"Read: /repo/packages/…\") is a link (#543 item 6); it cost the tree walk below before"
+      ],
+      "breaches": []
+    },
+    {
       "id": "open-file.mouse-tree",
       "task": "Open a file the agent named",
       "path": "mouse",
