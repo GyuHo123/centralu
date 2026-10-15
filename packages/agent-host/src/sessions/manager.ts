@@ -24,7 +24,8 @@ import { contextAt, labelOf, lastActiveOf, orchestratorMemory, previewOf, timeOf
 import { RECONNECTING_FLAG_MS, interruptionAfter } from './interruptions.js'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { existsSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { foldsPathCase } from '../os.js'
+import { existsSync, lstatSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { exec } from 'node:child_process'
 import type {
   CacheStats,
@@ -130,6 +131,10 @@ import {
   type Worktree,
   gitWorktreeDirty,
   gitWorktreeRemove,
+  gitWorktreePrune,
+  gitWorktreePaths,
+  gitWorktreeList,
+  gitBranchAhead,
 } from '../dev-services/git.js'
 import {
   copyTree,
@@ -523,6 +528,34 @@ function canonicalPath(path: string): string {
   } catch {
     const parent = dirname(full)
     return parent === full ? full : join(canonicalPath(parent), basename(full))
+  }
+}
+
+/** A path as a comparison key: real long name, forward slashes, no trailing slash, case-folded on Windows (git prints its own spelling) */
+function pathKey(path: string): string {
+  const key = canonicalPath(path).replace(/\\/g, '/').replace(/\/+$/, '')
+  return foldsPathCase() ? key.toLowerCase() : key
+}
+
+/**
+ * Whether a worktree folder is there, gone, or cannot be judged (#715). Gone means `lstat` failed with ENOENT and
+ * the folder above it is there: an error of any other kind (EACCES, EIO), or a missing parent (a volume not mounted),
+ * says nothing about the work inside, so the caller must not treat the folder as gone.
+ */
+function worktreeFolderState(path: string): 'present' | 'gone' | { unreachable: string } {
+  try {
+    lstatSync(path)
+    return 'present'
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') return { unreachable: `${code ?? 'error'}: ${(e as Error).message}` }
+  }
+  const parent = dirname(path)
+  try {
+    if (statSync(parent).isDirectory()) return 'gone'
+    return { unreachable: `${parent} is not a folder` }
+  } catch (e) {
+    return { unreachable: `${parent} cannot be read (${(e as NodeJS.ErrnoException).code ?? 'error'}), so the folder may be on a volume that is not mounted` }
   }
 }
 
@@ -3017,18 +3050,18 @@ export class SessionManager {
    * delete knows that layout (the Claude SDK's `deleteSession`). Left in place it is also a second way back — the
    * tool, and **+ → Past conversations**, still have it.
    */
-  async trashSession(sessionId: string, removeWorktree = false, removeExternal = false, recovery?: WorktreeRecovery): Promise<void> {
+  async trashSession(sessionId: string, removeWorktree = false, removeExternal = false, recovery?: WorktreeRecovery, fromCleanup = false): Promise<void> {
     const pending = this.trashing.get(sessionId)
     if (pending) {
       /*
        * A worktree cleanup cannot ride on a delete that started first (#647): that one writes a trash record without
        * the recovery snapshot, and removing the worktree after it would leave nothing a restore could bring back.
        */
-      if (recovery) throw Object.assign(new Error('The session is already being deleted without its recovery snapshot'), { code: 'internal' })
+      if (recovery || fromCleanup) throw Object.assign(new Error('The session is already being deleted without its recovery snapshot'), { code: 'internal' })
       return pending
     }
     // The first request owns the options; concurrent sidebar/agent deletes share its result.
-    const deleting = this.trashSessionOnce(sessionId, removeWorktree, removeExternal, recovery)
+    const deleting = this.trashSessionOnce(sessionId, removeWorktree, removeExternal, recovery, fromCleanup)
     this.trashing.set(sessionId, deleting)
     try {
       await deleting
@@ -3037,8 +3070,8 @@ export class SessionManager {
     }
   }
 
-  private async trashSessionOnce(sessionId: string, removeWorktree: boolean, removeExternal: boolean, recovery?: WorktreeRecovery): Promise<void> {
-    if (this.worktreeCleanup.has(sessionId) && !recovery) throw Object.assign(new Error('The session worktree is being removed'), { code: 'internal' })
+  private async trashSessionOnce(sessionId: string, removeWorktree: boolean, removeExternal: boolean, recovery?: WorktreeRecovery, fromCleanup = false): Promise<void> {
+    if (this.worktreeCleanup.has(sessionId) && !recovery && !fromCleanup) throw Object.assign(new Error('The session worktree is being removed'), { code: 'internal' })
     const m = this.meta.get(sessionId)
     if (!m) {
       // Already in the trash, or never here: nothing to move. Say it is gone anyway, so a screen holding a stale row lets go
@@ -7418,7 +7451,7 @@ export class SessionManager {
           const r = await this.cleanUpWorktreeChild(child)
           if (!r.ok) return r
           if (d) this.delegations.delete(key)
-          return { ok: true, state: 'deleted', sessionId: child.id, sessionName: child.name, tool: child.tool, branch: r.branch, setAside: r.setAside, ...(r.warning ? { warning: r.warning } : {}) }
+          return { ok: true, state: 'deleted', sessionId: child.id, sessionName: child.name, tool: child.tool, branch: r.branch, setAside: r.setAside, ...(r.warning ? { warning: r.warning } : {}), ...(r.note ? { note: r.note } : {}) }
         }
         case 'send': {
           if (!presetWithin(child.permissionPreset, caller.permissionPreset)) {
@@ -7609,16 +7642,19 @@ export class SessionManager {
   }
 
   /** #608: the parent decides; local work follows the session into the trash in every preset. */
-  private async cleanUpWorktreeChild(target: SessionInfo): Promise<{ ok: true; branch: string; setAside: WorktreeRecovery; warning?: string } | { ok: false; error: string }> {
+  private async cleanUpWorktreeChild(target: SessionInfo): Promise<{ ok: true; branch: string; setAside: { changedFiles: number; commits: number }; warning?: string; note?: string } | { ok: false; error: string }> {
     if (!target.worktree?.base || !target.projectId) {
       return { ok: false, error: `"${target.name}" works in no worktree of its own, so there is nothing to clean up — the person deletes a session` }
     }
     if (target.state === 'working' || target.state === 'waiting_approval' || this.agentRuns.has(target.id) || sessionBusy({ ...target, live: this.handles.has(target.id) })) {
       return { ok: false, error: `"${target.name}" is still working — stop it or wait first` }
     }
-    if (!existsSync(target.worktree.path)) {
-      return { ok: false, error: `The worktree folder for "${target.name}" is missing: ${target.worktree.path}. Restore the folder before cleanup; its branch has been left in place.` }
+    // A folder that is already gone holds no work to lose (#715): cleanup goes on without a snapshot
+    const folder = worktreeFolderState(target.worktree.path)
+    if (typeof folder === 'object') {
+      return { ok: false, error: `Cannot reach the worktree folder for "${target.name}" (${target.worktree.path}): ${folder.unreachable}. Nothing was removed; try again once the folder can be read.` }
     }
+    const folderGone = folder === 'gone'
     if (this.resuming.has(target.id) || this.deferredRestarts.has(target.id)) return { ok: false, error: `"${target.name}" is waking or restarting — wait for it first` }
     if (this.worktreeCleanup.has(target.id)) return { ok: false, error: 'This worktree is already being removed' }
     // A sidebar delete already under way keeps the worktree in place; it is not taken away behind it (#647)
@@ -7641,6 +7677,7 @@ export class SessionManager {
         this.handles.delete(target.id)
         this.running.delete(target.id)
       }
+      if (folderGone) return await this.cleanUpGoneWorktree(target, cwd, branch, path)
       const trunk = await gitRevParse(cwd, this.trunkOf(target.projectId) ?? 'HEAD')
       const setAside = await saveWorktreeRecovery(target.id, path, trunk ?? 'missing-trunk', branch)
       if (setAside.changedFiles || setAside.commits) {
@@ -7671,6 +7708,53 @@ export class SessionManager {
     } finally {
       this.worktreeCleanup.delete(target.id)
     }
+  }
+
+  /**
+   * Cleanup of a child whose worktree folder is already gone (#715): `gh pr merge --delete-branch` run beside it, or a
+   * person, removed it. Nothing is left to save. The session goes to the trash, git's stale entry is pruned, and the
+   * branch stays when it holds commits the trunk lacks (or when that cannot be told), so no work is lost with it.
+   * Runs inside cleanUpWorktreeChild, which holds the cleanup mark.
+   */
+  private async cleanUpGoneWorktree(
+    target: SessionInfo,
+    cwd: string,
+    branch: string,
+    path: string,
+  ): Promise<{ ok: true; branch: string; setAside: { changedFiles: number; commits: number }; note: string }> {
+    const setAside = { changedFiles: 0, commits: 0 }
+    const gone = `The worktree folder was already gone (${path})`
+    await this.trashSession(target.id, false, false, undefined, true)
+    const key = pathKey(path)
+    const listedNow = async () => (await gitWorktreePaths(cwd)).some((p) => pathKey(p) === key)
+    const had = await listedNow().catch(() => false)
+    let entry: string
+    try {
+      await gitWorktreePrune(cwd)
+      // Said only when git no longer lists it afterwards (a locked entry stays)
+      entry = !had ? "git had no entry for it" : (await listedNow().catch(() => true)) ? "git's entry for it is still listed" : "git's entry was pruned"
+    } catch (e) {
+      return { ok: true, branch, setAside, note: `${gone}, but git's entry for it could not be pruned (${(e as Error).message}); branch ${branch} was left.` }
+    }
+    const head = `${gone}; the session is in the trash and ${entry}.`
+    if ((await gitRevParse(cwd, `refs/heads/${branch}`)) === null) {
+      return { ok: true, branch, setAside, note: `${head} Branch ${branch} was already gone.` }
+    }
+    const elsewhere = (await gitWorktreeList(cwd).catch(() => [])).find((w) => w.branch === branch)
+    if (elsewhere) {
+      return { ok: true, branch, setAside, note: `${head} Branch ${branch} was kept: it is checked out at ${elsewhere.path}.` }
+    }
+    const ahead = await gitBranchAhead(cwd, branch, this.trunkOf(target.projectId!) ?? 'HEAD')
+    if (ahead === null || ahead > 0) {
+      return { ok: true, branch, setAside, note: `${head} Branch ${branch} was kept${ahead ? ` because it has ${ahead} commit${ahead === 1 ? '' : 's'} the trunk lacks` : ''}.` }
+    }
+    try {
+      await gitBranchDelete(cwd, branch, this.gitTrust(target.projectId!))
+      await clearRecoveredBranchMark(cwd, branch).catch(() => {})
+    } catch (e) {
+      return { ok: true, branch, setAside, note: `${head} Branch ${branch} was left: ${(e as Error).message}.` }
+    }
+    return { ok: true, branch, setAside, note: `${head} The merged branch ${branch} was removed.` }
   }
 
   /**

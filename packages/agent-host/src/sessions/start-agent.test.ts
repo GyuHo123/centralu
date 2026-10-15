@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PermissionPreset } from '@cc/protocol'
 import { AGENT_TOOLS, runOrchestratorTool } from './orchestrator-tools.js'
@@ -1100,13 +1100,110 @@ describe('starting another agent in the same project', () => {
       const next = new SessionManager(w.store, w.adapters, () => {})
       try {
         expect(next.listSessions().find((row) => row.id === c.id)?.worktree).toEqual(worktree)
-        expect(await next.agentSession(s, { sessionId: c.id, action: 'delete' })).toMatchObject({ ok: false, error: expect.stringContaining('worktree folder for') })
-        expect(w.store.trashedSession(c.id)).toBeNull()
-        expect(w.store.listSessions().find((row) => row.id === c.id)?.worktree).toEqual(worktree)
-        expect(git(w.caller.path, 'rev-parse', '--verify', 'refs/heads/feat/missing')).not.toBe('')
+        // The folder is gone, so there is nothing to lose: the session goes to the trash (#715)
+        expect(await next.agentSession(s, { sessionId: c.id, action: 'delete' })).toMatchObject({ ok: true, state: 'deleted', note: expect.stringContaining('already gone') })
+        expect(w.store.trashedSession(c.id)).not.toBeNull()
+        expect(next.listSessions().some((row) => row.id === c.id)).toBe(false)
       } finally {
         await next.disposeAll()
       }
+    })
+
+    describe('whose folder is already gone (#715)', () => {
+      const startGone = async (branch: string, commit: boolean) => {
+        repo()
+        allowProject()
+        const s = await session()
+        await w.mgr.startAgent(s, { task: 'worktree task', branch, wait: false })
+        const c = childrenOf(s)[0]!
+        handleOf(c.id)!.answer('done')
+        await w.mgr.agentSession(s, { sessionId: c.id, action: 'wait' })
+        if (commit) {
+          writeFileSync(join(c.worktree!.path, 'work.txt'), 'work')
+          git(c.worktree!.path, 'add', '.')
+          git(c.worktree!.path, 'commit', '-qm', 'work')
+        }
+        const real = same(c.worktree!.path)
+        rmSync(c.worktree!.path, { recursive: true, force: true })
+        return { s, c, real }
+      }
+      // git prints forward slashes and long names; the test's temp path may be a Windows 8.3 short name with backslashes
+      const same = (path: string) => {
+        const real = realpathSync.native(path).replace(/\\/g, '/')
+        return process.platform === 'win32' ? real.toLowerCase() : real
+      }
+      const listed = () =>
+        git(w.caller.path, 'worktree', 'list', '--porcelain')
+          .split('\n')
+          .filter((line) => line.startsWith('worktree '))
+          .map((line) => line.slice('worktree '.length).trim().replace(/\\/g, '/'))
+          .map((path) => (process.platform === 'win32' ? path.toLowerCase() : path))
+      const branches = () => git(w.caller.path, 'branch', '--format=%(refname:short)').split('\n')
+
+      it('trashes the session, prunes git\'s entry and keeps a branch with commits the trunk lacks', async () => {
+        const { s, c, real } = await startGone('feat/gone-ahead', true)
+        expect(listed()).toContain(real)
+        const r = await w.mgr.agentSession(s, { sessionId: c.id, action: 'delete' })
+        expect(r).toMatchObject({ ok: true, state: 'deleted', branch: 'feat/gone-ahead', note: expect.stringMatching(/already gone.*kept/) })
+        expect(w.store.trashedSession(c.id)).not.toBeNull()
+        expect(listed()).not.toContain(real)
+        expect(branches()).toContain('feat/gone-ahead')
+      })
+
+      it('leaves a live second worktree listed when git prunes the stale one', async () => {
+        const { s, c, real } = await startGone('feat/gone-first', true)
+        const live = join(dirname(c.worktree!.path), 'live-second')
+        git(w.caller.path, 'worktree', 'add', '-q', '-b', 'feat/live-second', live)
+        const liveReal = same(live)
+        expect(await w.mgr.agentSession(s, { sessionId: c.id, action: 'delete' })).toMatchObject({ ok: true, state: 'deleted', note: expect.stringContaining('git\'s entry was pruned') })
+        expect(listed()).not.toContain(real)
+        expect(listed()).toContain(liveReal)
+        expect(existsSync(live)).toBe(true)
+      })
+
+      it('keeps a branch that another worktree has checked out, and says where', async () => {
+        const { s, c } = await startGone('feat/gone-shared', false)
+        const other = join(dirname(c.worktree!.path), 'holds-branch')
+        // The stale entry still claims the branch until it is pruned; -f takes it over
+        git(w.caller.path, 'worktree', 'add', '-q', '-f', other, 'feat/gone-shared')
+        const r = await w.mgr.agentSession(s, { sessionId: c.id, action: 'delete' })
+        expect(r).toMatchObject({ ok: true, state: 'deleted', note: expect.stringMatching(/was kept: it is checked out at .*holds-branch/) })
+        expect(branches()).toContain('feat/gone-shared')
+        expect(existsSync(other)).toBe(true)
+      })
+
+      it('refuses when the folder is missing but the folder above it is too (a volume not mounted)', async () => {
+        const { s, c } = await startGone('feat/gone-unmounted', true)
+        rmSync(dirname(c.worktree!.path), { recursive: true, force: true })
+        const r = await w.mgr.agentSession(s, { sessionId: c.id, action: 'delete' })
+        expect(r).toMatchObject({ ok: false, error: expect.stringContaining('Cannot reach the worktree folder') })
+        expect(w.store.trashedSession(c.id)).toBeNull()
+        expect(branches()).toContain('feat/gone-unmounted')
+      })
+
+      it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('refuses when the folder cannot be read for a reason other than ENOENT', async () => {
+        const { s, c } = await startGone('feat/gone-eacces', true)
+        const parent = dirname(c.worktree!.path)
+        chmodSync(parent, 0o000)
+        try {
+          const r = await w.mgr.agentSession(s, { sessionId: c.id, action: 'delete' })
+          expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/Cannot reach the worktree folder.*EACCES/) })
+        } finally {
+          chmodSync(parent, 0o755)
+        }
+        expect(w.store.trashedSession(c.id)).toBeNull()
+        expect(branches()).toContain('feat/gone-eacces')
+      })
+
+      it('removes a branch that holds nothing the trunk lacks', async () => {
+        const { s, c, real } = await startGone('feat/gone-merged', false)
+        expect(listed()).toContain(real)
+        const r = await w.mgr.agentSession(s, { sessionId: c.id, action: 'delete' })
+        expect(r).toMatchObject({ ok: true, state: 'deleted', note: expect.stringContaining('already gone') })
+        expect(w.store.trashedSession(c.id)).not.toBeNull()
+        expect(listed()).not.toContain(real)
+        expect(branches()).not.toContain('feat/gone-merged')
+      })
     })
 
     it('prepares installed JS dependencies before the child starts, without a configured setup command', async () => {
