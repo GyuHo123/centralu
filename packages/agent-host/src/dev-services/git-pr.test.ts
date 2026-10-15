@@ -1,0 +1,131 @@
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { delimiter, join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { __forgetPrograms } from '../tool-launch.js'
+import { gitBranchPr } from './git.js'
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const until = async (ok: () => boolean, ms: number) => {
+  const end = Date.now() + ms
+  while (!ok()) {
+    if (Date.now() > end) throw new Error('timed out')
+    await new Promise((r) => setTimeout(r, 20))
+  }
+}
+
+/**
+ * A gh that runs the script `pr` in its working directory with Node. On Windows it is Node itself under gh's name (an
+ * .exe has to be found on PATH as gh.exe); elsewhere a shell script that execs Node, since a copied Node binary may not
+ * start at all (Homebrew's links its library by a relative path).
+ */
+function fakeGh(bin: string): void {
+  if (process.platform === 'win32') {
+    const gh = join(bin, 'gh.exe')
+    try {
+      linkSync(process.execPath, gh)
+    } catch {
+      copyFileSync(process.execPath, gh)
+    }
+    return
+  }
+  const gh = join(bin, 'gh')
+  writeFileSync(gh, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$PWD/pr"\n`)
+  chmodSync(gh, 0o755)
+}
+
+/*
+ * The host's merge check runs gh in the project's folder, and stopping the host aborts it (#368). Windows refuses to
+ * remove a folder a running process works in, so an abort must not return while gh is still there, and gh's own
+ * children (it runs git) must end with it. The gh here (`fakeGh`) runs the
+ * script named `pr` in its working directory, which starts a child of its own and waits. The child is detached: a
+ * child Node starts otherwise is in Node's job and ends with it on Windows, which gh's (a Go program's) are not.
+ * Its end is checked on Windows only: elsewhere gh is in the host's process group, which `killTree` leaves alone,
+ * and a folder a process works in can be removed.
+ */
+describe('gh stopped by an abort (#368)', () => {
+  let root: string
+  let childPid: number | undefined
+  afterEach(() => {
+    if (childPid !== undefined && alive(childPid)) process.kill(childPid)
+    vi.unstubAllEnvs()
+    __forgetPrograms()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 })
+  })
+
+  // Starting a Node binary as gh, which then starts another, takes seconds on a loaded machine: the bound is that wait's
+  it('ends gh and what it started, and returns once gh is gone', { timeout: 30_000 }, async () => {
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-gh-abort-')))
+    const bin = join(root, 'bin')
+    const project = join(root, 'project')
+    mkdirSync(bin)
+    mkdirSync(project)
+    fakeGh(bin)
+    // Whatever a folder above says, `pr` is CommonJS
+    writeFileSync(join(project, 'package.json'), '{"type":"commonjs"}')
+    writeFileSync(join(project, 'pr'), [
+      "const { spawn } = require('node:child_process')",
+      "const { writeFileSync } = require('node:fs')",
+      // The child works elsewhere, so the folder test below waits on gh alone
+      `const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: ${JSON.stringify(bin)}, stdio: 'ignore', detached: true })`,
+      "writeFileSync('pids', JSON.stringify([process.pid, child.pid]))",
+      'setInterval(() => {}, 1000)',
+    ].join('\n'))
+    vi.stubEnv('PATH', `${bin}${delimiter}${process.env.PATH ?? ''}`)
+    __forgetPrograms()
+
+    const stop = new AbortController()
+    const answer = gitBranchPr(project, 'feat/x', stop.signal)
+    await until(() => existsSync(join(project, 'pids')), 10_000)
+    const [ghPid, child] = JSON.parse(readFileSync(join(project, 'pids'), 'utf8')) as [number, number]
+    childPid = child
+    expect(alive(child)).toBe(true)
+    stop.abort()
+    expect(await answer).toBeNull()
+    expect(alive(ghPid)).toBe(false)
+    // No retries: Windows refuses (EBUSY) while gh still works in it
+    rmSync(project, { recursive: true })
+    if (process.platform === 'win32') await until(() => !alive(child), 5_000)
+  })
+
+  // macOS and Linux: the tree kill does not reach a child that left gh's group, and one holding gh's output kept
+  // `close` from coming for as long as it ran, which held the host's shutdown with it
+  it.skipIf(process.platform === 'win32')('returns once gh is gone even while a child it started holds its output', { timeout: 30_000 }, async () => {
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-gh-abort-')))
+    const bin = join(root, 'bin')
+    const project = join(root, 'project')
+    mkdirSync(bin)
+    mkdirSync(project)
+    fakeGh(bin)
+    writeFileSync(join(project, 'package.json'), '{"type":"commonjs"}')
+    writeFileSync(join(project, 'pr'), [
+      "const { spawn } = require('node:child_process')",
+      "const { writeFileSync } = require('node:fs')",
+      // Detached, so out of gh's group, and with gh's stdout and stderr as its own
+      `const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: ${JSON.stringify(bin)}, stdio: ['ignore', 'inherit', 'inherit'], detached: true })`,
+      "writeFileSync('pids', JSON.stringify([process.pid, child.pid]))",
+      'setInterval(() => {}, 1000)',
+    ].join('\n'))
+    vi.stubEnv('PATH', `${bin}${delimiter}${process.env.PATH ?? ''}`)
+    __forgetPrograms()
+
+    const stop = new AbortController()
+    const answer = gitBranchPr(project, 'feat/x', stop.signal)
+    await until(() => existsSync(join(project, 'pids')), 20_000)
+    const [ghPid, child] = JSON.parse(readFileSync(join(project, 'pids'), 'utf8')) as [number, number]
+    childPid = child
+    stop.abort()
+    const started = Date.now()
+    expect(await answer).toBeNull()
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(alive(ghPid)).toBe(false)
+  })
+})

@@ -611,6 +611,20 @@ fails if any other source starts git. A read for an untrusted project gets:
 - `--no-textconv --no-ext-diff` on `diff`, `show` and `log`, and `--ignore-submodules=all` on
   `status` and `diff`: a submodule has its own config, whose drivers were not listed.
 
+The listing is its own git process before each read. Saving a worktree's work before its deletion
+(#608) makes about fifteen calls in one folder, so its reads share one listing per repository
+(`gitFilterListings`, #368). What the shared listing covers: the reads of refs, history, trees and
+the index (`rev-parse`, `rev-list`, `log --raw`, `ls-tree`, `ls-files`, `diff --cached`, `bundle
+create`), none of which runs a filter. The one call of the save that runs clean filters, `add -A`
+into the save's private index, comes after the history scans and the bundle, which can take
+minutes. The cleanup stops only the session being deleted: the project's other sessions keep
+running, can write a driver into the configuration the worktree shares, and the worktree's
+`.gitattributes` can name it. So `read-tree` and `add -A` take a listing of their own, made right
+before them. What is left is the window every read before trust already had between its listing
+and the call. A planted configuration is on disk before the save starts and is turned off as
+before. Calls that change which configuration git reads (`GIT_DIR`, `GIT_CONFIG_*`) never share
+a listing: it is keyed by folder alone.
+
 Command-line configuration outranks every configuration file and is handed to the git processes
 git starts itself, so an included file or a nested call cannot undo it. The reads this covers are
 the change count and branch (`projects.list`, `projects.gitStatus`, the app broker's status),
