@@ -2809,6 +2809,29 @@ export class Store {
   }
 
   /**
+   * The sessions that inherited a handoff from this one (#738), newest first, trashed ones included with their mark:
+   * where a removed session's remaining children go. The same evidence as above, the successor's handoff marker.
+   */
+  handoffHeirs(fromSessionId: string): { sessionId: string; trashed: boolean }[] {
+    /*
+     * Filtered in SQL (#740 review): a handoff marker carries its whole note, megabytes, and this runs on every delete.
+     * The CASE keeps a row that is not valid JSON from failing the query; it names no heir.
+     */
+    const rows = this.db
+      .prepare(
+        `SELECT m.session_id as sessionId, MAX(m.ts) as ts, s.deleted_at IS NOT NULL as trashed
+           FROM messages m JOIN sessions s ON s.id = m.session_id
+          WHERE m.kind = 'marker'
+            AND CASE WHEN json_valid(m.payload)
+                  THEN json_extract(m.payload, '$.type') = 'handoff' AND json_extract(m.payload, '$.fromSessionId') = ?
+                  ELSE 0 END
+          GROUP BY m.session_id ORDER BY ts DESC`,
+      )
+      .all(fromSessionId) as { sessionId: string; trashed: number }[]
+    return rows.map((r) => ({ sessionId: r.sessionId, trashed: !!r.trashed }))
+  }
+
+  /**
    * Whether this session already has a stored notice with this text (#304) — so a notice the tool repeats on every
    * start (`oncePerSession`, Codex's configuration warnings) is kept once. Only marker rows are read, and a session has
    * a handful of those; the text is compared after parsing, as stored.
@@ -3849,7 +3872,7 @@ export class Store {
   moveChildren(
     from: string,
     to: string,
-    move: { sessions: readonly string[]; startRequests: readonly { requestId: string; request: unknown }[]; armReports?: readonly string[] },
+    move: { sessions: readonly string[]; startRequests: readonly { requestId: string; request: unknown }[]; armReports?: readonly string[]; queued?: boolean },
   ): void {
     this.db.transaction(() => {
       const owner = this.db.prepare(
@@ -3865,7 +3888,8 @@ export class Store {
         mark.run({ from, to, id })
         turn.run({ from, to, id })
       }
-      this.db.prepare(`UPDATE queued_requests SET caller_session_id = ? WHERE caller_session_id = ?`).run(to, from)
+      // A removed original's queue stays with it, for the trash to drop (#738)
+      if (move.queued !== false) this.db.prepare(`UPDATE queued_requests SET caller_session_id = ? WHERE caller_session_id = ?`).run(to, from)
       const start = this.db.prepare(`UPDATE agent_start_requests SET caller_session_id = ?, request = ? WHERE request_id = ? AND caller_session_id = ?`)
       for (const r of move.startRequests) start.run(to, JSON.stringify(r.request), r.requestId, from)
       const arm = this.db.prepare(

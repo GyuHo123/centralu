@@ -307,13 +307,16 @@ function agentStartPersonText(req: Pick<AgentStartRequest, 'detail'>, how: 'deni
  */
 type MovedChild = { handle: string; name: string; state: string; can: string; project?: string; request?: boolean }
 
+/** A moved child with nothing owed (#738): finished and reported, and often waiting for the next instruction */
+const SETTLED_CHILD = 'finished; waiting for more work'
+
 /** The section a handoff note opens with when live children moved (#693): what they are, and what can be done with each */
 function movedChildrenNote(moved: readonly MovedChild[]): string {
   return [
     '## Work handed over with this note (added by Centralu)',
     '',
-    'The previous session started or asked for these, and they were not finished when it handed over. They now answer',
-    'to you as each line says; use the handle with the tool it names.',
+    'The previous session started or asked for these. They now answer to you as each line says (a finished one waits',
+    'for more work); use the handle with the tool it names.',
     '',
     ...moved.map((c) => `- ${movedLabel(c)} — ${c.state} — handle: ${c.handle}. ${c.can}`),
     '',
@@ -2351,8 +2354,9 @@ export class SessionManager {
        * The original's live children become this session's (#693), before its first turn reads the note: the note
        * opens with them, in the file the opening message points at and in the marker that keeps the note's original.
        * Nothing here awaits until the first message is sent, so a moved child's report cannot reach this session first.
+       * When the window removes the original next (#738), every child moves, settled ones too, and the note lists them.
        */
-      const moved = fromSessionId ? this.moveLiveChildren(fromSessionId, id) : []
+      const moved = fromSessionId ? this.moveChildren(fromSessionId, id, params.handoff.removesOriginal ? 'all' : 'live') : []
       if (moved.length) {
         note = movedChildrenNote(moved) + note
         try {
@@ -3257,6 +3261,15 @@ export class SessionManager {
      * agent would go on to execute the message that had just been sent.
      */
     await this.untilWakeWithdrawn(sessionId, 'The session was deleted while waking')
+    /*
+     * A handoff's original that goes (#738): what it still has (settled children, and anything it started after a
+     * handoff that kept it) goes to the session that inherited its handoff, before the teardown below lets go of it. A
+     * handoff whose window said the original goes next moved everything already, and this finds nothing. The move is
+     * its own transaction ahead of the trash's: a crash between them leaves the children on the heir and the original
+     * standing, one owner either way.
+     */
+    const heir = this.handoffHeir(sessionId)
+    if (heir) this.moveChildren(sessionId, heir, 'removed')
     // A session an app was waiting on an answer from (M4 D-1) — the wait is ended along with a reason.
     // Leaving it unended would hang the app's call forever with no answer
     const agentRun = this.agentRuns.get(sessionId)
@@ -3339,6 +3352,29 @@ export class SessionManager {
     // restored conversation reopens them from its history
     this.appsHub?.sessionGone(sessionId)
     this.emit({ type: 'session_deleted', sessionId })
+  }
+
+  /**
+   * The live session that took over from this one by a handoff (#738), or null: the newest successor still here. A
+   * successor that was removed, or is being removed right now (`trashing`), passes on to its own successors, newest
+   * first, as its children did; the nearest generation with a live one wins.
+   */
+  private handoffHeir(sessionId: string): string | null {
+    const seen = new Set([sessionId])
+    let generation = [sessionId]
+    try {
+      while (generation.length) {
+        const heirs = generation.flatMap((at) => this.store.handoffHeirs(at)).filter((h) => !seen.has(h.sessionId))
+        for (const h of heirs) seen.add(h.sessionId)
+        const live = heirs.find((h) => !h.trashed && this.meta.has(h.sessionId) && !this.trashing.has(h.sessionId))
+        if (live) return live.sessionId
+        generation = heirs.map((h) => h.sessionId)
+      }
+    } catch (e) {
+      // A delete never fails over this: the children stay on their own, as before #738
+      console.error(`[agent-host] no handoff heir read for ${sessionId.slice(0, 8)}: ${(e as Error).message}`)
+    }
+    return null
   }
 
   /** The startup repair of recovery folders an interrupted purge left aside (#647) */
@@ -6825,7 +6861,7 @@ export class SessionManager {
     if (!opts.task && !outstanding.length) {
       const named = (id: string) => !wantedSession || id === wantedSession || this.meta.get(id)?.name.toLowerCase() === wantedSession.toLowerCase()
       const gone = [...this.handedOver].find(([id, h]) => h.from === callerId && this.meta.get(id)?.projectId === target.id && named(id))
-      if (gone) return this.handedOverAnswer(callerId, gone[0])!
+      if (gone) return this.handedOverReply(callerId, gone[0])
     }
     if (!opts.task && !wantedSession && outstanding.length === 1) {
       const [key, pending] = outstanding[0]!
@@ -7220,7 +7256,7 @@ export class SessionManager {
     d.waiters = (d.waiters ?? 0) + 1
     try {
       const r = await Promise.race([d.outcome, ...(d.waitCancelled ? [d.waitCancelled] : []), bound, aborted, card.asked, leaving.gone])
-      if (r === 'handedOver') return this.handedOverAnswer(owner, d.sessionId)!
+      if (r === 'handedOver') return this.handedOverReply(owner, d.sessionId)
       if (r === 'asked') {
         const cards = this.routedCards(d.sessionId, d.callerId)
         if (cards.length) return asking(cards)
@@ -7920,7 +7956,7 @@ export class SessionManager {
         leaving.done()
         if (onAbort) signal?.removeEventListener('abort', onAbort)
         // A handoff gave the request to the session that took over (#693)
-        if (r === 'handedOver') return this.handedOverAnswer(owner, id)!
+        if (r === 'handedOver') return this.handedOverReply(owner, id)
         // Read again: the person may have answered while this waited
         const ended = rec.ended as AgentStartRecord['ended']
         if (ended && 'childId' in ended) return { childId: ended.childId, action: 'status' }
@@ -8442,7 +8478,18 @@ export class SessionManager {
    * Live is anything still owed: a session working or waiting on the person (approval or question), a request the
    * original queued, a report not yet delivered, an ask_project answer not yet read, and a start_agent request whose
    * card still stands. A settled child (finished, reported or read, nothing pending) stays with the original, so the
-   * history stays where it happened.
+   * history stays where it happened, but only while the original stays (#738). `scope`:
+   * - `live`: a handoff that keeps the original. Only the live children move.
+   * - `all`: a handoff whose original the window removes next. Every child moves, settled ones too ("finished; waiting
+   *   for more work" in the note): one left with a session about to go would belong to nobody, its next report owed to
+   *   a removed session and out of reach of agent_session for a successor that is not `auto`.
+   * - `removed`: the original is being removed now (`trashSessionOnce`), after a handoff that kept it or one whose
+   *   window did not say it would remove it. Its children themselves go to the session that inherited its handoff
+   *   (`askedBy`/`parentSessionId`, with the reports, turns and delegations that are theirs), since an orphan is worse;
+   *   that session is told in its conversation (its note was read long ago), and the original, about to go, is told
+   *   nothing. What the original asked for and the person never answered stays behind: its start_agent requests and the
+   *   requests it queued are withdrawn and dropped by the trash as before, so no card appears in another session
+   *   because this one was deleted, and nothing is delivered in a session that did not ask for it.
    *
    * Everything stored moves in one transaction (`Store.moveChildren`), and only then the host's memory, all without an
    * await, so no event lands between the two. A crash before the commit leaves every link on the original, after it
@@ -8457,13 +8504,15 @@ export class SessionManager {
    * today only the person's handoff calls this; an agent-facing handoff (the orchestrator tools of #694) must check
    * its own authority over the original before it does.
    */
-  private moveLiveChildren(from: string, to: string): MovedChild[] {
+  private moveChildren(from: string, to: string, scope: 'live' | 'all' | 'removed'): MovedChild[] {
     const original = this.meta.get(from)
     const heir = this.meta.get(to)
     if (!original || !heir || from === to || original.projectId !== heir.projectId) return []
-    // What only `auto` let the original queue does not go to a successor that is not `auto`; the original is told
-    if (heir.permissionPreset !== 'auto') this.dropOpenedByAuto(from)
-    const queuedBy = new Set([...this.queued.values()].flat().filter((r) => r.callerSessionId === from).map((r) => r.sessionId))
+    const removed = scope === 'removed'
+    // What only `auto` let the original queue does not go to a successor that is not `auto`; the original is told.
+    // A removed original's queue moves nowhere: the trash drops it
+    if (!removed && heir.permissionPreset !== 'auto') this.dropOpenedByAuto(from)
+    const queuedBy = removed ? new Set<string>() : new Set([...this.queued.values()].flat().filter((r) => r.callerSessionId === from).map((r) => r.sessionId))
     const delegated = [...this.delegations.values()].filter((d) => d.callerId === from)
     const stateOf = (s: SessionInfo): string | null => {
       if (s.pendingApproval || s.state === 'waiting_approval') return 'waiting for an approval'
@@ -8476,14 +8525,17 @@ export class SessionManager {
       if (this.awaitingReport.get(s.id) === from) return 'finished; its report has not been delivered yet'
       // ask_project tells nobody when it ends: an answer the original never came back for is still owed
       if (delegated.some((d) => d.sessionId === s.id && d.settled && !d.agent)) return 'finished; its answer has not been read yet'
-      return null
+      // Settled: nothing is owed. It moves only when the original goes (#738), and is often still in use
+      return scope === 'live' ? null : SETTLED_CHILD
     }
-    const linked = new Set<string>([
+    const children = [...this.meta.values()].filter((s) => s.id !== from && s.id !== to && (s.askedBy === from || s.parentSessionId === from)).map((s) => s.id)
+    // A removed original gives only its children; another session's turn it held, or another project's, is let go
+    const linked = removed ? new Set(children) : new Set<string>([
       ...queuedBy,
       ...delegated.map((d) => d.sessionId),
       ...[...this.awaitingReport].filter(([, caller]) => caller === from).map(([child]) => child),
       ...[...this.turnOwners].filter(([, owner]) => owner.callerId === from).map(([child]) => child),
-      ...[...this.meta.values()].filter((s) => s.id !== from && s.id !== to && (s.askedBy === from || s.parentSessionId === from)).map((s) => s.id),
+      ...children,
     ])
     /*
      * A child the original is waiting on in a call right now: that wait took its report mark down (`awaitAgent`) and is
@@ -8507,11 +8559,12 @@ export class SessionManager {
       const can = project !== undefined
         ? `Call ask_project with project "${project}" and no task to wait for its answer${owns ? '; you are told of the cards of its turn and answer them with agent_session (answer)' : ''}. It is that project's session: agent_session does nothing else with it.`
         : s.askedBy === from
-          ? `${told ? 'Its report comes to you. ' : ''}agent_session works on it as on a session you started (status, wait, send, stop, delete).`
+          ? `${told ? 'Its report comes to you. ' : state === SETTLED_CHILD ? 'Give it more work with agent_session (send) and its report comes to you. ' : ''}agent_session works on it as on a session you started (status, wait, send, stop, delete).`
           : `${told ? 'Its report comes to you' : 'Nothing about it comes to you unless you ask'}${owns ? ', and you are told of the cards of the turn you now own' : ''}. You did not start it, so agent_session works on it only with the auto preset.`
       moved.push({ handle: id, name: s.name, state, can, ...(project !== undefined ? { project } : {}) })
     }
-    const starts = [...this.agentStarts.values()].filter((r) => r.req.callerId === from && !r.ended)
+    // A removed original's requests still open are withdrawn by the trash, not raised in another session
+    const starts = removed ? [] : [...this.agentStarts.values()].filter((r) => r.req.callerId === from && !r.ended)
     for (const r of starts) {
       moved.push(r.req.allowed
         // Allowed already and queued for memory (#686): no card, it starts on its own when memory frees up
@@ -8532,9 +8585,10 @@ export class SessionManager {
         sessions,
         startRequests: starts.map((r) => ({ requestId: r.req.requestId, request: { ...r.req, callerId: to } })),
         armReports,
+        queued: !removed,
       })
     } catch (e) {
-      console.error(`[agent-host] handoff left the live children with ${from.slice(0, 8)}: ${(e as Error).message}`)
+      console.error(`[agent-host] handoff left the children with ${from.slice(0, 8)}: ${(e as Error).message}`)
       return []
     }
 
@@ -8561,7 +8615,7 @@ export class SessionManager {
       this.observerNotes.delete(key)
       this.observerNotes.set(`${to}>${key.slice(from.length + 1)}`, n)
     }
-    for (const list of this.queued.values()) for (const r of list) if (r.callerSessionId === from) r.callerSessionId = to
+    if (!removed) for (const list of this.queued.values()) for (const r of list) if (r.callerSessionId === from) r.callerSessionId = to
     for (const [id, wait] of this.linkedReports) if (wait.orchestratorId === from && moving.has(id)) wait.orchestratorId = to
     // A start that already made its child: its handle follows the child
     for (const r of this.agentStarts.values()) if (r.req.callerId === from && r.ended && 'childId' in r.ended && moving.has(r.ended.childId)) r.req.callerId = to
@@ -8593,11 +8647,18 @@ export class SessionManager {
     for (const d of this.delegations.values()) if (d.callerId === to && moving.has(d.sessionId)) for (const leave of [...(d.leaving ?? [])]) leave()
     for (const r of starts) for (const leave of [...(r.leaving ?? [])]) leave()
     const items = moved.map((c) => `${movedLabel(c)} (${c.state})`)
-    this.onEvent({
-      type: 'notice', sessionId: from, level: 'info', from: 'Centralu', label: 'handoff',
-      text: `Handed over to “${heir.name}” [${to}], which follows them from now on: ${items.join('; ')}. This session no longer does.`,
-    })
-    console.error(`[agent-host] handoff ${from.slice(0, 8)} -> ${to.slice(0, 8)}: moved ${sessions.length} session(s), ${starts.length} start request(s)`)
+    if (scope === 'removed') {
+      this.onEvent({
+        type: 'notice', sessionId: to, level: 'info', from: 'Centralu', label: 'handoff',
+        text: `“${original.name}” [${from}], which handed over to this session, was deleted. This session follows what it still had from now on: ${items.join('; ')}.`,
+      })
+    } else {
+      this.onEvent({
+        type: 'notice', sessionId: from, level: 'info', from: 'Centralu', label: 'handoff',
+        text: `Handed over to “${heir.name}” [${to}], which follows them from now on: ${items.join('; ')}. This session no longer does.`,
+      })
+    }
+    console.error(`[agent-host] handoff ${from.slice(0, 8)} -> ${to.slice(0, 8)} (${scope}): moved ${sessions.length} session(s), ${starts.length} start request(s)`)
     return moved
   }
 
@@ -9020,7 +9081,7 @@ export class SessionManager {
   /**
    * Requests of `sessionId` that only `auto` let through, dropped when they would go on without it (#606), as `auto`'s
    * attachments stop counting: the session moved off `auto`, or a handoff giving them to a session that is not `auto`
-   * (`moveLiveChildren`). An ask marked `openedByAuto` whose pair still has no remembered consent, and an agent_session
+   * (`moveChildren`). An ask marked `openedByAuto` whose pair still has no remembered consent, and an agent_session
    * send to a session it did not start. One being delivered now is left to the delivery gate, which reads the mark
    * again if a swap delivers it once more. `tell` (default: the session itself) is told.
    */
@@ -9312,7 +9373,7 @@ export class SessionManager {
     try {
       const r = await Promise.race([d.outcome, bound, aborted, ...(card ? [card.asked] : []), ...(leaving ? [leaving.gone] : [])])
       if (!observing) d.waiters = (d.waiters ?? 1) - 1
-      if (r === 'handedOver') return this.handedOverAnswer(owner, d.sessionId)!
+      if (r === 'handedOver') return this.handedOverReply(owner, d.sessionId)
       if (r === 'asked') {
         const cards = this.routedCards(d.sessionId, d.callerId)
         return cards.length ? this.agentAsking(d, cards) : this.agentWorking(d)
@@ -9382,6 +9443,18 @@ export class SessionManager {
    * What an original that stays after a handoff hears about work the handoff gave away (#693), or undefined: where it
    * went, so the original neither waits on it nor reads its answer a second time.
    */
+  /**
+   * `handedOverAnswer` for a wait a handoff ended: always an answer. The entry can be gone by the time the wait reads it
+   * (#740 review): an original removed while waiting has its moves recorded, its waits woken, and its entries dropped
+   * by the trash before the woken calls run.
+   */
+  private handedOverReply(callerId: string, id: string): { ok: false; error: string } {
+    return this.handedOverAnswer(callerId, id) ?? {
+      ok: false,
+      error: `[${id}] was handed to another session, which follows it now: this session no longer does, and nothing was stopped.`,
+    }
+  }
+
   private handedOverAnswer(callerId: string, id: string): { ok: false; error: string } | undefined {
     const h = this.handedOver.get(id)
     if (!h || h.from !== callerId) return undefined
