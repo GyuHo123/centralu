@@ -9,7 +9,6 @@ import { externalAppKey, handoffBlockedBy, useStore } from '../../store/store.js
 import { BackgroundMark } from '../session/BackgroundTasks.jsx'
 import { NewSessionDialog } from '../project/NewSessionDialog.jsx'
 import { NewAppDialog } from '../project/NewAppDialog.jsx'
-import { WorktreeTrunkDialog } from '../project/WorktreeTrunkDialog.jsx'
 import { DeleteProjectDialog } from '../project/DeleteProjectDialog.jsx'
 import { CreateProjectDialog } from '../project/CreateProjectDialog.jsx'
 import {
@@ -21,11 +20,10 @@ import {
   useToolMeta,
   useTools,
 } from '../../store/selectors.js'
-import { Kbd, StateDot, Tooltip, interruptionLabel, stateLabel } from '../../components/primitives.jsx'
-import { useShortcut } from '../../app/shortcut.js'
+import { StateDot, Tooltip, interruptionLabel, stateLabel } from '../../components/primitives.jsx'
 import { ResizeHandle } from '../../components/ResizeHandle.jsx'
 import { IconButton } from '../../components/IconButton.jsx'
-import { AppIcon, ChevronIcon, CrownIcon, DotsIcon, ImportIcon, PlusIcon, SearchIcon } from '../../components/icons.jsx'
+import { AppIcon, ChevronIcon, CrownIcon, DotsIcon, ImportIcon, PlusIcon } from '../../components/icons.jsx'
 import { isRemoteUserApp, useMachineApps, useProjectApps, useUserApps, type ExternalCatalogApp } from '../../store/app-catalog.js'
 import { isAway } from '@cc/core'
 import { MachineStatusMark } from '../machines/MachineTag.jsx'
@@ -342,7 +340,6 @@ export function Sidebar() {
         onReset={() => setSidebarWidth(SIDEBAR_DEFAULT)}
         testId="sidebar-resize"
       />
-      <SearchButton />
       <OrchestratorButton />
       <GridButton />
       {grouped ? (
@@ -436,38 +433,6 @@ export function Sidebar() {
 }
 
 /**
- * The door to search (#529): sessions, projects, apps, actions and what was said in past
- * conversations, all in the command palette.
- *
- * The palette used to open only by ⌘K / Ctrl+K, so a person who had not been told the key had no
- * way to search at all: finding a past conversation had no path anyone could see (the task-cost
- * baseline, docs/ux-metrics.md). This is that path, at the top of the lane the results land in, and
- * it says its key out loud, so the shortcut is learned by using the button rather than by being told.
- *
- * Field-shaped and faint, like the Add project button: it is a door used now and then, and must not
- * compete with the rows being read below it.
- */
-function SearchButton() {
-  const sc = useShortcut()
-  return (
-    <div className="px-2 pt-2">
-      <button
-        className="flex w-full items-center gap-2 rounded-lg border border-line px-2.5 py-1.5 text-left text-sm text-ink-faint transition-colors hover:border-line-strong hover:text-ink"
-        onClick={() => useStore.getState().togglePalette(true)}
-        data-testid="search-button"
-        title="Search sessions, projects, apps and past conversations"
-      >
-        <SearchIcon />
-        <span className="truncate">Search</span>
-        <span className="ml-auto shrink-0 text-2xs">
-          <Kbd>{sc('mod', 'K')}</Kbd>
-        </span>
-      </button>
-    </div>
-  )
-}
-
-/**
  * The door to the orchestrator — **directing by talking**.
  *
  * Placed directly above the grid. The two are two ways of looking at the same thing, so they
@@ -502,9 +467,9 @@ function OrchestratorButton() {
   // A proposal card waits in the orchestrator's screen (#703): the row says so like a session waiting on an approval
   const proposalWaits = useHasPendingProposal()
 
-  // pt-1.5, the grid's own gap: Search stands above it now (#529) and takes the lane's top margin
+  // pt-2: the lane's top margin. Search used to stand above this row (#529); it moved to the top bar (#727)
   return (
-    <div className="px-2 pt-1.5">
+    <div className="px-2 pt-2">
       <button
         className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-sm transition-colors ${
           active
@@ -666,7 +631,6 @@ function ProjectBlock({ projectId }: { projectId: string }) {
   const open = useIsProjectOpen(projectId)
   // Does the manager's worktree proposal point at this project (#69)? The + button lights up
   const proposalHere = useStore((s) => s.worktreeProposals.some((p) => p.projectId === projectId))
-  const [trunkDialog, setTrunkDialog] = useState(false)
   // New app dialog (M4 C-1) — opened from the project row's menu, like the new session dialog
   const [newAppOpen, setNewAppOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -682,8 +646,6 @@ function ProjectBlock({ projectId }: { projectId: string }) {
   // Fold state (#205) — held by the store: remembered per project and persists across restarts
   const folded = useStore((s) => s.foldedProjects.includes(projectId))
   const toggleFold = useStore((s) => s.toggleProjectFold)
-  const foldOthers = useStore((s) => s.foldOtherProjects)
-  const manyProjects = useStore((s) => Object.keys(s.projects).length > 1)
   // Folded groups (#666): the children of a session. `foldedGroups` is one array, so this re-renders only when it changes
   const foldedGroups = useStore((s) => s.prefs.foldedGroups)
   const setGroupsFolded = useStore((s) => s.setGroupsFolded)
@@ -889,9 +851,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
             onNewSession={() => openNewSession(projectId)}
             // Making an app on another machine is not offered yet (#82): its views open here (remote-hub.md §11), its making does not
             onNewApp={project.machine ? undefined : () => setNewAppOpen(true)}
-            onSetTrunk={() => setTrunkDialog(true)}
             onToggleTrust={() => void setProjectTrusted(projectId, !project.trusted)}
-            onFoldOthers={manyProjects ? () => foldOthers(projectId) : undefined}
             onOpenInVsCode={remoteIde ? () => void remoteIde.open('') : undefined}
             onDelete={() => setDeleting(true)}
           />
@@ -1116,9 +1076,6 @@ function ProjectBlock({ projectId }: { projectId: string }) {
 
       {newSessionOpen && <NewSessionDialog projectId={projectId} onClose={() => openNewSession(null)} />}
       {newAppOpen && <NewAppDialog projectId={projectId} onClose={() => setNewAppOpen(false)} />}
-      {trunkDialog && (
-        <WorktreeTrunkDialog projectId={projectId} onClose={() => setTrunkDialog(false)} />
-      )}
       {deleting && <DeleteProjectDialog project={project} onClose={() => setDeleting(false)} />}
 
       {confirming && (
@@ -2088,9 +2045,7 @@ function ProjectMenu({
   onClose,
   onNewSession,
   onNewApp,
-  onSetTrunk,
   onToggleTrust,
-  onFoldOthers,
   onOpenInVsCode,
   onDelete,
 }: {
@@ -2099,10 +2054,7 @@ function ProjectMenu({
   onClose: () => void
   onNewSession: () => void
   onNewApp?: () => void
-  onSetTrunk: () => void
   onToggleTrust: () => void
-  /** Only when there are two or more projects — with just one, there is no "other" to fold */
-  onFoldOthers?: () => void
   /** A project on a linked machine VS Code can reach over Remote-SSH (#82): its folder there */
   onOpenInVsCode?: () => void
   onDelete: () => void
@@ -2129,18 +2081,6 @@ function ProjectMenu({
         <ActionRow label="Open in VS Code" onClick={pick(onOpenInVsCode)} testId={`open-vscode-${project.name}`} />
       )}
       {/*
-        The project's worktree trunk (#76): where its worktree sessions fork from and what "merged" is measured
-        against. It was chosen by starting the worktree manager, which was folded into ordinary sessions (#561 part 3);
-        the row says the trunk it has, so the setting is visible without opening it.
-      */}
-      {project.git?.isRepo && (
-        <ActionRow
-          label={project.worktreeManager?.baseBranch ? `Worktree trunk: ${project.worktreeManager.baseBranch}…` : 'Set worktree trunk…'}
-          onClick={pick(onSetTrunk)}
-          testId={`worktree-trunk-${project.name}`}
-        />
-      )}
-      {/*
         Trust (M4, decision 3). Asked once at registration, and changed from here afterward. A
         single toggle row, not a confirmation dialog: turning it off is the safe direction, which
         stops apps and ignores settings, and turning it on is something the person did by opening
@@ -2151,19 +2091,6 @@ function ProjectMenu({
         onClick={pick(onToggleTrust)}
         testId={`toggle-trust-${project.name}`}
       />
-      {/*
-        Fold everything else at once (#205). Lets a person focus on one project without going and
-        folding every other project one by one — this project stays expanded while the rest fold.
-        No separate undo is provided: a folded row still states how many sessions are waiting, and
-        expanding it is one press of the arrow.
-      */}
-      {onFoldOthers && (
-        <ActionRow
-          label="Collapse other projects"
-          onClick={pick(onFoldOthers)}
-          testId={`fold-others-${project.name}`}
-        />
-      )}
       <div className="my-1 border-t border-line" />
       <ActionRow
         label="Delete project…"
