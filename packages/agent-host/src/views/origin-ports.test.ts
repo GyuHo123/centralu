@@ -189,4 +189,94 @@ describe('OriginPorts', () => {
     disk.raw = '"not an object"'
     expect(ports.book()).toEqual({ assigned: {}, retired: [] })
   })
+
+  it('keeps every key recorded when several first-time keys are served at once', async () => {
+    const candidates = await freePorts(3)
+    const disk = diskStore()
+    const ports = new OriginPorts(disk, { range: RANGE, pick: sequence(candidates), log: noop })
+    const got = await Promise.all(['p1/a', 'p2/b', 'p3/c'].map((key) => serve(ports, key)))
+    expect(new Set(got.map((g) => g.port)).size).toBe(3)
+    const recorded = disk.load()!
+    expect(Object.keys(recorded.assigned).sort()).toEqual(['p1/a', 'p2/b', 'p3/c'])
+    for (const [i, key] of ['p1/a', 'p2/b', 'p3/c'].entries()) expect(recorded.assigned[key]).toBe(got[i]!.port)
+  })
+
+  it('gives up a port that another writer recorded while it was being bound', async () => {
+    const [taken, other] = await freePorts(2)
+    const disk = diskStore()
+    // The writer of the shared store (the other host of a swap) records `taken` for its own key
+    // right before this serve() commits
+    let rival = true
+    const store: PortBookStore = {
+      load: () => disk.load(),
+      save: (book) => disk.save(book),
+      update(fn) {
+        if (rival) {
+          rival = false
+          disk.save({ assigned: { 'rival/app': taken! }, retired: [] })
+        }
+        disk.save(fn(disk.load()))
+      },
+    }
+    const ports = new OriginPorts(store, { range: RANGE, pick: sequence([taken!, other!]), log: noop })
+    const got = await serve(ports, 'mine')
+    expect(got.port).toBe(other)
+    expect(disk.load()).toEqual({ assigned: { 'rival/app': taken, mine: other }, retired: [] })
+    // The port given up was closed again
+    const probe = createServer()
+    await new Promise<void>((resolve, reject) => {
+      probe.once('error', reject)
+      probe.listen(taken, '127.0.0.1', () => resolve())
+    })
+    await stop(probe)
+  })
+
+  it('keeps a port retired by another writer retired when it moves its own', async () => {
+    const [pA, pB, pC] = await freePorts(3)
+    const disk = diskStore()
+    const first = await serve(new OriginPorts(disk, { range: RANGE, pick: sequence([pA!]), log: noop }), 'p1/notes')
+    await stop(first.server)
+    const squatter = createServer()
+    await new Promise<void>((r) => squatter.listen(pA, '127.0.0.1', () => r()))
+    open.push(squatter)
+    let rival = true
+    const store: PortBookStore = {
+      load: () => disk.load(),
+      save: (book) => disk.save(book),
+      update(fn) {
+        if (rival) {
+          rival = false
+          const cur = disk.load()!
+          disk.save({ ...cur, retired: [...cur.retired, pC!] })
+        }
+        disk.save(fn(disk.load()))
+      },
+    }
+    const moved = await serve(new OriginPorts(store, { range: RANGE, pick: sequence([pB!]), log: noop }), 'p1/notes')
+    expect(moved.port).toBe(pB)
+    expect(disk.load()).toEqual({ assigned: { 'p1/notes': pB }, retired: [pC, pA] })
+  })
+
+  it('retires a different port that another writer recorded for the same key meanwhile, instead of overwriting it silently', async () => {
+    const [theirs, mine] = await freePorts(2)
+    const disk = diskStore()
+    let rival = true
+    const store: PortBookStore = {
+      load: () => disk.load(),
+      save: (book) => disk.save(book),
+      update(fn) {
+        if (rival) {
+          rival = false
+          disk.save({ assigned: { k: theirs! }, retired: [] })
+        }
+        disk.save(fn(disk.load()))
+      },
+    }
+    const lines: string[] = []
+    // No entry for `k` at first, so this serve() allocates; the entry appears just before it records
+    const got = await serve(new OriginPorts(store, { range: RANGE, pick: sequence([mine!]), log: (l) => lines.push(l) }), 'k')
+    expect(got.port).toBe(mine)
+    expect(disk.load()).toEqual({ assigned: { k: mine }, retired: [theirs] })
+    expect(lines.join('\n')).toMatch(new RegExp(`port ${theirs} for k was recorded elsewhere`))
+  })
 })
