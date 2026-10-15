@@ -2423,6 +2423,29 @@ Usage is an **account** property, not a session or directory one, which is why `
 takes no arguments — the answer is the same whichever folder you ask from. Only subscription
 limits are in scope; metered credits are not.
 
+**With no session running (#726).** The Claude SDK puts the usage call only on a running session's query, so a host
+nobody had a session on (typically a linked machine) used to answer "A running session is required to read usage" and
+its meter stayed blank. `listUsage()` now starts a **probe session** for the read when none is live: a Claude process in
+a temporary folder that is sent no message (nothing is billed), read until it answers (about 1.5 s measured; bounded at
+20 s (a loaded machine took 3 to 8 s; the manager gives up at 15 s but the probe goes on and its answer is kept for the next ask); an SDK without the call is final at once) and stopped right after. It reads no settings files, starts no code
+intelligence and, with `strictMcpConfig`, none of the person's MCP servers, and it is never lent to a model-list ask.
+Its folder goes once the process has left (on Windows it holds the folder until then), and a leftover
+(`centralu-usage-probe-*` in the temp folder, older than ten minutes) is swept at the first probe. An answer, and equally
+a failure, stands for five minutes, so the meter's 5-minute polls start one process each at most and a broken CLI is not
+retried on every poll. The meter does not poll while the window is hidden (it asks at once when it is shown again after
+a skipped tick) and asks only the tools `agents.detect` reports usable on that machine. Not logged in: no probe, the
+reason says so. Codex already reads usage with a short-lived client
+and has no such gap.
+
+**Same account on the hub and a linked machine (#726).** Each host answers `agents.account { tool }` with a fingerprint
+of the login it sees (`claude auth status --json`: a hash of the organisation id and the lower-cased email; the
+organisation alone would equate a team's members, who each have limits of their own). Only the hash leaves a host, never
+the email. When the hub's and the machine's fingerprints are equal, the hub answers `agents.usage { machine }` with its
+own limits and `sameAccountAsHub: true`, and asks the machine only for its prompt cache figures (`limits: false`), since
+those count the machine's own requests. Otherwise, or when the machine's host predates `agents.account`, the machine is
+asked as usual and probes if it has no session. The screen says "Same account as this computer", or the one-line reason
+when no reading could be made, in place of a blank meter.
+
 This section used to describe something else entirely: a chokidar watcher parsing
 `~/.claude/projects/**` and `~/.codex/sessions/**` incrementally, writing `usage_facts` rows
 that a `usage.weekly` RPC would read, with aggregation in `core/usage`. **None of it exists** —
