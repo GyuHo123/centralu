@@ -410,6 +410,12 @@ export type SshTunnelOptions = {
   forwardTimeoutMs?: number
   /** How long a host the forward runs (link-bound) may take to answer */
   startTimeoutMs?: number
+  /** How long a short question to the remote (the connection line) may take, ssh's own connect time included */
+  commandTimeoutMs?: number
+  /** How long starting the remote's host (`centralu serve --detach`) may take: it waits for the host to answer before it does */
+  detachTimeoutMs?: number
+  /** How long a step of the installer, updater or autostart (`exec`) may take: a download on a slow link is part of it */
+  execTimeoutMs?: number
   log?: (line: string) => void
 }
 
@@ -511,7 +517,7 @@ export class SshTunnel implements Tunnel {
   async startHost(): Promise<HostStart> {
     this.ifClosed()
     const remote = this.opts.remote ?? { shell: 'posix' }
-    const r = await this.run([...this.config(), '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '--', this.opts.target, detachCommand(remote)])
+    const r = await this.run([...this.config(), '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '--', this.opts.target, detachCommand(remote)], undefined, this.opts.detachTimeoutMs ?? SSH_DETACH_TIMEOUT_MS)
     this.ifClosed()
     if (r.code === 255) throw new Error(`ssh could not reach ${this.opts.target}: ${lastLine(r.stderr) || 'no answer'}`)
     if (r.stdout.includes(NOT_FOUND) || (r.code === 127 && !remote.command)) {
@@ -551,7 +557,7 @@ export class SshTunnel implements Tunnel {
   async exec(command: RemoteCommand): Promise<RemoteRun> {
     this.ifClosed()
     const [line, stdin] = typeof command === 'string' ? [command, undefined] : [command.command, command.stdin]
-    const r = await this.run([...this.config(), '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '--', this.opts.target, line], stdin)
+    const r = await this.run([...this.config(), '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '--', this.opts.target, line], stdin, this.opts.execTimeoutMs ?? SSH_EXEC_TIMEOUT_MS)
     if (r.code === 255) throw new Error(`ssh could not reach ${this.opts.target}: ${lastLine(r.stderr) || 'no answer'}`)
     return r
   }
@@ -586,7 +592,14 @@ export class SshTunnel implements Tunnel {
     if (this.closing) throw new Error(`The link to ${this.opts.target} was closed`)
   }
 
-  private run(args: string[], stdin?: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  /**
+   * Runs ssh to the end and answers what it printed, within bounds. Past `timeoutMs`, or once stdout is
+   * longer than `STDOUT_LIMIT` characters, the ssh is stopped and this rejects: `ConnectTimeout` only
+   * bounds the connection, and a remote command that never ends, or never stops printing, would
+   * otherwise hold the call and its memory for good. Only the end of stderr is kept (`STDERR_KEEP`);
+   * what it is read for is the last line.
+   */
+  private run(args: string[], stdin: string | undefined, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.opts.ssh ?? 'ssh', args, { env: this.opts.env ?? process.env, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] })
       if (stdin !== undefined) {
@@ -597,15 +610,37 @@ export class SshTunnel implements Tunnel {
       this.asking.add(child)
       child.once('exit', () => this.asking.delete(child))
       let stdout = ''
-      let stderr = ''
-      child.stdout!.on('data', (d: Buffer) => (stdout += String(d)))
-      child.stderr!.on('data', (d: Buffer) => (stderr += String(d)))
+      const stderr = new Tail(STDERR_KEEP)
+      let failed = false
+      const stop = (message: string) => {
+        if (failed) return
+        failed = true
+        clearTimeout(deadline)
+        child.kill('SIGTERM')
+        setTimeout(() => child.kill('SIGKILL'), 2000).unref()
+        this.asking.delete(child)
+        reject(new Error(message))
+      }
+      const deadline = setTimeout(() => stop(`ssh to ${this.opts.target} did not finish within ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} seconds` : `${timeoutMs} ms`}`), timeoutMs)
+      // Decoded as a stream: a character that arrives in two chunks is one character
+      child.stdout!.setEncoding('utf8')
+      child.stderr!.setEncoding('utf8')
+      child.stdout!.on('data', (d: string) => {
+        if (failed) return
+        stdout += d
+        if (stdout.length > STDOUT_LIMIT) stop(`ssh to ${this.opts.target} printed more than ${STDOUT_LIMIT / 1024 / 1024} MiB`)
+      })
+      child.stderr!.on('data', (d: string) => stderr.push(d))
       // An ssh that could not start (ENOENT) emits no 'exit', only 'error' and 'close'
       child.once('error', (e) => {
+        clearTimeout(deadline)
         this.asking.delete(child)
         reject(e)
       })
-      child.once('close', (code) => resolve({ code, stdout, stderr }))
+      child.once('close', (code) => {
+        clearTimeout(deadline)
+        resolve({ code, stdout, stderr: stderr.text })
+      })
     })
   }
 
@@ -616,7 +651,7 @@ export class SshTunnel implements Tunnel {
   private async connectionLine(): Promise<ConnectionLine> {
     const remote = this.opts.remote ?? { shell: 'posix' }
     const base = [...this.config(), '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '--', this.opts.target]
-    const r = await this.run([...base, connectionCommand(remote)])
+    const r = await this.run([...base, connectionCommand(remote)], undefined, this.opts.commandTimeoutMs ?? SSH_COMMAND_TIMEOUT_MS)
     if (r.code === 255) throw new Error(`ssh could not reach ${this.opts.target}: ${lastLine(r.stderr) || 'no answer'}`)
     if (r.stdout.includes(NOT_FOUND) || (r.code === 127 && !remote.command)) {
       const n = shimNames(remote)
@@ -654,8 +689,13 @@ export class SshTunnel implements Tunnel {
     ]
     const child = spawn(this.opts.ssh ?? 'ssh', args, { env: this.opts.env ?? process.env, stdio: ['ignore', 'ignore', 'pipe'] })
     this.child = child
-    let stderr = ''
-    child.stderr!.on('data', (d: Buffer) => (stderr += String(d)))
+    /*
+     * Only the end is kept: this ssh lives as long as the link, and in link-bound mode the remote host's
+     * own log goes through it. What is read from it is the last line, for the reason the link ended.
+     */
+    const kept = new Tail(FORWARD_STDERR_KEEP)
+    child.stderr!.setEncoding('utf8')
+    child.stderr!.on('data', (d: string) => kept.push(d))
     return new Promise((resolve, reject) => {
       let settled = false
       const deadline = Date.now() + (this.opts.forwardTimeoutMs ?? 20_000)
@@ -667,8 +707,8 @@ export class SshTunnel implements Tunnel {
       child.once('error', (e) => fail(`Could not start ssh: ${e.message}`))
       child.once('exit', (code, signal) => {
         if (this.child === child) this.child = null
-        if (!settled) return fail(`The ssh forward to ${this.opts.target} ended (${signal ?? code}): ${lastLine(stderr) || 'no reason given'}`)
-        if (!this.closing && !this.ended.has(child)) for (const l of this.downListeners) l(`ssh exited (${signal ?? code})${stderr ? `: ${lastLine(stderr)}` : ''}`)
+        if (!settled) return fail(`The ssh forward to ${this.opts.target} ended (${signal ?? code}): ${lastLine(kept.text) || 'no reason given'}`)
+        if (!this.closing && !this.ended.has(child)) for (const l of this.downListeners) l(`ssh exited (${signal ?? code})${kept.text ? `: ${lastLine(kept.text)}` : ''}`)
       })
       const poll = async () => {
         while (!settled) {
@@ -705,6 +745,53 @@ export class SshTunnel implements Tunnel {
   }
 }
 
+/** How long a short question to the remote may take before its ssh is stopped (`SshTunnelOptions.commandTimeoutMs`) */
+export const SSH_COMMAND_TIMEOUT_MS = 60_000
+/**
+ * How long starting the remote's host may take (`SshTunnelOptions.detachTimeoutMs`). `serve --detach` itself
+ * waits up to 30 s for the host to answer, on top of ssh's connect time and a cold Windows start, and
+ * what it says when that runs out is a better reason than the one this deadline gives.
+ */
+export const SSH_DETACH_TIMEOUT_MS = 120_000
+/**
+ * How long one installer, updater or autostart step may take (`SshTunnelOptions.execTimeoutMs`). The
+ * managed Windows install downloads about 30 MB of Node inside one step, and a slow link needs minutes
+ * for that: this is far past what a working link needs, and only ends a step that is stuck.
+ */
+export const SSH_EXEC_TIMEOUT_MS = 30 * 60_000
+/** The most characters an asking ssh may print on stdout before it is stopped: the answers read from it are a line or a log tail */
+const STDOUT_LIMIT = 1024 * 1024
+/** How much of the end of an asking ssh's stderr is kept */
+const STDERR_KEEP = 64 * 1024
+/** How much of the end of the forward's stderr is kept, for as long as the link lives */
+const FORWARD_STDERR_KEEP = 16 * 1024
+
+/** The last `max` characters of a stream of text: memory stays at `max` however much is written */
+export class Tail {
+  private kept = ''
+  constructor(private readonly max: number) {}
+  push(chunk: string): void {
+    this.kept += chunk
+    if (this.kept.length > this.max) this.kept = this.kept.slice(-this.max)
+  }
+  get text(): string {
+    return this.kept
+  }
+}
+
+/**
+ * What a stderr says once PowerShell's CLIXML is taken out. The XML is the last thing a failing
+ * PowerShell writes, from its `#< CLIXML` header to the end. A kept tail (`Tail`) can start after
+ * that header, in the middle of the XML, and then only its tags and escapes (`_x000D__x000A_` is a
+ * line break) say what it is: from the start of the first line that shows either, the rest is XML.
+ */
+function withoutClixml(s: string): string[] {
+  let text = s.replace(/#< CLIXML[\s\S]*$/, '')
+  const xml = text.search(/<\/?(?:Objs|Obj|S|MS|PR|TN|TNRef|Props|I32|I64|B|AV)[\s>/]|_x000[0-9A-F]_/)
+  if (xml >= 0) text = text.slice(0, text.lastIndexOf('\n', xml) + 1)
+  return text.split(/\r?\n/)
+}
+
 /**
  * The one line of a remote's stderr that says why, for the person. Measured on a Windows laptop
  * (2026-10-05): ssh prefixes its own `** WARNING` lines about key exchange, PowerShell wraps an
@@ -712,9 +799,7 @@ export class SshTunnel implements Tunnel {
  * which says nothing. Those are skipped; a line that names an error wins over the last one.
  */
 export function lastLine(s: string): string {
-  const lines = s
-    .replace(/#< CLIXML[\s\S]*$/, '')
-    .split(/\r?\n/)
+  const lines = withoutClixml(s)
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('**') && !/^Node\.js v\d/.test(l) && !/^at /.test(l))
   return [...lines].reverse().find((l) => /error|denied|refused|timed out|not found|cannot|could not/i.test(l)) ?? lines.at(-1) ?? ''
