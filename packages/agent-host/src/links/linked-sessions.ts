@@ -1,6 +1,6 @@
 import { HostReadSessionResult, HostRecallHit, HostSessionRow, SessionId, ToolName } from '@cc/protocol'
 import type { SessionInfo } from '@cc/protocol'
-import type { LinkedProject, LinkedSessions, OrchestratedSession, RecallHit } from '../adapters/contract.js'
+import { NOT_REACHABLE, type LinkedProject, type LinkedSessions, type OrchestratedSession, type RecallHit } from '../adapters/contract.js'
 import { trustedJsonText } from '../sessions/orchestrator-tools.js'
 import { splitQualified } from './machine-ids.js'
 import type { RoutedMachine, RpcHandler } from './router.js'
@@ -44,6 +44,13 @@ function fencedLine(line: string): string {
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
+/**
+ * How long a name is resolved against a machine's project list before that machine is counted as not answering. A
+ * name is looked up on every ask_project call, so one slow or half-open link must not hold up the asks that name a
+ * project on this computer or on another machine; the link's own call timeout is much longer
+ */
+const LOOKUP_MS = 4000
+
 /** What to tell the model when a machine could not answer: its own words for a refusal, a plain cause otherwise */
 function cause(m: RoutedMachine, err: unknown): string {
   const message = err instanceof Error ? err.message : String(err)
@@ -62,7 +69,10 @@ export function linkedSessions(
   route: RpcHandler = notRouted,
   /** This computer, as a machine names who sent an instruction (`host.send`): the orchestrator is not that machine's own */
   hubName?: string,
+  /** How long resolving a project name waits for one machine's project list (`lookupMs`); tests shorten it */
+  options: { lookupMs?: number } = {},
 ): LinkedSessions {
+  const lookupMs = options.lookupMs ?? LOOKUP_MS
   const owner = (sessionId: string): RoutedMachine | null => {
     const split = splitQualified(sessionId)
     if (!split) return null
@@ -75,7 +85,7 @@ export function linkedSessions(
   }
   /** The router's call, its refusal as the sentence the model reads */
   const attempt = async <T>(m: RoutedMachine, run: () => Promise<T>): Promise<({ ok: true } & T) | { ok: false; error: string }> => {
-    if (!m.reachable) return { ok: false, error: `${m.name} is not reachable right now; try again once its link is back` }
+    if (!m.reachable) return { ok: false, error: `${m.name} is ${NOT_REACHABLE}; try again once its link is back` }
     try {
       return { ok: true, ...(await run()) }
     } catch (err) {
@@ -94,6 +104,8 @@ export function linkedSessions(
       path: oneLine(p.path, 4096),
       defaultTool: tool.data,
       machine: m.name,
+      machineId: m.id,
+      ...(typeof p.trusted === 'boolean' ? { trusted: p.trusted } : {}),
     }
   }
 
@@ -177,6 +189,50 @@ export function linkedSessions(
         }),
       )
       return found.flat()
+    },
+
+    async projects() {
+      const away: { machine: string; machineId: string; why: string }[] = []
+      const perMachine = await Promise.all(
+        [...machines()].map(async (m): Promise<LinkedProject[]> => {
+          /** What the headers mirror last held of the machine's projects, each marked with why it could not be asked */
+          const mirrored = (why: string): LinkedProject[] => {
+            away.push({ machine: m.name, machineId: m.id, why })
+            return (m.lastKnown('projects') ?? []).map((raw) => projectOf(m, raw)).filter((p): p is LinkedProject => p !== null).map((p) => ({ ...p, away: why }))
+          }
+          if (!m.reachable) return mirrored(NOT_REACHABLE)
+          let timer: ReturnType<typeof setTimeout> | undefined
+          try {
+            const slow = new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error(`did not answer within ${lookupMs % 1000 === 0 ? `${lookupMs / 1000} s` : `${lookupMs} ms`}`)), lookupMs)
+            })
+            const list = await Promise.race([m.call('projects.list', {}), slow])
+            return (Array.isArray(list) ? list : []).map((raw) => projectOf(m, raw)).filter((p): p is LinkedProject => p !== null)
+          } catch (err) {
+            return mirrored(cause(m, err))
+          } finally {
+            clearTimeout(timer)
+          }
+        }),
+      )
+      return { projects: perMachine.flat(), away }
+    },
+
+    async projectSessions(project) {
+      const m = owner(project.id)
+      if (!m) return { ok: false, error: `Not a project of a linked machine: ${project.id}` }
+      const projectId = m.q.strip(project.id, 'The project')
+      return attempt(m, async () => {
+        const list = await m.call('sessions.list', {})
+        const sessions: { id: string; name: string; state: string }[] = []
+        for (const raw of Array.isArray(list) ? list : []) {
+          // Ordinary sessions only, as on this computer: not an app's or a builder's, not the machine's orchestrator or a lead
+          if (!isObj(raw) || m.hides(raw) || raw.projectId !== projectId || raw.kind !== 'worker' || raw.appId) continue
+          if (typeof raw.id !== 'string' || !SessionId.safeParse(raw.id).success) continue
+          sessions.push({ id: m.q.id(raw.id), name: oneLine(raw.name), state: oneLine(raw.state, 40) })
+        }
+        return { sessions }
+      })
     },
 
     async createSession(project, opts) {

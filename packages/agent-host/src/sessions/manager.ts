@@ -14,7 +14,7 @@ import { AppAccess, writeShared } from './app-access.js'
 import type { AgentRunRequest, AgentRunResult, AppCheckReport, AppRef, BrokerHost, CapabilityQuestion, ExternalApps, HostCapability } from '../apps/external/runtime.js'
 import { AgentRunWait, finalAnswer } from './app-agents.js'
 import { CacheLedger } from './cache-ledger.js'
-import { ASK_WAIT_MS, askFrame, clipAnswer, pathsIn, readableGrants, taskLine, underGrant } from './ask-project.js'
+import { ASK_WAIT_MS, askFrame, clipAnswer, matchProjects, pathsIn, projectChoice, readableGrants, taskLine, underGrant, type AskableProject } from './ask-project.js'
 import { AGENT_CEILING, agentBranch, agentFrame, agentNoteFrame, agentName, presetWithin } from './start-agent.js'
 import { builderRole } from './app-builder.js'
 import { remember } from './folder-cache.js'
@@ -82,7 +82,8 @@ import {
   sessionLiveDefaults,
   withoutToolRecord,
 } from '@cc/protocol'
-import type { AgentAdapter, AgentProcess, AgentSpawnSpec, BusyAnswer, BusyChoice, ChildRunResult, AgentSessionOpts, AskProjectResult, RoutedCard, StartAgentOpts, CreateSessionOpts, EventSink, LinkedSessions, OrchestratedSession, OrchestratorTools, HistoryMessage, ProcessSource, RecallHit, SessionApps, SessionHandle } from '../adapters/contract.js'
+import { NOT_REACHABLE } from '../adapters/contract.js'
+import type { AgentAdapter, AgentProcess, AgentSpawnSpec, BusyAnswer, BusyChoice, ChildRunResult, AgentSessionOpts, AskProjectResult, RoutedCard, StartAgentOpts, CreateSessionOpts, EventSink, LinkedProject, LinkedSessions, OrchestratedSession, OrchestratorTools, HistoryMessage, ProcessSource, RecallHit, SessionApps, SessionHandle } from '../adapters/contract.js'
 import type { LaunchSettings } from '../adapters/contract.js'
 import { registeredTool } from '../adapters/registry.js'
 import { codeIntelligenceOff, isAppAgent, toolBundleFor, toolProfileFor, type ToolProfileFacts } from './tool-profiles.js'
@@ -542,6 +543,12 @@ const EXTERNAL_LIST_LIMIT = 200
  */
 const HOST_READ_MAX_LINES = 200
 const HOST_RECALL_MAX_HITS = 50
+
+/** How much of a linked machine's last message is read for an answer; `clipAnswer` then cuts it to the usual size */
+const ANSWER_READ_MAX_CHARS = 100_000
+
+/** A machine that cannot be asked, as the verb phrase after its name: its plain cause, or the words a model reads for any other */
+const awayPhrase = (why: string): string => (why === NOT_REACHABLE ? `is ${NOT_REACHABLE}` : `could not be asked just now (${why})`)
 
 /**
  * The sender a hub's orchestrator's instruction is recorded under (`sendFromHub`). Not a session of this host: no id
@@ -1555,8 +1562,11 @@ export class SessionManager {
    * orchestrator is waiting on becomes its report, as `reportBackIfAwaited` does for this host's sessions: on
    * however the turn ended (#166), once, and then the watch is cleared.
    */
-  observeLinked(e: { type: string; sessionId?: unknown; state?: unknown; error?: { message?: string } }): void {
+  observeLinked(e: { type: string; sessionId?: unknown; state?: unknown; error?: { message?: string }; machine?: unknown }): void {
+    if (e.type === 'machine_status') return this.observeLinkLoss(e.machine)
     if (typeof e.sessionId !== 'string') return
+    const ask = this.linkedAsks.get(e.sessionId)
+    if (ask) this.observeLinkedAsk(ask, e)
     const wait = this.linkedReports.get(e.sessionId)
     if (!wait) return
     const busy = e.state === 'working' || e.state === 'waiting_approval'
@@ -1569,6 +1579,49 @@ export class SessionManager {
     if (!ended) return
     this.linkedReports.delete(e.sessionId)
     void this.reportLinked(e.sessionId, wait.orchestratorId, e)
+  }
+
+  /** ask_project's tasks in a linked machine's sessions (#700), by the session's qualified id */
+  private linkedAsks = new Map<string, LinkedAsk>()
+
+  /**
+   * A machine's link that is no longer connected ends the tasks asked of its sessions: their events stop reaching the
+   * hub, so the turn's end would never be seen and the call would answer "still working" for good. The turn may well
+   * go on there; the sentence says so, and where to look.
+   */
+  private observeLinkLoss(machine: unknown): void {
+    const m = machine as { id?: unknown; name?: unknown; status?: unknown } | null
+    if (!m || typeof m.id !== 'string' || m.status === 'connected') return
+    const name = typeof m.name === 'string' && m.name ? m.name : m.id
+    for (const [sessionId, ask] of this.linkedAsks) {
+      if (ask.settled || !sessionId.startsWith(`${m.id}.`)) continue
+      ask.settle({ ok: false, error: `the link to ${name} dropped before the turn ended. The task was delivered and may still be running there; read the session once the link is back` })
+    }
+  }
+
+  /** A linked machine's event for a session an ask_project is waiting on: the turn ends as `observeLinked` judges it (#166) */
+  private observeLinkedAsk(ask: LinkedAsk, e: { type: string; state?: unknown; error?: { message?: string } }): void {
+    if (ask.settled) return
+    const busy = e.state === 'working' || e.state === 'waiting_approval'
+    if (e.type === 'approval_request' || e.type === 'question_request') {
+      ask.busy = true
+      ask.notice = e.type === 'approval_request' ? 'it waits on the person to answer an approval there' : 'it waits on the person to answer a question there'
+      for (const wake of [...ask.wake]) wake()
+      return
+    }
+    if (e.type === 'approval_resolved' || e.type === 'question_resolved') {
+      ask.notice = undefined
+      return
+    }
+    if (e.type === 'message_delta' || e.type === 'tool_call' || (e.type === 'state_change' && busy)) {
+      ask.busy = true
+      return
+    }
+    if (e.type === 'error' || e.type === 'limit_reached') {
+      ask.settle({ ok: false, error: e.error?.message ?? (e.type === 'limit_reached' ? 'the session reached its usage limit' : 'the session reported an error') })
+      return
+    }
+    if (e.type === 'turn_complete' || (e.type === 'state_change' && ask.busy && !busy)) ask.settle({ ok: true })
   }
 
   private async reportLinked(sessionId: string, orchestratorId: string, ending: { type: string; error?: { message?: string } }): Promise<void> {
@@ -6433,19 +6486,48 @@ export class SessionManager {
       return { ok: false, error: "This session's project is not trusted, so it cannot ask another project — the person can trust it from the project menu." }
     }
     const wanted = opts.project.trim()
-    const target =
-      projects.find((p) => p.id === wanted) ??
-      projects.find((p) => p.name === wanted) ??
-      projects.find((p) => p.name.toLowerCase() === wanted.toLowerCase())
-    if (!target) {
-      const others = projects.filter((p) => p.id !== caller.projectId).map((p) => p.name)
+    /*
+     * The projects on linked machines count too (#700): a unique bare name works, `<machine>/<name>` or a qualified id
+     * always does, and the same name on two machines is refused with both listed. A local id is exact, so it needs no
+     * round trip to the machines.
+     */
+    const reader = this.linkedReader
+    const exactHere = projects.some((p) => p.id === wanted)
+    const there = reader && !exactHere ? await reader.projects() : { projects: [], away: [] }
+    const askable: AskableProject[] = [
+      ...projects.map((p) => ({ id: p.id, name: p.name, machine: null, machineId: null })),
+      ...there.projects.map((p) => ({ id: p.id, name: p.name, machine: p.machine, machineId: p.machineId })),
+    ]
+    const found = matchProjects(wanted, askable)
+    if (found.length > 1) {
+      return {
+        ok: false,
+        error: `More than one project is called "${wanted}": ${found.map(projectChoice).join('; ')}. Ask again with the id of the one you mean, or machine/name for a project on a linked machine.`,
+      }
+    }
+    if (!found[0]) {
+      const slash = wanted.indexOf('/')
+      const prefix = slash > 0 ? wanted.slice(0, slash).trim().toLowerCase() : null
+      const down = there.away.find((a) => a.machineId === prefix || a.machine.toLowerCase() === prefix || wanted.startsWith(`${a.machineId}.`))
+      if (down) return { ok: false, error: `${down.machine} ${awayPhrase(down.why)}, so "${wanted}" cannot be asked there. Try again once its link is back.` }
+      const others = [
+        ...projects.filter((p) => p.id !== caller.projectId).map((p) => (reader ? `${p.name} (this computer)` : p.name)),
+        ...there.projects.map((p) => `${p.name} (on ${p.machine}${p.away ? `, ${p.away}` : ''})`),
+      ]
+      const unasked = there.away.length ? ` Not asked, and its projects may be missing: ${there.away.map((a) => `${a.machine} (${a.why})`).join(', ')}.` : ''
       return {
         ok: false,
         error: others.length
-          ? `No project named "${wanted}". The other projects are: ${others.join(', ')}.`
-          : `No project named "${wanted}" — this is the only project in Centralu.`,
+          ? `No project named "${wanted}". The other projects are: ${others.join(', ')}.${unasked}`
+          : `No project named "${wanted}" — this is the only project in Centralu.${unasked}`,
       }
     }
+    const remoteTarget = there.projects.find((p) => p.id === found[0]!.id)
+    if (reader && remoteTarget) {
+      const callerProject = projects.find((p) => p.id === caller.projectId)?.name ?? 'another project'
+      return this.askLinkedProject(callerId, caller.projectId, callerProject, remoteTarget, reader, opts, signal)
+    }
+    const target = projects.find((p) => p.id === found[0]!.id)!
     if (target.id === caller.projectId) return { ok: false, error: `${target.name} is this session's own project — do the work here.` }
 
     const candidates = [...this.meta.values()].filter((s) =>
@@ -6552,6 +6634,166 @@ export class SessionManager {
       return { ok: false, error: `Could not hand the task to ${target.name}: ${(e as Error).message}` }
     }
     return this.awaitDelegation(key, d, signal)
+  }
+
+  /**
+   * ask_project to a project on a linked machine (#700, docs/plans/remote-hub.md §12.2 step 3). The same call as for a
+   * project here, run through the links: the existing ordinary session is chosen by name or id, the person's consent
+   * is asked for this call (a card that names the machine; "always" is read as allow once, as `create_project`'s is,
+   * since a remembered consent is a row tied to two projects of this computer), the task is delivered as the hub's
+   * instruction (`host.send`), and the turn is waited on through the machine's events. The session runs on that
+   * machine, with its own logins and folder, under the preset it has. The answer comes back as everywhere else; the
+   * paths it names are that machine's files and are listed, none opened to the caller.
+   *
+   * Not here yet: a note or a queue into a busy session (`ifBusy`), cards of the machine's session answered by the
+   * caller (the person answers them in the hub's window), and stopping the machine's turn when the call is cancelled.
+   */
+  private async askLinkedProject(
+    callerId: string,
+    callerProjectId: string,
+    callerProject: string,
+    target: LinkedProject,
+    reader: LinkedSessions,
+    opts: { session?: string; task?: string; ifBusy?: 'note' | 'queue' },
+    signal?: AbortSignal,
+  ): Promise<AskProjectResult> {
+    const label = `${target.name} on ${target.machine}`
+    const project = `${target.machineId}/${target.name}`
+    if (target.away) {
+      // A task already given there: the machine is down, and what became of it is the answer, not a refusal to ask
+      const given = [...this.linkedAsks.values()].filter((a) => a.callerId === callerId && a.project === project && (!opts.session || a.sessionId === opts.session.trim()))
+      if (!opts.task && given.length === 1) return this.awaitLinkedAsk(given[0]!, reader, signal)
+      return { ok: false, error: `${target.machine} ${awayPhrase(target.away)}, so ${label} cannot be asked. Try again once its link is back.` }
+    }
+    const listed = await reader.projectSessions(target)
+    if (!listed.ok) return listed
+    const sessions = listed.sessions
+    const wantedSession = opts.session?.trim()
+    // A turn that ended without its event reaching the hub (the link was down) is over once the machine says the session is out of its turn
+    for (const s of sessions) {
+      const stale = this.linkedAsks.get(s.id)
+      if (stale && !stale.settled && stale.busy && !inTurn(s.state as SessionState)) stale.settle({ ok: true })
+    }
+    const mine = sessions.filter((s) => {
+      const ask = this.linkedAsks.get(s.id)
+      return ask && ask.callerId === callerId
+    })
+    if (!opts.task && !wantedSession && mine.length === 1) return this.awaitLinkedAsk(this.linkedAsks.get(mine[0]!.id)!, reader, signal)
+    const named = wantedSession ? sessions.filter((s) => s.name.toLowerCase() === wantedSession.toLowerCase()) : sessions
+    const chosen = sessions.find((s) => s.id === wantedSession) ?? (named.length === 1 ? named[0] : undefined)
+    if (!chosen) {
+      const list = sessions.map((s) => JSON.stringify({ id: s.id, name: s.name, state: s.state })).join('\n')
+      return { ok: false, error: sessions.length
+        ? `${wantedSession ? `No unique ordinary session named "${wantedSession}" in ${label}. ` : ''}Name a session with the session argument. Sessions (name, state):\n${list}`
+        : `${label} has no ordinary session. The person has to open one there; this call cannot create one.` }
+    }
+    const pending = this.linkedAsks.get(chosen.id)
+    if (pending && pending.callerId === callerId && !opts.task) return this.awaitLinkedAsk(pending, reader, signal)
+    if (pending && !pending.settled) {
+      return { ok: false, error: pending.callerId === callerId
+        ? `${label} is still working on your last task in the session "${chosen.name}". Call ask_project with project "${project}", session "${chosen.id}" and no task to wait for it.`
+        : `The session "${chosen.name}" in ${label} is busy with another session's task. Name another session, or ask again later.` }
+    }
+    if (!opts.task) return { ok: false, error: `Give a task: what ${label} / ${chosen.name} should do.` }
+    if (inTurn(chosen.state as SessionState)) {
+      return { ok: false, error: `The session "${chosen.name}" in ${label} is busy with a turn that is not yours (${chosen.state}). A note or a queue into a session on another machine is not available yet: name another session, or ask again once it is idle.` }
+    }
+
+    const decision = await this.askHost(
+      callerId,
+      {
+        kind: 'project_access',
+        access: 'delegate',
+        from: { id: callerProjectId, name: callerProject },
+        to: { id: target.id, name: target.name, machine: target.machine, ...(target.trusted !== undefined ? { trusted: target.trusted } : {}) },
+        text: taskLine(opts.task),
+        session: { id: chosen.id, name: chosen.name },
+      },
+      signal,
+    )
+    if (decision === 'deny') return { ok: false, error: `The person did not allow ${callerProject} to reach ${label} this way. Do not ask again unless they tell you to.` }
+    if (decision === null) return { ok: false, error: `The question to the person was withdrawn before they answered, so ${label} was not reached.` }
+    if (signal?.aborted) return { ok: false, error: 'The call was cancelled before delivery' }
+    /*
+     * The card stood while the person could use the session there: ask the machine again before anything is sent. A
+     * task sent into a turn that is not the caller's would join it (and its end would settle this call), the very
+     * thing the busy refusal above keeps out. A note or a queue is not available across machines, so this refuses.
+     */
+    const again = await reader.projectSessions(target)
+    if (!again.ok) return { ok: false, error: `Could not hand the task to ${label}: ${again.error}` }
+    const now = again.sessions.find((s) => s.id === chosen.id)
+    if (!now) return { ok: false, error: `The session "${chosen.name}" in ${label} is no longer available; nothing was sent.` }
+    if (inTurn(now.state as SessionState)) {
+      return { ok: false, error: `The session "${chosen.name}" in ${label} started a turn of its own while the question to the person stood (${now.state}); nothing was sent. Ask again once it is idle, or name another session.` }
+    }
+    const taken = this.linkedAsks.get(chosen.id)
+    if (taken && !taken.settled) return { ok: false, error: `The session "${chosen.name}" in ${label} was given another task while the question stood; nothing was sent. Name another session, or ask again later.` }
+
+    let settle!: LinkedAsk['settle']
+    const outcome = new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => (settle = resolve))
+    const ask: LinkedAsk = {
+      callerId, sessionId: chosen.id, sessionName: chosen.name, project, busy: false, settled: false, outcome, wake: new Set(),
+      settle: (r) => {
+        if (ask.settled) return
+        ask.settled = true
+        settle(r)
+      },
+    }
+    // Registered before the send: the machine's first events can reach the hub before its answer does
+    this.linkedAsks.set(chosen.id, ask)
+    const sent = await reader.send(chosen.id, askFrame(callerProject, opts.task), labelOf(this.store, this.meta.get(callerId)!))
+    if (!sent.ok) {
+      if (this.linkedAsks.get(chosen.id) === ask) this.linkedAsks.delete(chosen.id)
+      return { ok: false, error: `Could not hand the task to ${label}: ${sent.error}` }
+    }
+    return this.awaitLinkedAsk(ask, reader, signal)
+  }
+
+  /** Waits for a linked machine's turn up to the bound, as `awaitDelegation` does, and reads its answer there */
+  private async awaitLinkedAsk(ask: LinkedAsk, reader: LinkedSessions, signal?: AbortSignal): Promise<AskProjectResult> {
+    const working = (): AskProjectResult => ({
+      ok: true, state: 'working', project: ask.project, sessionId: ask.sessionId, sessionName: ask.sessionName,
+      ...(ask.notice ? { notice: ask.notice } : {}),
+    })
+    if (!ask.settled && ask.notice) return working()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let onAbort: (() => void) | undefined
+    let wake: (() => void) | undefined
+    const bound = new Promise<'bound'>((resolve) => (timer = setTimeout(() => resolve('bound'), ASK_WAIT_MS)))
+    const aborted = new Promise<'aborted'>((resolve) => {
+      if (!signal) return
+      onAbort = () => resolve('aborted')
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    })
+    const asked = new Promise<'asked'>((resolve) => ask.wake.add((wake = () => resolve('asked'))))
+    try {
+      const r = await Promise.race([ask.outcome, bound, aborted, asked])
+      if (r === 'asked' || r === 'bound') return working()
+      if (r === 'aborted') {
+        // The turn runs on the machine and this host cannot stop it from here: the call stops waiting and says so
+        return { ok: false, error: `The call was cancelled; ${ask.project}'s session "${ask.sessionName}" was left running.` }
+      }
+      if (this.linkedAsks.get(ask.sessionId) === ask) this.linkedAsks.delete(ask.sessionId)
+      if (!r.ok) return { ok: false, error: `${ask.project}'s session "${ask.sessionName}" [${ask.sessionId}] did not finish: ${r.error}. Tell the person, or ask again with a clearer task.` }
+      // Its last words, read there: the whole text, cut here as an answer is cut everywhere
+      const answer = await reader.lastWords(ask.sessionId, ANSWER_READ_MAX_CHARS).catch(() => '')
+      return {
+        ok: true,
+        state: 'done',
+        project: ask.project,
+        sessionId: ask.sessionId,
+        sessionName: ask.sessionName,
+        answer: clipAnswer(answer, ask.sessionName),
+        // Paths in the answer are that machine's: listed, not opened to the caller
+        readable: [],
+        outside: pathsIn(answer),
+      }
+    } finally {
+      if (wake) ask.wake.delete(wake)
+      clearTimeout(timer)
+      if (onAbort) signal?.removeEventListener('abort', onAbort)
+    }
   }
 
   /** Registers the wait on the delegated session's turn (the same watcher an app's agent uses, `AgentRunWait`) */
@@ -9615,6 +9857,28 @@ type HostAsk = {
   /** The state the session rested in when the card was raised between turns (#673), to return to once it closes */
   restState?: SessionState
   resolve: (d: HostAskAnswer) => void
+}
+
+/**
+ * An ask_project call's task in a session of a linked machine, while its turn runs there (#700). The hub cannot see
+ * that turn but through the machine's events, so the end of the turn is what `observeLinked` settles.
+ */
+type LinkedAsk = {
+  callerId: string
+  /** The machine's session, qualified */
+  sessionId: string
+  sessionName: string
+  /** `<machine id>/<project name>`: how the caller names the project again, and how the answer names it */
+  project: string
+  /** Whether the turn was seen working, so a state the machine reports before it starts is not taken for its end */
+  busy: boolean
+  settled: boolean
+  /** What the session waits on, when it waits on the person there (an approval, a question) */
+  notice?: string
+  outcome: Promise<{ ok: true } | { ok: false; error: string }>
+  settle(r: { ok: true } | { ok: false; error: string }): void
+  /** The calls waiting on it, woken when the session stops on a card */
+  wake: Set<() => void>
 }
 
 /** One ask_project call's work in the target project (#371 part B) — see `SessionManager.delegations` */
