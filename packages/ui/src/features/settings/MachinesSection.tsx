@@ -352,7 +352,7 @@ function VersionPrompt({ m, onOpenCategory }: { m: MachineInfo; onOpenCategory: 
         <div className="mt-2">
           <p className="text-xs leading-body text-ink-muted">
             This computer cannot update {m.name} from here. On {m.name}, run this, then restart{' '}
-            <code className="font-mono">centralu serve</code>:
+            <code className="font-mono">{p.centralu} serve</code>:
           </p>
           <div className="mt-1 flex items-center gap-2">
             <code
@@ -376,7 +376,7 @@ function VersionPrompt({ m, onOpenCategory }: { m: MachineInfo; onOpenCategory: 
           </div>
         </div>
       )}
-      {p.compatible ? (
+      {!p.held ? null : p.compatible ? (
         <button
           type="button"
           className="mt-2 rounded-md border border-line px-2 py-0.5 text-xs text-ink-muted transition-colors hover:border-line-strong hover:text-ink"
