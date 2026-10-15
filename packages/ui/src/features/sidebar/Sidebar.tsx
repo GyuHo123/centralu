@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { ProjectInfo, SessionState, ToolName } from '@cc/protocol'
 import type { SessionSummary } from '@cc/core'
 import { appSessionsNeedAttention, groupProjectAppSessions, treeRows } from './tree.js'
@@ -78,31 +78,54 @@ function useDropLine(mime: string, onDrop: (draggedId: string, before: boolean) 
 
 /*
  * One column grid for the whole tree (#685). A row's content (the tool mark or app icon, then the name) starts at
- * x = NAME_X + 16 * level, where NAME_X is the project name's own column (24px). So every level starts one 16px step
+ * x = NAME_X + 16 * level, where NAME_X is the project name's own column (32px). So every level starts one 16px step
  * right of its parent's **content**, not of its parent's chevron.
  *
- * A row is its band: a 2px bar, then the 16px gutter its chevron stands in (GroupToggle), then the content. The band
- * therefore starts 18px before the content, which is the margin below: 24 + 16 * level - 18. The gutter is part of the
+ * A row is its band: a 2px bar, then the 28px gutter its chevron stands in (GroupToggle), then the content. The band
+ * therefore starts 30px before the content, which is the margin below: 32 + 16 * level - 30. The gutter is part of the
  * row at every level, so a sibling with no chevron keeps the same column, and the project's own chevron stands in the
- * 16px left of its name the same way. The values are literal classes so Tailwind finds them.
+ * 28px left of its name the same way. The values are literal classes so Tailwind finds them.
+ *
+ * The gutter is wider than the 24px button (DISCLOSURE_BUTTON) that stands in it: the button is centred, so the chevron
+ * glyph keeps a few pixels of air from the name it belongs to instead of touching it (it used to end on the name's
+ * first letter in the project row).
  */
-const INDENT = { 1: 'ml-[22px]', 2: 'ml-[38px]', 3: 'ml-[54px]' } as const
+const INDENT = { 1: 'ml-[18px]', 2: 'ml-[34px]', 3: 'ml-[50px]' } as const
 /** The guide line a nested row hangs from: 1px just outside its band, so it adds nothing to the row's width */
 const GUIDE = 'before:absolute before:inset-y-0 before:-left-px before:w-px before:bg-line/60 before:content-[""]'
-/** What a row's button stands in front of its content: the 2px bar (border-l-2) and, after it, this 16px gutter */
-const ROW_PAD = 'pl-4'
+/**
+ * The chevron gutter, written once: every place that stands in it or starts after it reads this variable, which the
+ * sidebar sets on its root, so a change cannot leave one of them behind. The margins in INDENT do not depend on it
+ * (the gutter is both inside the band and subtracted from the name column).
+ */
+const GUTTER = 28
+const SIDEBAR_VARS = { '--sidebar-gutter': `${GUTTER}px` } as CSSProperties
+const GUTTER_WIDTH = 'w-(--sidebar-gutter)'
+/** The project name's own column, which "Your apps" title shares: the 2px bar, 2px of padding, then the gutter */
+const NAME_PAD = 'pl-[calc(var(--sidebar-gutter)+4px)]'
+/**
+ * What a row with a hover menu keeps clear at its right: the ⋯ button (22px) and its 12px margin (right-3) is 34px,
+ * so 40px. It was 56px from when a row had two buttons; at the narrowest sidebar the 16px it gives back is what a
+ * level-3 name has to show more than its first letter.
+ */
+const ROW_MENU_PAD = 'pr-10'
+/** What a row's button stands in front of its content: the 2px bar (border-l-2) and, after it, this 28px gutter */
+const ROW_PAD = 'pl-(--sidebar-gutter)'
+/** The fold chevron's button, and its glyph: one size for the project row and for every row that folds a group */
+const DISCLOSURE_BUTTON = 'size-6'
+const DISCLOSURE_ICON = 14
 
 /**
  * The chevron of a group that folds (#666): the children a session started, the sessions an app owns.
  *
- * It stands in the **gutter to the left of its row's content**, the 16px every row keeps free after its bar, so the
+ * It stands in the **gutter to the left of its row's content**, the 28px every row keeps free after its bar, so the
  * content (tool mark, name) starts in the same column whether or not the row has a group. It is faint ink: a state, not a
  * call to act, so it spends no brightness (the project row's arrow is the same). The project row keeps its own
  * arrow; this one is for what stands under it.
  */
 function GroupToggle({ folded, label, testId, onToggle }: { folded: boolean; label: string; testId: string; onToggle: () => void }) {
   return (
-    <span className="absolute inset-y-0 left-0.5 flex w-4 items-center justify-center">
+    <span className={`absolute inset-y-0 left-0.5 flex ${GUTTER_WIDTH} items-center justify-center`}>
       <Tooltip content={label} testId={`${testId}-tip`}>
         <button
           type="button"
@@ -110,9 +133,9 @@ function GroupToggle({ folded, label, testId, onToggle }: { folded: boolean; lab
           aria-expanded={!folded}
           onClick={onToggle}
           data-testid={testId}
-          className="flex size-4 items-center justify-center rounded-sm text-ink-faint transition-colors hover:text-ink"
+          className={`flex ${DISCLOSURE_BUTTON} items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-surface-hover/60 hover:text-ink`}
         >
-          <ChevronIcon open={!folded} size={10} />
+          <ChevronIcon open={!folded} size={DISCLOSURE_ICON} />
         </button>
       </Tooltip>
     </span>
@@ -307,7 +330,7 @@ export function Sidebar() {
   return (
     <aside
       className="relative flex h-full shrink-0 flex-col overflow-y-auto border-r border-line bg-surface-side"
-      style={{ width }}
+      style={{ width, ...SIDEBAR_VARS }}
       data-testid="sidebar"
     >
       <ResizeHandle
@@ -711,11 +734,14 @@ function ProjectBlock({ projectId }: { projectId: string }) {
         **The band must not move anything.** A session row is 31.5px tall (py-1.5 around a 13px line); this line
         is only its text. The padding that makes the band a row's height is cancelled by an equal negative margin,
         so every row below stands exactly where it did, and both are always on, so selecting it changes nothing
-        but colour. The bar is always there too, transparent until selected. The name starts at 24px, the column every
-        level below is measured from (INDENT), with the chevron's 16px gutter just before it (#685).
+        but colour. The bar is always there too, transparent until selected. The name starts at 32px, the column every
+        level below is measured from (INDENT), with the chevron's 28px gutter just before it (#685).
+
+        Every item on the line is centred on it, not aligned on the text baseline: an icon button has no baseline of its
+        own, so the `+`, the ⋯ and the arrow each sat a different distance from the name's centre (2 to 3px).
       */}
       <header
-        className={`group -my-1.5 flex items-baseline gap-2 border-l-2 py-1.5 pl-1.5 pr-3 transition-colors ${
+        className={`group -my-1.5 flex items-center gap-2 border-l-2 py-1.5 pl-0.5 pr-3 transition-colors ${
           selected ? 'border-l-ink-muted bg-surface-hover/40' : 'border-l-transparent'
         }`}
         draggable
@@ -733,18 +759,18 @@ function ProjectBlock({ projectId }: { projectId: string }) {
 
           Unlike that, it is **always visible.** Being folded is a state, not an action, and if it
           only shows on hover there is nowhere to ask why a row is missing. The arrow stands in the
-          same gutter a session row's chevron stands in, one level out: a 16px box that ends where the name begins (the
-          button is 20px and centred in it, and the box cancels the row's gap), so a session's tool mark starts one
-          step right of the name (#685). Since the name line aligns on the text baseline, the button with no text is
-          centered separately inside a wrapping box.
+          same gutter a session row's chevron stands in, one level out: a 28px box that ends where the name begins (the
+          button is 24px and centred in it, and the box cancels the row's gap), so a session's tool mark starts one
+          step right of the name (#685).
         */}
-        <span className="-my-1 -mr-2 flex w-4 shrink-0 justify-center self-center">
+        <span className={`-my-1 -mr-2 flex ${GUTTER_WIDTH} shrink-0 justify-center self-center`}>
           <IconButton
             label={folded ? `Expand ${project.name}` : `Collapse ${project.name}`}
             onClick={() => toggleFold(projectId)}
             testId={`project-fold-${project.name}`}
+            className={DISCLOSURE_BUTTON}
           >
-            <ChevronIcon open={!folded} />
+            <ChevronIcon open={!folded} size={DISCLOSURE_ICON} />
           </IconButton>
         </span>
         {/*
@@ -800,7 +826,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
           with the menu, on hover or focus.
         */}
         <span
-          className={`-my-1 shrink-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 ${
+          className={`-my-1 flex shrink-0 items-center transition-opacity focus-within:opacity-100 group-hover:opacity-100 ${
             summary.length > 0 ? '' : 'ml-auto'
           } ${open ? 'opacity-100' : 'opacity-0'}`}
         >
@@ -821,7 +847,7 @@ function ProjectBlock({ projectId }: { projectId: string }) {
             onClick={() => openNewSession(projectId)}
             testId={`project-new-session-options-${project.name}`}
           >
-            <ChevronIcon open size={12} />
+            <ChevronIcon open size={14} />
           </IconButton>
         </span>
         <span
@@ -960,12 +986,11 @@ function ProjectBlock({ projectId }: { projectId: string }) {
                       */
                       data-unread={(unread && !focused) || undefined}
                       /*
-                        The right padding has to clear **two** buttons that appear on hover.
-                        pr-8 is a value from when only delete existed; once the pencil was added, a
-                        long name would run in underneath the buttons — text hidden under a button
-                        is worse than text truncated.
+                        The right padding has to clear the menu button that appears on hover
+                        (ROW_MENU_PAD): a long name that ran in underneath it would be text hidden
+                        under a button, which is worse than text truncated.
                       */
-                      className={`flex w-full items-center gap-2 border-l-2 py-1.5 ${ROW_PAD} pr-14 text-left text-md transition-colors ${
+                      className={`flex w-full items-center gap-2 border-l-2 py-1.5 ${ROW_PAD} ${ROW_MENU_PAD} text-left text-md transition-colors ${
                         focused
                           ? 'border-l-ink-muted bg-surface-hover/40 text-ink'
                           : 'border-l-transparent text-ink-muted hover:bg-surface-hover/20 hover:text-ink'
@@ -1253,7 +1278,7 @@ function ProjectAppSessions({ sessions, projectId, folded }: { sessions: Session
               data-testid={`app-session-row-${s.id}`}
               aria-current={focused ? 'page' : undefined}
               data-unread={(unread && !focused) || undefined}
-              className={`flex w-full items-center gap-2 border-l-2 py-1.5 ${ROW_PAD} pr-14 text-left text-md transition-colors ${
+              className={`flex w-full items-center gap-2 border-l-2 py-1.5 ${ROW_PAD} ${ROW_MENU_PAD} text-left text-md transition-colors ${
                 focused
                   ? 'border-l-ink-muted bg-surface-hover/40 text-ink'
                   : 'border-l-transparent text-ink-muted hover:bg-surface-hover/20 hover:text-ink'
@@ -1509,15 +1534,15 @@ function UserApps() {
   const openImport = useStore((s) => s.openImport)
   return (
     <section className="border-b border-line/70 py-2.5" data-testid="user-apps">
-      {/* Its title stands in the column a project's name does (24px), so its apps are one step in from it like a project's rows */}
-      <header className="flex items-center gap-2 pl-6 pr-3">
+      {/* Its title stands in the column a project's name does (32px), so its apps are one step in from it like a project's rows */}
+      <header className={`flex items-center gap-2 ${NAME_PAD} pr-3`}>
         <span className={`text-md font-medium tracking-tight ${apps.length ? 'text-ink' : 'text-ink-faint'}`}>Your apps</span>
-        <span className="-my-1 ml-auto shrink-0">
+        <span className="-my-1 flex items-center ml-auto shrink-0">
           <IconButton label="Import an app from a folder, a .zip, or a link" onClick={() => openImport()} testId="user-apps-import" align="right">
             <ImportIcon size={13} />
           </IconButton>
         </span>
-        <span className="-my-1 shrink-0">
+        <span className="-my-1 flex items-center shrink-0">
           <IconButton label="New app for every project" onClick={() => setNewAppOpen(true)} testId="user-apps-new" align="right">
             <PlusIcon size={13} />
           </IconButton>
