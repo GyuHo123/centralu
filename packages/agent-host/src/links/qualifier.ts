@@ -259,6 +259,7 @@ export class Qualifier {
       case 'app_state_changed':
       case 'agent_versions':
       case 'external_app_questions_changed':
+      case 'orchestrator_proposals_changed':
         return null
       case 'error':
         return sid === undefined ? null : base
