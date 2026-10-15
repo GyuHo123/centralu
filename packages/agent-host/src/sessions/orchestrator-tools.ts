@@ -684,7 +684,7 @@ function agentStateText(r: Exclude<Extract<ChildRunResult, { ok: true }>, { stat
     case 'stopped':
       // A request withdrawn before the person answered has no session to name (#673)
       if (!r.sessionName) return { text: `Withdrew request ${r.sessionId}: its card is gone and no session was started.` }
-      return { text: `Stopped ${who}.` }
+      return { text: `Stopped ${who}.${r.notice ? ` ${r.notice}` : ''}` }
     case 'deleted':
       if (r.branch === undefined) return { text: `Moved ${who} to the trash. Tell the person in one line.` }
       // The worktree folder was already gone (#715): nothing was lost, and the answer says what became of the branch
@@ -701,6 +701,7 @@ function agentStateText(r: Exclude<Extract<ChildRunResult, { ok: true }>, { stat
       return {
         text:
           `${who} is not working on anything you gave it (${r.sessionState}${r.interruption ? `, ${interruptionWords(r.interruption)}` : ''}). Its last answer, as JSON:\n${trustedJsonText(r.answer || '(no final text)')}\n` +
+          (r.notice ? `${r.notice}\n` : '') +
           `agent_session(sessionId="${r.sessionId}", action="send", text=…) gives it more.`,
       }
     case 'done': {

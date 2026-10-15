@@ -519,6 +519,49 @@ const BACKGROUND_UNKNOWN_MAX_MS = 2 * 60 * 60 * 1000
  * to end before it is applied anyway (#648). A safety change does not wait at all (`applyDeferredRestart`).
  */
 const BACKGROUND_HOLD_MAX_MS = 60 * 60 * 1000
+/**
+ * How long a report held over a session's own background work (#721) waits, once that work has ended with no turn
+ * running, for the turn its ending may start. Claude starts that turn within a second of the task's end (its
+ * task-notification); a task the person stopped by hand starts none, and the report then goes out with the last answer.
+ */
+export const PAUSED_REPORT_SETTLE_MS = 60_000
+/** The store's record that a session's owed report is held over its own background work (#721), kept across a swap */
+const pausedReportKey = (sessionId: string) => `report_paused:${sessionId}`
+/** A task a paused report waits on (#721), as kept in `report_paused:<session>` */
+type PausedTask = { id: string; description: string }
+/** The tasks of a stored pause, or null when there is none (an unreadable value is a pause on nothing known) */
+function readPausedTasks(raw: string | null): PausedTask[] | null {
+  if (raw === null) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed)
+      ? parsed.filter((t): t is PausedTask => !!t && typeof t.id === 'string' && typeof t.description === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+/** Tasks named for another session's model: each description is a single framed field (#120), with how it ended */
+function taskList(tasks: readonly BackgroundTask[], status = false): string {
+  return tasks.map((t) => (status ? `${frameField(t.description)}: ${t.status}` : frameField(t.description))).join(', ')
+}
+/** The first line of a report held over the session's own background work (#721) */
+function pausedReportLine(running: readonly BackgroundTask[], stoppable: boolean): string {
+  return (
+    `[Centralu] The assigned work paused: its turn ended while its own background work is still running (${taskList(running)}). ` +
+    'If that work is a server or watcher it leaves running, the answer below may be its final one. ' +
+    'A final report follows only if that work ends' +
+    (stoppable ? '; agent_session(action="stop") on it stops that work and ends the wait.\n' : '.\n')
+  )
+}
+/** The first line of a paused report settled with no turn after its work ended (#721): how that work ended */
+function settledReportLine(tasks: readonly BackgroundTask[]): string {
+  const clean = tasks.every((t) => t.status === 'completed')
+  return (
+    `[Centralu] The assigned work's background work ended (${taskList(tasks, true)}) and no turn followed` +
+    (clean ? '; its last answer is below.\n' : ', so the work may not have finished; its last answer is below.\n')
+  )
+}
 
 /** A path resolved through the nearest folder that exists, so a folder not made yet still compares with its parent's real path */
 function canonicalPath(path: string): string {
@@ -696,13 +739,88 @@ export class SessionManager {
    * observer's `status` and `wait` read this, never the owner's delegation, until a read takes its settled outcome.
    */
   private observerNotes = new Map<string, { run: Delegation; waiters: number; told: boolean }>()
+  /**
+   * Reports held over the session's own background work (#721): a turn ended while work it started still ran, so the
+   * work is paused, not over. The report stays owed in `awaitingReport` (its caller was told once that it paused) and
+   * goes out at the end of a turn with none of that work left, or `PAUSED_REPORT_SETTLE_MS` after the work ended with
+   * no turn following. Holds the tasks it paused on (each id and description, for how they ended and for `stop`).
+   * Mirrored in the app setting `report_paused:<session>`, so a swap keeps it with the mark.
+   */
+  private pausedReports = new Map<string, PausedTask[]>()
+  /** The settle timer of a paused report whose background work has ended (#721) */
+  private pausedSettles = new Map<string, ReturnType<typeof setTimeout>>()
+  /** A new mark is new work: a pause of the work before it is not this work's, nor one an older build left stored */
   private markReport(sessionId: string, callerId: string): void {
+    this.unpauseReport(sessionId)
+    this.store.deleteAppSetting(pausedReportKey(sessionId))
     this.awaitingReport.set(sessionId, callerId)
     this.store.setReportMark(sessionId, callerId)
   }
   private clearReport(sessionId: string): void {
+    this.unpauseReport(sessionId)
     if (!this.awaitingReport.delete(sessionId)) return
     this.store.clearReportMark(sessionId)
+  }
+  /** Holds the session's owed report over its own background work (#721); the mark itself stays as it is */
+  private pauseReport(sessionId: string, running: readonly BackgroundTask[]): void {
+    const held = this.pausedReports.get(sessionId) ?? []
+    const added = running.filter((t) => !held.some((h) => h.id === t.id)).map((t) => ({ id: t.id, description: t.description }))
+    if (!this.pausedReports.has(sessionId) || added.length) {
+      const next = [...held, ...added]
+      this.pausedReports.set(sessionId, next)
+      this.store.setAppSetting(pausedReportKey(sessionId), JSON.stringify(next))
+    }
+    this.settlePausedReport(sessionId)
+  }
+  private unpauseReport(sessionId: string): void {
+    const timer = this.pausedSettles.get(sessionId)
+    if (timer) clearTimeout(timer)
+    this.pausedSettles.delete(sessionId)
+    if (this.pausedReports.delete(sessionId)) this.store.deleteAppSetting(pausedReportKey(sessionId))
+  }
+  private stopSettlingPausedReports(): void {
+    for (const timer of this.pausedSettles.values()) clearTimeout(timer)
+    this.pausedSettles.clear()
+  }
+  /**
+   * The background work the session's tool lists as running, which a turn ending now does not end (#721). A timer the
+   * tool holds (`/loop`, a scheduled prompt) is not work: a report is not held for it, or a loop would hold it for good
+   */
+  private ownTasksRunning(sessionId: string): BackgroundTask[] {
+    const m = this.meta.get(sessionId)
+    return m ? liveBackgroundTasks(m.backgroundTasks).filter((t) => !t.timer) : []
+  }
+  /** The tasks a paused report waited on, as the session lists them now: how each ended, or still running (#721) */
+  private pausedTasksNow(sessionId: string): BackgroundTask[] {
+    const listed = this.meta.get(sessionId)?.backgroundTasks ?? []
+    return (this.pausedReports.get(sessionId) ?? []).map((t) =>
+      listed.find((l) => l.id === t.id) ?? { id: t.id, kind: 'other' as const, description: t.description, status: 'completed' as const })
+  }
+  /**
+   * A paused report whose background work has ended with no turn running (#721): the turn that ending starts ends the
+   * work and reports it. If none starts within `PAUSED_REPORT_SETTLE_MS` (a task the person stopped, a tool that
+   * starts no turn for it), the report goes out as the work's end with the last answer. Each change of the work starts
+   * the wait again; a turn running when it is up reports at its own end.
+   */
+  private settlePausedReport(sessionId: string): void {
+    const pending = this.pausedSettles.get(sessionId)
+    if (pending) clearTimeout(pending)
+    this.pausedSettles.delete(sessionId)
+    if (this.disposing || this.handingOver) return
+    const quiet = () => {
+      const m = this.meta.get(sessionId)
+      return this.pausedReports.has(sessionId) && !!m && !inTurn(m.state) && !this.inputsHeld(sessionId) && !this.delivering.has(sessionId) &&
+        this.ownTasksRunning(sessionId).length === 0
+    }
+    if (!quiet()) return
+    const timer = setTimeout(() => {
+      this.pausedSettles.delete(sessionId)
+      if (!quiet() || this.handingOver || this.disposing) return
+      console.error(`[sessions] ${sessionId.slice(0, 8)}: its background work ended and no turn followed; reporting the work as ended`)
+      void this.reportBackIfAwaited(sessionId, { type: 'turn_complete', sessionId }, undefined, this.pausedTasksNow(sessionId))
+    }, PAUSED_REPORT_SETTLE_MS)
+    timer.unref?.()
+    this.pausedSettles.set(sessionId, timer)
   }
   /**
    * Delegated turns (#676): session -> the session that gave it the turn it is running, and the cards that session was
@@ -996,18 +1114,23 @@ export class SessionManager {
      * rather than left to name an unrelated later turn as "the assigned work finished" (#166): a session with no
      * process lost its turn with the old host, and a kept session already at rest finished its turn while the old host
      * was letting go (`handingOver` held that report back); its answer stays readable through agent_session.
+     * A kept session at rest whose report was paused over its own background work (#721) still owes it: that work runs
+     * on in the kept process, and the turn its ending starts ends under this host.
      */
     for (const mark of store.listReportMarks()) {
       const child = this.meta.get(mark.sessionId)
-      const running = keeperOpts.keptSessions?.has(mark.sessionId) && !!child && inTurn(child.state) && this.meta.has(mark.callerSessionId)
-      if (running) {
+      const kept = keeperOpts.keptSessions?.has(mark.sessionId) && !!child && this.meta.has(mark.callerSessionId)
+      const paused = readPausedTasks(store.appSetting(pausedReportKey(mark.sessionId)))
+      if (kept && (inTurn(child.state) || paused)) {
         this.awaitingReport.set(mark.sessionId, mark.callerSessionId)
+        if (paused) this.pausedReports.set(mark.sessionId, paused)
         continue
       }
       if (child && keeperOpts.keptSessions?.has(mark.sessionId)) {
         console.error(`[agent-host] report mark dropped: ${mark.sessionId.slice(0, 8)} ended its turn during the swap`)
       }
       store.clearReportMark(mark.sessionId)
+      store.deleteAppSetting(pausedReportKey(mark.sessionId))
     }
     /*
      * start_agent requests the previous host left standing (#673): the person has not answered yet, so the card is
@@ -2643,7 +2766,13 @@ export class SessionManager {
             // Its turn is over: the report it owed says so now, rather than naming a later turn (#698)
             if (this.awaitingReport.has(m.id)) void this.reportBackIfAwaited(m.id, { type: 'state_change', sessionId: m.id, state: 'idle' })
             else void this.tellAskerOfInterruption(m.id, this.turnOwners.get(m.id)?.callerId)
+          } else if (this.pausedReports.has(m.id)) {
+            // The background work its report waited on went with the process (#721): the work stopped
+            void this.reportBackIfAwaited(m.id, { type: 'state_change', sessionId: m.id, state: 'idle' })
           }
+        } else if (this.pausedReports.has(m.id)) {
+          // Its background work may have ended during the swap with no turn following (#721)
+          this.settlePausedReport(m.id)
         }
       }),
     )
@@ -3751,7 +3880,8 @@ export class SessionManager {
      * too would end the state as "awaiting input" and hide the failure). So a failed run was never
      * reported, the marker stayed set, and a later, unrelated turn ended up reported as "it finished".
      */
-    if (endedTurn && e.sessionId && !run?.tracksInputs) void this.reportBackIfAwaited(e.sessionId, e, run?.completedAnswer)
+    // A wait settled in an earlier turn holds that turn's answer, not this one's
+    if (endedTurn && e.sessionId && !run?.tracksInputs) void this.reportBackIfAwaited(e.sessionId, e, runOpen ? run?.completedAnswer : undefined)
     if (endedTurn && e.sessionId && !owed) void this.tellAskerOfInterruption(e.sessionId, delegation?.callerId)
     // A card in a delegated turn goes to the session that gave the turn too (#676); a turn-long link ends with the turn
     if ((e.type === 'question_request' || e.type === 'approval_request') && e.sessionId) this.routeCard(e.sessionId, e.requestId, e.type === 'question_request' ? 'question' : 'approval')
@@ -3772,6 +3902,8 @@ export class SessionManager {
     if (endedTurn && e.sessionId) this.applyDeferredRestart(e.sessionId)
     // A deferred restart also waits for the session's background work (#648): the moment it ends is a boundary too
     if (e.type === 'background_tasks' && e.sessionId) this.applyDeferredRestart(e.sessionId)
+    // A paused report's work may just have ended (#721)
+    if (e.type === 'background_tasks' && e.sessionId && this.pausedReports.has(e.sessionId)) this.settlePausedReport(e.sessionId)
   }
 
   /** A queued note not yet taken, on the delegation's wait or an observer's own reader (#646): the session is not between turns */
@@ -3859,11 +3991,27 @@ export class SessionManager {
    *  - Only work that had reportBack turned on when it was assigned comes back this way
    *  - Once notified, the marker is cleared. Otherwise that session would wake the orchestrator on
    *    every turn it runs on its own afterward — which would become a loop of waking each other
+   *  - **Except at a turn that ends with the session's own background work still running** (#721): a child that
+   *    backgrounded its `pnpm verify` and ended its turn "waiting for verify" has not finished. Its caller is told once
+   *    that the work paused, the marker stays, and the turn that work's ending starts reports the end. The turns that
+   *    keep it are its own work's, never a loop between sessions: a report does not start the reporting session's turn
    */
-  private async reportBackIfAwaited(sessionId: string, ending: NormalizedEvent, answer?: string): Promise<void> {
+  private async reportBackIfAwaited(
+    sessionId: string,
+    ending: NormalizedEvent,
+    answer?: string,
+    /** The paused work's tasks, ended with no turn after them (#721): the report says how they ended */
+    settled?: readonly BackgroundTask[],
+  ): Promise<void> {
     const orchestratorId = this.awaitingReport.get(sessionId)
     if (!orchestratorId || this.handingOver) return
-    this.clearReport(sessionId)
+    // Only a turn that completed is paused: a failed or stopped one is reported as it ended (#698)
+    const running = ending.type === 'turn_complete' && !settled ? this.ownTasksRunning(sessionId) : []
+    const paused = running.length > 0
+    const toldPaused = paused && this.pausedReports.has(sessionId)
+    if (paused) this.pauseReport(sessionId, running)
+    else this.clearReport(sessionId)
+    if (toldPaused) return
 
     const target = this.meta.get(sessionId)
     if (!target || !this.meta.has(orchestratorId)) return
@@ -3877,7 +4025,8 @@ export class SessionManager {
     const project = target.projectId
       ? (this.store.listProjects().find((p) => p.id === target.projectId)?.name ?? '(project no longer exists)')
       : '(none)'
-    await this.deliverReport(orchestratorId, sessionId, target.name, project, answer?.slice(0, 600) ?? previewOf(this.store, sessionId, 600), ending)
+    const work = paused ? { paused: running, stoppable: target.askedBy === orchestratorId } : settled ? { settled } : undefined
+    await this.deliverReport(orchestratorId, sessionId, target.name, project, answer?.slice(0, 600) ?? previewOf(this.store, sessionId, 600), ending, work)
   }
 
   /**
@@ -3975,6 +4124,12 @@ export class SessionManager {
     project: string,
     preview: string,
     ending: Pick<NormalizedEvent, 'type'> & { error?: { message?: string } },
+    /**
+     * The session's own background work (#721): `paused`, what its turn ended with (the report is still owed, and
+     * `stoppable` when the caller can stop it with agent_session); `settled`, the paused work's tasks that ended with no
+     * turn after them
+     */
+    work?: { paused: readonly BackgroundTask[]; stoppable: boolean } | { settled: readonly BackgroundTask[] },
   ): Promise<void> {
     /*
      * How it ended is stated on the first line (#166) — writing a failed run as "it finished" makes
@@ -3988,7 +4143,9 @@ export class SessionManager {
     const stop = this.meta.get(sessionId)?.interruption
     const cutShort = stop?.reason === 'network' || stop?.reason === 'interrupted' || stop?.reason === 'quit'
     const outcome =
-      stop?.reason === 'network' ? `[Centralu] The assigned work stopped before finishing: a network error ended its turn.\n`
+      work && 'paused' in work ? pausedReportLine(work.paused, work.stoppable)
+      : work && 'settled' in work ? settledReportLine(work.settled)
+      : stop?.reason === 'network' ? `[Centralu] The assigned work stopped before finishing: a network error ended its turn.\n`
       : stop?.reason === 'interrupted' ? `[Centralu] The assigned work stopped before finishing: its tool interrupted the turn.\n`
       : stop?.reason === 'quit' ? `[Centralu] The assigned work stopped before finishing: Centralu quit or restarted during its turn.\n`
       : ending.type === 'error' ? `[Centralu] The assigned work failed.\n`
@@ -5517,12 +5674,18 @@ export class SessionManager {
   /**
    * The sessions whose running work this one waits on (#568, the sleep rule in sleep.ts): a child it started with
    * `start_agent`, or a session handling its ask_project task, while the turn it gave them runs, and a session that owes
-   * it a report (`reportBack`, `awaitingReport`). Their answer is about to come back to it.
+   * it a report (`reportBack`, `awaitingReport`). Their answer is about to come back to it. A report held over the
+   * child's own background work (#721) counts only while the child is in a turn: that work may run for minutes or
+   * for good (a dev server), and the report wakes the caller when it comes.
    */
   waitsOn(sessionId: string): string[] {
     const ids = new Set<string>()
     for (const d of this.delegations.values()) if (d.callerId === sessionId && !d.settled) ids.add(d.sessionId)
-    for (const [child, caller] of this.awaitingReport) if (caller === sessionId && this.meta.has(child)) ids.add(child)
+    for (const [child, caller] of this.awaitingReport) {
+      // A child paused on its own background work (#721) does not hold its caller awake: its report wakes it
+      const at = this.meta.get(child)
+      if (caller === sessionId && at && (!this.pausedReports.has(child) || inTurn(at.state))) ids.add(child)
+    }
     /*
      * A session it owns (#561 part 3): a child it started, or a worktree session a former worktree manager held (store
      * v48), while a turn runs there. A former manager sent its work with send_to_session, so no delegation stands for
@@ -6888,6 +7051,8 @@ export class SessionManager {
       },
       ...(agent ? { agent: true } : {}),
     }
+    // The caller's new work supersedes its work the session paused on (#721): this run's own wait or report tells it
+    if (this.pausedReports.has(sessionId) && this.awaitingReport.get(sessionId) === callerId) this.clearReport(sessionId)
     // The turn is the caller's (#676): its cards go to the caller too. A task that joined the person's turn is not
     if (!joinedTurn) this.ownTurn(sessionId, callerId, false)
     void d.outcome.then((r) => {
@@ -6896,7 +7061,12 @@ export class SessionManager {
       // The delegation's owner now: a handoff may have moved it (#693)
       if (!joinedTurn && !this.handingOver) this.releaseTurn(sessionId, d.callerId)
       // Queued notes can finish after the original turn. Report only the whole delegation's ending.
-      if (agent || wait.tracksInputs) void this.reportBackIfAwaited(sessionId, r.ok
+      /*
+       * A turn that completed was reported by `onEvent` as it ended, unless notes held it (`tracksInputs`): judged
+       * again here, a microtask later, a pause over its own background work (#721) could read as the end once that
+       * work has ended. A wait failed with no ending event (a stop, a cancel) is reported only here.
+       */
+      if ((agent && !r.ok) || wait.tracksInputs) void this.reportBackIfAwaited(sessionId, r.ok
         ? { type: 'turn_complete', sessionId }
         : { type: 'error', sessionId, error: { code: 'internal', message: r.error, retryable: false } }, r.ok ? r.answer : undefined)
     })
@@ -7431,14 +7601,18 @@ export class SessionManager {
           const cards = d && !d.settled && !observing ? this.routedCards(child.id, callerId) : []
           if (d && cards.length) return this.agentAsking(d, cards)
           if (d && !d.settled) return this.agentWorking(d, false, observing)
-          return d ? await this.awaitAgent(key, d, signal, observing) : this.agentAtRest(child)
+          return d ? await this.awaitAgent(key, d, signal, observing) : this.agentAtRest(child, callerId)
         }
         case 'wait':
-          return d ? await this.awaitAgent(key, d, signal, observing) : this.agentAtRest(child)
+          return d ? await this.awaitAgent(key, d, signal, observing) : this.agentAtRest(child, callerId)
         case 'stop': {
           // A queued request is withdrawn before it is delivered (#677)
           if ((!d || d.settled) && this.dropQueued((r) => r.sessionId === child.id && r.callerSessionId === callerId && this.delivering.get(child.id) !== r.id).length) {
             return { ok: true, state: 'stopped', sessionId: child.id, sessionName: child.name, tool: child.tool }
+          }
+          // A report paused over its own background work (#721): stop ends that wait
+          if ((!d || d.settled) && !observing && this.pausedReports.has(child.id) && this.awaitingReport.get(child.id) === callerId) {
+            return this.stopPausedWork(child)
           }
           if (!d || d.settled) return { ok: false, error: `Nothing you gave "${child.name}" is running.` }
           if (!observing && this.awaitingReport.get(child.id) === callerId) this.clearReport(child.id)
@@ -8167,6 +8341,8 @@ export class SessionManager {
       const run = this.agentRuns.get(s.id)
       if (inTurn(s.state) || (run && !run.finished)) return queuedBy.has(s.id) && this.turnOwners.get(s.id)?.callerId !== from ? 'busy; your request is queued' : 'working'
       if (queuedBy.has(s.id)) return 'your request is queued'
+      // Its turn ended while its own background work runs (#721): the report waits for that work's end
+      if (this.awaitingReport.get(s.id) === from && this.pausedReports.has(s.id)) return 'paused on its own background work; its report comes when that work ends'
       if (this.awaitingReport.get(s.id) === from) return 'finished; its report has not been delivered yet'
       // ask_project tells nobody when it ends: an answer the original never came back for is still owed
       if (delegated.some((d) => d.sessionId === s.id && d.settled && !d.agent)) return 'finished; its answer has not been read yet'
@@ -8784,8 +8960,9 @@ export class SessionManager {
     return { ok: true, key, d, fork: child }
   }
 
-  /** A child with nothing of the caller's running: its last final answer (#561) */
-  private agentAtRest(child: SessionInfo): ChildRunResult {
+  /** A child with nothing of the caller's running: its last final answer (#561), and a report it still owes (#721) */
+  private agentAtRest(child: SessionInfo, callerId?: string): ChildRunResult {
+    const notice = callerId ? this.pausedNotice(child.id, callerId) : undefined
     return {
       ok: true,
       state: 'at_rest',
@@ -8795,13 +8972,61 @@ export class SessionManager {
       answer: clipAnswer(finalAnswer(this.store.loadMessages(child.id, 50)), child.name),
       sessionState: child.state,
       ...(child.interruption ? { interruption: child.interruption } : {}),
+      ...(notice ? { notice } : {}),
     }
+  }
+
+  /**
+   * What the caller reads of a child whose report is held over its own background work (#721): the answer it has is
+   * from a turn that paused, and the end is still to be told.
+   */
+  private pausedNotice(childId: string, callerId: string): string | undefined {
+    if (!this.pausedReports.has(childId) || this.awaitingReport.get(childId) !== callerId) return undefined
+    const running = this.ownTasksRunning(childId)
+    if (!running.length) {
+      return `The background work its turn ended with has ended (${taskList(this.pausedTasksNow(childId), true)}); a final report follows when a turn ends the work, or within a minute.`
+    }
+    return (
+      `Its own background work is still running (${taskList(running)}). If that work is a server or watcher it leaves running, ` +
+      'this answer may be its final one; a final report follows only if that work ends. ' +
+      'agent_session(action="stop") on it stops that work and ends the wait.'
+    )
+  }
+
+  /**
+   * `agent_session stop` on a child whose report is paused over its own background work (#721): the caller is done
+   * waiting. The tasks it paused on that still run are stopped where the tool can stop them one by one, and the report
+   * is taken down; the turns their ending may start are the child's own. What could not be stopped is named.
+   */
+  private async stopPausedWork(child: SessionInfo): Promise<ChildRunResult> {
+    const held = new Set((this.pausedReports.get(child.id) ?? []).map((t) => t.id))
+    const running = this.ownTasksRunning(child.id).filter((t) => held.has(t.id))
+    this.clearReport(child.id)
+    const stopped: BackgroundTask[] = []
+    const left: BackgroundTask[] = []
+    for (const t of running) {
+      try {
+        await this.stopBackgroundTask(child.id, t.id)
+        stopped.push(t)
+      } catch {
+        left.push(t)
+      }
+    }
+    const notice = [
+      stopped.length ? `Stopped its background work: ${taskList(stopped)}.` : 'None of the background work it paused on was still running.',
+      left.length ? `Not stoppable from here, still running: ${taskList(left)}; the person can stop it, or you can ask the child to stop it.` : '',
+      'You will not be told more about this work.',
+    ].filter(Boolean).join(' ')
+    return { ok: true, state: 'stopped', sessionId: child.id, sessionName: child.name, tool: child.tool, notice }
   }
 
   /** Waits on a child's turn up to the bound (#561), like `awaitDelegation`, and reads its outcome for the caller */
   private async awaitAgent(key: string, d: Delegation, signal?: AbortSignal, observing = false, boundMs = ASK_WAIT_MS): Promise<ChildRunResult> {
     // Only the owner consumes its report/key/grants. Auto observers have their own bound and cancellation.
-    if (!observing && this.awaitingReport.get(d.sessionId) === d.callerId) this.clearReport(d.sessionId)
+    // A report held over the child's own background work (#721) is the work's end, still to come: reading the paused
+    // turn's answer does not take it
+    if (!observing && this.awaitingReport.get(d.sessionId) === d.callerId && !this.pausedReports.has(d.sessionId)) this.clearReport(d.sessionId)
+    const endedBefore = d.settled
     // A card already waiting on the caller is what it reads first (#676): the turn goes nowhere until it is answered
     const standing = observing || d.settled ? [] : this.routedCards(d.sessionId, d.callerId)
     if (standing.length) return this.agentAsking(d, standing)
@@ -8851,6 +9076,16 @@ export class SessionManager {
         for (const g of granted) set.add(g)
         this.readGrants.set(d.callerId, set)
       }
+      /*
+       * The turn this call saw end left background work of the child's own running (#721): the caller reads the answer
+       * now, and the report is held for the work's end, with no separate notice of the pause
+       */
+      const left = this.ownTasksRunning(d.sessionId)
+      if (!endedBefore && !this.pausedReports.has(d.sessionId) && left.length) {
+        this.markReport(d.sessionId, d.callerId)
+        this.pauseReport(d.sessionId, left)
+      }
+      const notice = this.pausedNotice(d.sessionId, d.callerId)
       return {
         ok: true,
         state: 'done',
@@ -8860,6 +9095,7 @@ export class SessionManager {
         answer: clipAnswer(answer, name()),
         readable: granted,
         outside,
+        ...(notice ? { notice } : {}),
       }
     } finally {
       card?.done()
@@ -9849,6 +10085,8 @@ export class SessionManager {
     this.disposing = true
     // Reconnect clocks die with the host (#698)
     for (const id of [...this.reconnecting.keys()]) this.stopWatchingReconnect(id)
+    // So do the waits of paused reports (#721): the work ends with its process, and the next start drops the mark
+    this.stopSettlingPausedReports()
     // So does a start waiting for memory (#686)
     this.memoryGate?.close()
     this.watchers.close()
@@ -9894,6 +10132,8 @@ export class SessionManager {
     this.appsHub?.rt.attachBrokerHost(null)
     // The kept turns go on under the next host, which owes their reports (#646); failing the waits here must not report
     this.handingOver = true
+    // A paused report's wait is the next host's, which starts it again on adoption (#721)
+    this.stopSettlingPausedReports()
     // A start waiting for memory stays stored for the next host (#686)
     this.memoryGate?.close()
     for (const run of [...this.agentRuns.values()]) run.fail(new Error('Centralu is restarting'))
