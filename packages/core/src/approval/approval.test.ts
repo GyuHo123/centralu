@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CENTRALU_APPLY, CENTRALU_APPLY_QUESTION, isCentraluApply, type ApprovalDetail } from '@cc/protocol'
-import { agentStartQuestion, centraluUpdateQuestion, findMatchingRule, matchesRule, previewMatches, projectAccessQuestion, projectCreateQuestion, suggestMatcher } from './approval.js'
+import { agentStartQuestion, answersInPlace, approvalNotes, centraluUpdateQuestion, findMatchingRule, matchesRule, previewMatches, projectAccessQuestion, projectCreateQuestion, suggestMatcher } from './approval.js'
 
 describe('the new-project question (#515)', () => {
   it('names the linked machine whose disk the path is on, and no machine for this computer (#82 phase 4)', () => {
@@ -128,5 +128,63 @@ describe('update cards (#581, #665)', () => {
     expect(CENTRALU_APPLY_QUESTION).toContain('child agents')
     expect(isCentraluApply({ kind: 'other', raw: CENTRALU_APPLY_QUESTION, about: CENTRALU_APPLY })).toBe(true)
     expect(isCentraluApply({ kind: 'other', raw: 'a tool the adapter did not recognise' })).toBe(false)
+  })
+})
+
+describe('answering from a list row (#543)', () => {
+  it('a command and a single-file edit can be allowed or denied in place', () => {
+    expect(answersInPlace({ kind: 'command', command: 'ls', cwd: '/p' })).toBe(true)
+    expect(answersInPlace({ kind: 'file_edit', path: 'a.ts', diffPreview: '+x', multi: false })).toBe(true)
+  })
+
+  it('a card that offers more, or says more than one line, opens the session instead', () => {
+    expect(answersInPlace({ kind: 'file_edit', path: 'a.ts, b.ts', diffPreview: '', multi: true })).toBe(false)
+    expect(answersInPlace({ kind: 'agent_start', project: { id: 'p', name: 'w' }, tool: 'Codex', preset: 'safe', text: 'x' })).toBe(false)
+    expect(answersInPlace({ kind: 'project_access', access: 'delegate', from: { id: 'a', name: 'A' }, to: { id: 'b', name: 'B' }, text: 'x' })).toBe(false)
+    expect(answersInPlace({ kind: 'capability', app: { appId: 'app-x', projectId: null, name: 'X' }, capability: 'host:x', text: 'x' })).toBe(false)
+    expect(answersInPlace({ kind: 'project_create', name: 'n', path: '/n' })).toBe(false)
+    expect(answersInPlace({ kind: 'centralu_update', action: 'install' })).toBe(false)
+    expect(answersInPlace({ kind: 'other', raw: '{}' })).toBe(false)
+  })
+
+  // #683 review: a request whose line says nothing, or that carries a risk the line does not show
+  it('an empty, multi-line, or flagged command opens the session', () => {
+    const c = (over: object) => ({ kind: 'command' as const, command: 'ls', cwd: '/p', ...over })
+    expect(answersInPlace(c({ command: '' }))).toBe(false)
+    expect(answersInPlace(c({ command: '   ' }))).toBe(false)
+    expect(answersInPlace(c({ command: 'cd /tmp\nrm -rf build' }))).toBe(false)
+    expect(answersInPlace(c({ command: '', network: { host: 'example.com', protocol: 'https' } }))).toBe(false)
+    expect(answersInPlace(c({ network: { host: 'example.com', protocol: 'https' } }))).toBe(false)
+    expect(answersInPlace(c({ stdin: true }))).toBe(false)
+    expect(answersInPlace(c({ unsandboxed: true }))).toBe(false)
+    // A reason alone is said, but is not a risk the row hides
+    expect(answersInPlace(c({ reason: 'wants to list the folder' }))).toBe(true)
+  })
+
+  it('an edit that names no file, a delete or a move opens the session', () => {
+    const e = (over: object) => ({ kind: 'file_edit' as const, path: 'src/a.ts', diffPreview: '', multi: false, ...over })
+    expect(answersInPlace(e({ path: '(no path)' }))).toBe(false)
+    expect(answersInPlace(e({ path: '' }))).toBe(false)
+    expect(answersInPlace(e({ change: 'delete' }))).toBe(false)
+    expect(answersInPlace(e({ change: 'move', movePath: 'src/b.ts' }))).toBe(false)
+    expect(answersInPlace(e({ change: 'add' }))).toBe(true)
+    expect(answersInPlace(e({ change: 'update' }))).toBe(true)
+  })
+
+  it('says what the line does not: the network host, stdin, the sandbox, the reason, a delete or a move', () => {
+    expect(approvalNotes({ kind: 'command', command: '', cwd: '/p', network: { host: 'example.com', protocol: 'https' }, reason: 'fetch the docs' })).toEqual([
+      'Network access to example.com (https)',
+      'Reason: fetch the docs',
+    ])
+    expect(approvalNotes({ kind: 'command', command: 'y', cwd: '/p', stdin: true, unsandboxed: true })).toEqual([
+      'Input to a terminal that is already running',
+      'Runs outside the sandbox',
+    ])
+    expect(approvalNotes({ kind: 'file_edit', path: 'a.ts', diffPreview: '', multi: false, change: 'move', movePath: 'b.ts' })).toEqual(['Moves the file to b.ts'])
+    expect(approvalNotes({ kind: 'command', command: 'ls', cwd: '/p' })).toEqual([])
+  })
+
+  it('anything else pending in the session opens it too', () => {
+    expect(answersInPlace({ kind: 'command', command: 'ls', cwd: '/p' }, 1)).toBe(false)
   })
 })
