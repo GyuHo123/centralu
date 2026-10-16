@@ -789,6 +789,30 @@ A host started with `centralu serve` on another machine is reached by the app th
   keyring prompt on that machine.
 - **What the client must not do:** forward with a wildcard bind address (`-L 0.0.0.0:…`) or `GatewayPorts`, which
   would expose the host's port on the client's network with only the token in front of it.
+- **Other users on the person's computer** (#838). The forward's local end is a loopback port, and any account there
+  can listen on it first: the forward counts as up when something accepts on the port, and the hub's hello carries
+  the remote's token. So before the hello the hub asks the host to prove it holds the token (`prove`: an HMAC of a
+  fresh nonce under the token, with a label no other derived secret uses, `transport/host-proof.ts`), and sends the
+  hello only to a host that does. Something else on the port gets a nonce, never the token, and the link reports
+  itself down. The hub asks only when the connection line says the host can (`proof`, written by
+  `serve --connection` over SSH from the installed build, `hostProof` in `bundle-info.json`, never from what answers
+  on the port, which could otherwise make the line say no); a remote from before #838 has no `proof` and gets the
+  hello as before, so on such a remote this hole stays open until it is updated. A host that refuses the `prove`
+  (a machine rolled back to such a build) is a refusal: the hub reads the line again rather than retrying.
+- **The same on the linked machine.** `serve --connection`, `serve` and `serve --stop` ask the host on the recorded
+  port with the token, and another account there can hold that port while the host is down. When the installed
+  build proves, they send `prove` first and the hello only to a host that proved it (`helloSocket` in `serve.mjs`).
+  Something on the port that does not prove is not this folder's host unless the folder's `host.lock` names a live
+  process that started when the lock says (`ps -o lstart`, `lockHolderIsAlive`): a host from before #838 still running
+  after an update, which then counts as running and is stopped by its pid. A lock a dead host left, whose pid another
+  process now has, or one without a start time (an older host, or Windows, which has no `ps`), does not count, so
+  `--stop` never signals a stranger.
+- **A linked machine updated without a restart** runs an older host than the one installed: its line says `proof`
+  (from the installed build), the host refuses the `prove`, and the link says so ("runs an older Centralu host than
+  the one installed there") and asks for a restart (`centralu serve --stop`, then start it), rather than reporting a
+  token problem. The hub sends it no token meanwhile. A Unix-socket forward
+  in a 0700 folder was the other choice; it was not taken because a Windows hub's Node cannot connect to the
+  AF_UNIX socket OpenSSH would create there, while the proof works with every hub and every remote.
 
 ## The keeper's control socket
 

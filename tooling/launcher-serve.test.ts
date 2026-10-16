@@ -7,7 +7,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PROTOCOL_VERSION } from '@cc/protocol'
 import { acquireInstanceLock } from '../packages/agent-host/src/dev-services/instance-lock.js'
-import { versionMismatchMessage } from '../packages/agent-host/src/transport/server.js'
+import { HostServer, versionMismatchMessage } from '../packages/agent-host/src/transport/server.js'
+import { createRequire } from 'node:module'
 import {
   connectionLine,
   decodeChildSpec,
@@ -40,6 +41,12 @@ import {
   listensHere,
   parseNetstatListening,
   SERVE_PORT_TRIES,
+  probeHost,
+  askHostToStop,
+  hostProvesOf,
+  heldHere,
+  lockHolderIsAlive,
+  processStartTime,
   // @ts-expect-error — plain .mjs shipped inside the npm shim, no types on purpose
 } from '../packaging/npm/centralu/bin/serve.mjs'
 // @ts-expect-error — plain .mjs shipped inside the npm shim, no types on purpose
@@ -162,6 +169,13 @@ describe('the connection line', () => {
     const line = connectionLine({ port: 17175, token: 't', version: '1.2.3', protocolVersion: 1, dataDir: '/d', hostRunning: false })
     expect(JSON.parse(line)).toEqual({ v: 1, port: 17175, token: 't', version: '1.2.3', protocolVersion: 1, dataDir: '/d', hostRunning: false })
     expect(line).not.toContain('\n')
+  })
+
+  // Only a host that proved it holds the token is marked (#838); a line without it gets the hello as before
+  it('says proof only when the running host proved it', () => {
+    const base = { port: 17175, token: 't', version: '1.2.3', protocolVersion: 1, dataDir: '/d', hostRunning: true }
+    expect(JSON.parse(connectionLine({ ...base, proof: true }))).toMatchObject({ proof: true })
+    expect(JSON.parse(connectionLine({ ...base, proof: false }))).not.toHaveProperty('proof')
   })
 
   it('has a default port below the ephemeral ranges and the host’s view origin ports', () => {
@@ -395,7 +409,10 @@ describe('centralu serve, end to end (a host from source, a temporary data folde
       await s.until(/listening on 127\.0\.0\.1:\d+/)
 
       const info = await connection(d)
-      expect(info).toMatchObject({ v: 1, port, token: before.token, protocolVersion: PROTOCOL_VERSION, dataDir: d, hostRunning: true })
+      // proof (#838): the running host answered a prove, so the hub will ask it to before sending the token
+      expect(info).toMatchObject({ v: 1, port, token: before.token, protocolVersion: PROTOCOL_VERSION, dataDir: d, hostRunning: true, proof: true })
+      // From the installed build (#838), whether a host runs or not
+      expect(before.proof).toBe(true)
 
       const ok = await hello(port, String(info.token))
       expect(ok).toMatchObject({ kind: 'hello_ok', protocolVersion: PROTOCOL_VERSION })
@@ -832,4 +849,90 @@ describe('centralu serve --detach and --stop, end to end (a host from source, a 
     },
     120_000,
   )
+})
+
+/*
+ * `serve --connection`, `serve` and `serve --stop` ask the host on the recorded port with the token (#838). Another
+ * account on the linked machine can hold that port while the host is down: the token goes out only after the host
+ * proves it holds it, and `proof` in the line comes from the installed build, not from whatever answers.
+ */
+describe('asking the host on the port without handing the token to anyone else (#838)', () => {
+  const TOKEN = 'serve-token-'.padEnd(43, 'x')
+  // `ws` is the host's dependency, not the root's: taken from there
+  type Peer = { on(e: 'message', f: (d: unknown) => void): void; send(s: string): void }
+  type Wss = { on(e: 'connection', f: (ws: Peer) => void): void; once(e: 'listening', f: () => void): void; address(): unknown; close(f: () => void): void }
+  const { WebSocketServer } = createRequire(join(ROOT, 'packages/agent-host/package.json'))('ws') as { WebSocketServer: new (o: { port: number; host: string }) => Wss }
+  async function squatter() {
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise<void>((r) => wss.once('listening', () => r()))
+    const got: string[] = []
+    // It answers a prove with a guess, and a hello as a host would
+    wss.on('connection', (ws) => ws.on('message', (d) => {
+      got.push(String(d))
+      const f = JSON.parse(String(d)) as { kind: string; nonce?: string }
+      ws.send(JSON.stringify(f.kind === 'prove' ? { kind: 'proof', nonce: f.nonce, mac: 'A'.repeat(43) } : { kind: 'hello_ok', protocolVersion: PROTOCOL_VERSION, resyncRequired: false, currentSeq: 0 }))
+    }))
+    return { port: (wss.address() as { port: number }).port, got, close: () => new Promise<void>((r) => wss.close(() => r())) }
+  }
+
+  it('a program on the port gets a nonce, never the token, from the probe and from --stop', async () => {
+    const s = await squatter()
+    try {
+      const probe = await probeHost({ port: s.port, token: TOKEN, protocolVersion: PROTOCOL_VERSION, prove: true })
+      expect(probe).toEqual({ running: false, unproven: true })
+      expect(await askHostToStop({ port: s.port, token: TOKEN, protocolVersion: PROTOCOL_VERSION, prove: true })).toMatchObject({ ok: false })
+      expect(s.got.join('\n')).not.toContain(TOKEN)
+      expect(s.got.map((g) => JSON.parse(g).kind)).toEqual(['prove', 'prove'])
+      // Not this folder's host: no live lock holder
+      expect(heldHere(probe, tempDir())).toBe(false)
+    } finally {
+      await s.close()
+    }
+  })
+
+  it('the real host proves it and then gets the hello', async () => {
+    const server = new HostServer({ port: 0, token: TOKEN, onRpc: async () => ({}), build: { commit: 'c', protocolVersion: PROTOCOL_VERSION, version: '9.9.9' } })
+    const port = await server.listen()
+    try {
+      expect(await probeHost({ port, token: TOKEN, protocolVersion: PROTOCOL_VERSION, prove: true })).toEqual({ running: true, protocolVersion: PROTOCOL_VERSION, version: '9.9.9' })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('takes proof from the installed build: a bundle that says hostProof, or the source', () => {
+    const d = tempDir()
+    expect(hostProvesOf(join(d, 'main.mjs'))).toBe(false)
+    writeFileSync(join(d, 'bundle-info.json'), JSON.stringify({ protocolVersion: 1 }))
+    expect(hostProvesOf(join(d, 'main.mjs'))).toBe(false)
+    writeFileSync(join(d, 'bundle-info.json'), JSON.stringify({ protocolVersion: 1, hostProof: 1 }))
+    expect(hostProvesOf(join(d, 'main.mjs'))).toBe(true)
+    expect(hostProvesOf(SOURCE_HOST)).toBe(true)
+  })
+})
+
+/*
+ * A host.lock a dead host left names a pid another process of the same user may have now (#838 review): counted as the
+ * folder's host, `--stop` would signal that stranger. Only the process that started when the lock says counts.
+ */
+describe.skipIf(!POSIX)('the folder’s host, by the lock and the start time it records', () => {
+  const lock = (d: string, v: unknown) => writeFileSync(join(d, 'host.lock'), typeof v === 'string' ? v : JSON.stringify(v))
+
+  it('is the live process that started when host.lock says, and nothing else', () => {
+    const d = tempDir()
+    const started = processStartTime(process.pid)
+    expect(started).toEqual(expect.any(String))
+    lock(d, { pid: process.pid, started })
+    expect(lockHolderIsAlive(d)).toBe(true)
+    expect(heldHere({ running: false, unproven: true }, d)).toBe(true)
+    // The same pid, started at another time: the pid was reused
+    lock(d, { pid: process.pid, started: 'Thu Jan  1 00:00:00 1970' })
+    expect(lockHolderIsAlive(d)).toBe(false)
+    expect(heldHere({ running: false, unproven: true }, d)).toBe(false)
+    // No start time (a host from before it was recorded): cannot be told apart, so not counted
+    lock(d, String(process.pid))
+    expect(lockHolderIsAlive(d)).toBe(false)
+    // A proven host is the host whatever the lock says
+    expect(heldHere({ running: true }, d)).toBe(true)
+  })
 })
