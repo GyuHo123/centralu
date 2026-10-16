@@ -149,6 +149,23 @@ describe.skipIf(keeperless)('an agent process the keeper holds', () => {
     await until(() => p.stderrTail() === '실패: 한글\n')
   })
 
+  /**
+   * The keeper refuses to release a running child, so one whose streams did not attach ran on with nobody to read or
+   * stop it, and the listeners stayed on the control connection (#428)
+   */
+  it('ends a child whose streams cannot be attached, and releases it once it has exited', async () => {
+    keeper.refuseAttach = true
+    const p = KeeperAgentProcess.spawn(children, echo, tag)
+    const failed = new Promise<Error>((r) => p.once('error', r))
+    expect((await failed).message).toMatch(/attach refused/)
+    const id = p.childId!
+    await until(() => !keeper.alive(id))
+    expect(keeper.ops('signal')[0]).toMatchObject({ id, signal: 'SIGKILL', group: true })
+    await until(() => keeper.ops('release').length === 1)
+    expect(children.listenerCount('exit')).toBe(0)
+    expect(children.listenerCount('lost')).toBe(0)
+  })
+
   it('reports an exit when the keeper itself goes away, since the pipes went with it', async () => {
     const p = KeeperAgentProcess.spawn(children, echo, tag)
     await until(() => p.childId !== null)
@@ -211,6 +228,19 @@ describe.skipIf(keeperless)('a pty the keeper holds', () => {
     await until(() => keeper.ops('release').length === 1)
   })
 
+  it('a pty whose stream cannot be attached says so on screen, and is ended before its record is released (#428)', async () => {
+    keeper.refuseAttach = true
+    const pty = KeeperPty.spawn(children, process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: process.cwd(), env: process.env, cols: 80, rows: 24, tag: { kind: 'terminal', id: 'term-9', cwd: '/x' } })
+    let screen = ''
+    pty.onData((d) => (screen += d))
+    const exit = await new Promise((r) => pty.onExit(r))
+    expect(exit).toEqual({ exitCode: 1 })
+    expect(screen).toMatch(/Could not start: attach refused/)
+    await until(() => keeper.ops('release').length === 1)
+    expect(keeper.ops('signal')[0]).toMatchObject({ signal: 'SIGKILL', group: true })
+    expect(keeper.alive(pty.childId!)).toBe(false)
+  })
+
   it('detaching leaves the shell running and signals nothing', async () => {
     const pty = KeeperPty.spawn(children, process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
       cwd: process.cwd(),
@@ -225,6 +255,67 @@ describe.skipIf(keeperless)('a pty the keeper holds', () => {
     await new Promise((r) => setTimeout(r, 100))
     expect(keeper.ops('signal')).toHaveLength(0)
     expect(keeper.alive(pty.childId!)).toBe(true)
+  })
+})
+
+/**
+ * A child a previous host left in the keeper survived a swap or a restart; its attach can fail for a moment then (a
+ * loaded machine, a keeper handoff holding the service still). Ending it at the first failure KILLed a terminal or a
+ * dev server that used to stay adoptable (#428 review).
+ */
+describe.skipIf(keeperless)('a child taken over from a previous host whose attach fails', () => {
+  const termTag = { kind: 'terminal', id: 'term-7', cwd: '/x' } as const
+  const forever = ['-e', 'console.log("still here"); setInterval(() => {}, 1000)']
+
+  it('is attached on a second try, and nothing is signalled', async () => {
+    const id = keeper.spawnDirect(process.execPath, forever, termTag)
+    await new Promise((r) => setTimeout(r, 200))
+    keeper.refuseAttach = 1
+    const pty = KeeperPty.adopt(children, keeper.info(id) as never)
+    let screen = ''
+    pty.onData((d) => (screen += d))
+    await until(() => screen.includes('still here'))
+    expect(keeper.ops('signal')).toEqual([])
+    expect(keeper.alive(id)).toBe(true)
+  })
+
+  it('a terminal that still cannot be attached is left running in the keeper for the next host', async () => {
+    const id = keeper.spawnDirect(process.execPath, forever, termTag)
+    keeper.refuseAttach = true
+    const pty = KeeperPty.adopt(children, keeper.info(id) as never)
+    await new Promise((r) => pty.onExit(r))
+    // Long enough for a signal request sent at the failure to have reached the keeper
+    await new Promise((r) => setTimeout(r, 500))
+    expect(keeper.ops('signal')).toEqual([])
+    expect(keeper.ops('release')).toEqual([])
+    expect(keeper.alive(id)).toBe(true)
+  })
+
+  it('an agent that still cannot be attached is ended, since its session starts a new CLI on the same thread', async () => {
+    const id = keeper.spawnDirect(process.execPath, forever, tag)
+    keeper.refuseAttach = true
+    const p = KeeperAgentProcess.adopt(children, keeper.info(id) as never)
+    await new Promise((r) => p.once('error', r))
+    await until(() => !keeper.alive(id))
+    expect(keeper.ops('signal')[0]).toMatchObject({ id, signal: 'SIGKILL', group: true })
+    await until(() => keeper.ops('release').length === 1)
+  })
+
+  it('one that had already exited before this host connected is released, with no listener left behind', async () => {
+    const id = keeper.spawnDirect(process.execPath, ['-e', 'process.exit(3)'], tag)
+    await until(() => !keeper.alive(id))
+    // A host that connects after the exit learns of it only from the list, never as an event
+    const late = await KeeperChildren.connect(keeper.sock)
+    try {
+      keeper.refuseAttach = true
+      const p = KeeperAgentProcess.adopt(late, keeper.info(id) as never)
+      await new Promise((r) => p.once('error', r))
+      await until(() => keeper.ops('release').length === 1)
+      expect(late.listenerCount('exit')).toBe(0)
+      expect(keeper.ops('signal')).toEqual([])
+    } finally {
+      late.close()
+    }
   })
 })
 

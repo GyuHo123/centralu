@@ -1632,6 +1632,16 @@ must keep reading an older host's tags: the children outlive the build that spaw
   node-pty's surface) instead of node-pty; stopping or closing them walks the process tree (`kill-tree.ts`), which
   works from anywhere. Closing a terminal takes the tree before the shell gets its hang-up: a dev server started
   from it is in a group of its own (job control), and one that ignored the hang-up used to be left running.
+  Both hold each pty in a `PtySlot` (`dev-services/pty-slot.ts`, #428): its output (256 KiB), its exit, its tree
+  stopped, and a failed start, node-pty not loading included, said on screen and followed by an exit.
+- **Both** stand on `keeper/held-child.ts` (#428): the spawn's answer, the attach of their streams, the exit reported
+  once the output has ended (at most 1 s after it, `exit-after-drain.ts`), the release of the keeper's record, and a
+  detach that waits at most 2 s each for the attach and for the keeper to end the stream. A child whose streams cannot
+  be attached is ended (KILL to its group) and released once it has exited: the keeper refuses to release a running
+  child, so releasing it at once left it running with nobody to read or stop it. A child adopted from a previous host
+  gets one more attach first, with a 15 s bound (a loaded machine or a keeper handoff can hold the first one past its
+  5 s). If that fails too, an agent is ended, since its session starts a new CLI on the same conversation and two
+  CLIs on one thread conflict; a terminal or a command run is left running in the keeper for the next host.
 
 **What stopping an agent ends.** An agent CLI starts helpers of its own: Claude Code's LSP tool runs
 `typescript-language-server`, which runs `tsserver` (one reached 3.4 GB); MCP servers from the user's config; shells.
@@ -1653,7 +1663,8 @@ spawns the CLI itself, Claude's through `spawnClaudeCodeProcess` too (`adapters/
 Linux it gets a process group of its own; a stop is `kill-tree.ts`'s TERM to every group in its tree and KILL to
 the survivors after 3 s, and once it has exited its group is swept the same way (`stopGroup`). On Windows a stop is
 `taskkill /T /F` on its tree, and once it has exited what it left running is found by parent links and creation
-times and ended (`collectOrphansWindows`). Being in a group of its own, the CLI is no longer in the host's: a host
+times and ended (`collectOrphansWindows`), against a start time taken before the spawn. The start and the sweep are
+the ones app processes use (`dev-services/grouped-child.ts`: `spawnGrouped`, `sweepExited`). Being in a group of its own, the CLI is no longer in the host's: a host
 that is SIGKILLed takes it along only through stdin EOF, on which codex exits at once and claude after the turn it
 is in. The SDK adds the end of the CLI's stderr to a failure only for a process it spawned itself, so both
 adapters add it the same way (`withStderrTail`, `stream-text.ts`): the host's own child and the keeper's each keep the
@@ -1691,7 +1702,12 @@ naming it and interrupts the turn. A planned swap drains such calls first (§4.2
 nothing: its bridge fails a call whose socket closed.
 
 **Strays.** `strays.ts` rule 3 counts the keeper's live children and their descendants as ours. After a keeper
-handover (§4.4) their parent is init, and the parent chain alone would offer them as leftovers.
+handover (§4.4) their parent is init, and the parent chain alone would offer them as leftovers. Stopping the ones a
+person chose (`stopStrays`) is the two shots every stop uses: SIGTERM to those still leftovers, then, after 3 s,
+SIGKILL to those that still are and still run the same command, measured again each time (#428). When the keeper
+cannot answer which children it holds, nothing is stopped: after a keeper handoff its agents are init's children, and
+without its list they would read as leftovers. Both walk the table with `dev-services/proc-table.ts`,
+as `kill-tree.ts` does.
 
 **Activity.** Kept terminals, runs and live sessions are the host's own entries again once taken over, so the
 activity report counts them as before. While no host is up the keeper counts nothing; its idle limit is 30

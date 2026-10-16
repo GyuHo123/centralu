@@ -1,17 +1,9 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
-import {
-  KILL_GRACE_MS,
-  collectOrphansWindows,
-  hasProcessGroups,
-  killTree,
-  stopGroup,
-  stopTree,
-  type KillOs,
-  type KillablePty,
-  type LeftoverOs,
-} from '../dev-services/kill-tree.js'
+import { KILL_GRACE_MS, hasProcessGroups, killTree, stopTree, type KillOs, type LeftoverOs } from '../dev-services/kill-tree.js'
+import { killHandle, spawnGrouped, sweepExited } from '../dev-services/grouped-child.js'
+import { ExitAfterDrain } from '../exit-after-drain.js'
 import { Tail } from '../stream-text.js'
 import type { AgentProcess, AgentSpawnSpec } from './contract.js'
 
@@ -48,8 +40,6 @@ export type LocalSpawnSpec = AgentSpawnSpec & {
   signal?: AbortSignal
 }
 
-/** How long an exit waits for the last of stdout before it is reported anyway */
-const EXIT_AFTER_OUTPUT_MS = 1000
 /** The end of stderr kept for a failure message: the SDK only keeps it for processes it spawns itself */
 const STDERR_TAIL = 8 * 1024
 
@@ -59,11 +49,13 @@ export class LocalAgentProcess extends EventEmitter implements AgentProcess {
   readonly stderr: Readable | null
   killed = false
   private readonly tail = new Tail(STDERR_TAIL)
-  private exitReported = false
-  private readonly spawnedAt = Date.now()
+  /** Reported once the output has all arrived, so a reader never sees the exit before the last line */
+  private readonly exitReport = new ExitAfterDrain(() => this.emit('exit', this.child.exitCode, this.child.signalCode))
 
   private constructor(
     private readonly child: ChildProcess,
+    /** Taken just before the spawn (`spawnGrouped`): the Windows sweep matches what it left by creation time */
+    private readonly spawnedAt: number,
     private readonly os: LocalProcessOs | undefined,
   ) {
     super()
@@ -78,18 +70,12 @@ export class LocalAgentProcess extends EventEmitter implements AgentProcess {
   }
 
   static spawn(spec: LocalSpawnSpec, os?: LocalProcessOs): LocalAgentProcess {
-    const child = spawn(spec.command, spec.args, {
-      cwd: spec.cwd,
-      env: spec.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      /*
-       * A group of its own, which its helpers join. Not on Windows: there `detached` means a process
-       * with no console, whose every console child opens a visible window (app-process.ts).
-       */
-      detached: hasProcessGroups(os?.platform),
-      windowsHide: true,
-    })
-    const p = new LocalAgentProcess(child, os)
+    /*
+     * A group of its own, which its helpers join. Not on Windows: there `detached` means a process
+     * with no console, whose every console child opens a visible window (`spawnGrouped`).
+     */
+    const { child, spawnedAt } = spawnGrouped(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ['pipe', 'pipe', 'pipe'] }, os?.platform)
+    const p = new LocalAgentProcess(child, spawnedAt, os)
     if (spec.signal) {
       if (spec.signal.aborted) p.kill('SIGTERM')
       else spec.signal.addEventListener('abort', () => p.kill('SIGTERM'), { once: true })
@@ -123,10 +109,6 @@ export class LocalAgentProcess extends EventEmitter implements AgentProcess {
     return hasProcessGroups(this.os?.platform)
   }
 
-  private handle(): KillablePty {
-    return { pid: this.child.pid, kill: (s?: string) => void this.child.kill(s as NodeJS.Signals | undefined) }
-  }
-
   /**
    * Stops the CLI and what it started (see the file header). TERM is the polite one, with KILL to
    * the survivors after `KILL_GRACE_MS`; KILL is at once. On Windows every signal is `taskkill /T /F`.
@@ -134,8 +116,8 @@ export class LocalAgentProcess extends EventEmitter implements AgentProcess {
   kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
     if (this.ended || this.child.pid === undefined) return false
     this.killed = true
-    if (!this.grouped || signal === 'SIGKILL') killTree(this.handle(), 'SIGKILL', this.os)
-    else if (signal === 'SIGTERM') stopTree(this.handle(), KILL_GRACE_MS, () => !this.ended, this.os)
+    if (!this.grouped || signal === 'SIGKILL') killTree(killHandle(this.child), 'SIGKILL', this.os)
+    else if (signal === 'SIGTERM') stopTree(killHandle(this.child), KILL_GRACE_MS, () => !this.ended, this.os)
     else {
       try {
         process.kill(-this.child.pid, signal)
@@ -148,28 +130,18 @@ export class LocalAgentProcess extends EventEmitter implements AgentProcess {
 
   private onExit(): void {
     this.sweep()
-    // Reported once the output has all arrived, so a reader never sees the exit before the last line
-    const report = () => {
-      if (this.exitReported) return
-      this.exitReported = true
-      this.emit('exit', this.child.exitCode, this.child.signalCode)
-    }
-    if (this.stdout.readableEnded) return report()
-    this.stdout.once('end', report)
-    setTimeout(report, EXIT_AFTER_OUTPUT_MS).unref()
+    if (!this.stdout.readableEnded) this.stdout.once('end', () => this.exitReport.drained())
+    this.exitReport.exited(this.stdout.readableEnded)
   }
 
   /** What the CLI left running once it has exited, however it ended */
   private sweep(): void {
     const pid = this.child.pid
     if (pid === undefined) return
-    if (this.grouped) return stopGroup(pid, KILL_GRACE_MS)
     const root = { pid, spawnedAt: this.spawnedAt, exitedAt: Date.now() }
-    void collectOrphansWindows(root, this.os?.listProcesses ? { listProcesses: this.os.listProcesses, taskkill: this.os.taskkill } : undefined)
-      .then((ended) => {
-        if (ended.length > 0) console.error(`[agent] ended ${ended.length} process(es) pid ${pid} left running: ${ended.join(', ')}`)
-      })
-      .catch(() => {})
+    void sweepExited(root, this.os?.platform, this.os?.listProcesses ? { listProcesses: this.os.listProcesses, taskkill: this.os.taskkill } : undefined).then((ended) => {
+      if (ended.length > 0) console.error(`[agent] ended ${ended.length} process(es) pid ${pid} left running: ${ended.join(', ')}`)
+    })
   }
 }
 

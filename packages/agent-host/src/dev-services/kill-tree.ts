@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from 'node:child_process'
-import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { systemTool } from '../os.js'
+import { descendants } from './proc-table.js'
 
 /**
  * Kills a process **tree** — shared by the command runner, terminal tabs, and app processes
@@ -61,27 +62,6 @@ export function parsePs(out: string): ProcRow[] {
   return rows
 }
 
-/** The roots, plus every descendant reached by following ppid down */
-function descend(rows: ProcRow[], roots: readonly number[]): Set<number> {
-  const byParent = new Map<number, number[]>()
-  for (const r of rows) {
-    const kids = byParent.get(r.ppid)
-    if (kids) kids.push(r.pid)
-    else byParent.set(r.ppid, [r.pid])
-  }
-  const seen = new Set<number>(roots)
-  const queue = [...roots]
-  while (queue.length > 0) {
-    const pid = queue.shift()!
-    for (const kid of byParent.get(pid) ?? []) {
-      if (seen.has(kid)) continue
-      seen.add(kid)
-      queue.push(kid)
-    }
-  }
-  return seen
-}
-
 /** The groups pids belong to. Both shots use the same rule — our own group and init(1)/0 are never targets */
 function groupsOf(pids: Iterable<number>, pgidOf: ReadonlyMap<number, number>, self: number): number[] {
   const selfPgid = pgidOf.get(self)
@@ -115,7 +95,7 @@ export function killTargets(rows: ProcRow[], root: number, self: number): number
   if (rows.length > 0 && !pgidOf.has(root)) return []
   if (rows.length === 0) pgidOf.set(root, root) // that fallback — both the pty's shell and an app process start as the leader of their own group
 
-  return groupsOf(descend(rows, [root]), pgidOf, self)
+  return groupsOf(descendants(rows, [root]), pgidOf, self)
 }
 
 /**
@@ -133,7 +113,7 @@ export function survivorTargets(rows: ProcRow[], first: readonly ProcRow[], self
   const pgidOf = new Map<number, number>()
   for (const r of rows) pgidOf.set(r.pid, r.pgid)
   const survivors = first.filter((f) => pgidOf.get(f.pid) === f.pgid).map((f) => f.pid)
-  return groupsOf(descend(rows, survivors), pgidOf, self)
+  return groupsOf(descendants(rows, survivors), pgidOf, self)
 }
 
 /** One ps snapshot. Returns an empty array on failure — which falls back to the old behavior of only firing at the root's group */
@@ -175,7 +155,7 @@ export function hasProcessGroups(platform: NodeJS.Platform = process.platform): 
 const REAL_OS: KillOs = {
   platform: process.platform,
   taskkill: (pid) => {
-    const exe = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe')
+    const exe = systemTool(['taskkill.exe'])
     execFileSync(exe, ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 5000, windowsHide: true })
   },
 }
@@ -240,7 +220,7 @@ function shoot(handle: KillablePty, signal: 'SIGTERM' | 'SIGKILL', os: KillOs = 
     }
   }
   if (!rows.some((r) => r.pid === pid)) return [] // ps could not be read, or root was already gone — no list
-  const tree = descend(rows, [pid])
+  const tree = descendants(rows, [pid])
   return rows.filter((r) => tree.has(r.pid))
 }
 
@@ -372,7 +352,7 @@ const LIST_PROCESSES =
   "Get-CimInstance Win32_Process | ForEach-Object { if ($_.CreationDate) { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() } }"
 const REAL_LEFTOVER_OS: LeftoverOs = {
   listProcesses: async () => {
-    const exe = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    const exe = systemTool(['WindowsPowerShell', 'v1.0', 'powershell.exe'])
     const { stdout } = await runFile(exe, ['-NoProfile', '-NonInteractive', '-Command', LIST_PROCESSES], { timeout: 10_000, windowsHide: true })
     return parseWinProcs(stdout)
   },

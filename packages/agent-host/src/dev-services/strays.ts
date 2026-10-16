@@ -4,6 +4,8 @@ import { promisify } from 'node:util'
 import { userInfo } from 'node:os'
 import { wireSegments } from '@cc/protocol'
 import { hasPs } from '../os.js'
+import { KILL_GRACE_MS } from './kill-tree.js'
+import { descendants } from './proc-table.js'
 
 const exec = promisify(execFile)
 
@@ -111,17 +113,7 @@ export function pickStrays(
   held: readonly number[] = [],
 ): StrayProcess[] {
   // The set of our own descendants — the side the host cleans up as a whole tree when it shuts down
-  const kids = new Map<number, number[]>()
-  for (const r of rows) kids.set(r.ppid, [...(kids.get(r.ppid) ?? []), r.pid])
-  const ours = new Set<number>([selfPid, ...held])
-  const queue = [selfPid, ...held]
-  while (queue.length > 0) {
-    for (const kid of kids.get(queue.shift()!) ?? []) {
-      if (ours.has(kid)) continue
-      ours.add(kid)
-      queue.push(kid)
-    }
-  }
+  const ours = descendants(rows, [selfPid, ...held])
 
   // What passed rules 1 through 3. Rule 4 (no owner) can only be judged once this set is known
   const candidates = new Map<number, string>()
@@ -229,6 +221,15 @@ export function resolveRoots(roots: readonly string[]): string[] {
   return [...out]
 }
 
+/** What stopping leftovers needs, as a parameter so the escalation can be tested without real processes */
+export type StrayStopDeps = {
+  find: typeof findStrays
+  kill: (pid: number, signal: NodeJS.Signals) => void
+  graceMs: number
+}
+
+const REAL_STRAY_STOP: StrayStopDeps = { find: findStrays, kill: (pid, signal) => process.kill(pid, signal), graceMs: KILL_GRACE_MS }
+
 /**
  * Stops what was chosen — **measured again right before killing.**
  *
@@ -236,24 +237,50 @@ export function resolveRoots(roots: readonly string[]): string[] {
  * and a different process inherited the number. Firing at it blindly then would kill someone
  * else's process while trying to clean up an orphan. So only what is still "a process with no
  * terminal running right now in our own folder" receives the signal.
+ *
+ * SIGTERM first, and SIGKILL after the grace to whatever of those is still a leftover, measured once more and still
+ * running the same command: the same two shots as every other stop (`stopGroup`). A dev server that traps TERM used to
+ * be left running after Stop.
+ *
+ * **`held` unknown (null) stops nothing.** The keeper's children are told apart from leftovers only by its list (rule
+ * 3): after a keeper handoff, kept agents are init's children, and with the list missing they would be stopped as
+ * leftovers. Even a TERM ends an agent, so this refuses rather than guess.
  */
 export async function stopStrays(
   pids: readonly number[],
   roots: readonly string[],
   selfPid = process.pid,
-  held: readonly number[] = [],
+  held: readonly number[] | null = [],
+  deps: StrayStopDeps = REAL_STRAY_STOP,
 ): Promise<{ stopped: number }> {
-  const live = await findStrays(roots, selfPid, held)
-  const allowed = new Set(live.map((s) => s.pid))
-  let stopped = 0
-  for (const pid of pids) {
-    if (!allowed.has(pid)) continue
-    try {
-      process.kill(pid, 'SIGTERM')
-      stopped++
-    } catch {
-      // it just died — the goal is already met
-    }
+  if (held === null) {
+    throw Object.assign(new Error('The keeper could not say which processes it holds for this host, so nothing was stopped; try again'), {
+      code: 'internal',
+    })
   }
-  return { stopped }
+  const shoot = async (targets: readonly StrayProcess[], signal: NodeJS.Signals): Promise<StrayProcess[]> => {
+    const live = new Map((await deps.find(roots, selfPid, held)).map((s) => [s.pid, s]))
+    const hit: StrayProcess[] = []
+    for (const target of targets) {
+      const now = live.get(target.pid)
+      // Still a leftover, and the same one: a number given to another program meanwhile is not fired at
+      if (!now || (target.command && now.command !== target.command)) continue
+      try {
+        deps.kill(target.pid, signal)
+        hit.push(now)
+      } catch {
+        // it just died — the goal is already met
+      }
+    }
+    return hit
+  }
+  const termed = await shoot(
+    pids.map((pid) => ({ pid, command: '', cwd: '' })),
+    'SIGTERM',
+  )
+  if (termed.length > 0) {
+    const t = setTimeout(() => void shoot(termed, 'SIGKILL').catch(() => {}), deps.graceMs)
+    t.unref?.()
+  }
+  return { stopped: termed.length }
 }

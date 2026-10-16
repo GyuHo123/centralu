@@ -1172,7 +1172,15 @@ sessionId, version?}`(띄운 CLI 버전, #297, §4.6), `{kind:"terminal", id, cw
 - **터미널과 명령.** `TerminalService`와 `CommandRunner`는 node-pty 대신 키퍼의 pty 모듈(`KeeperPty`, node-pty의 표면)을
   받는다. 멈추거나 닫을 때는 프로세스 트리를 걷는다(`kill-tree.ts`). 어디서든 통한다. 터미널을 닫을 때는 셸이 끊김
   신호를 받기 전에 트리를 잡는다: 거기서 띄운 개발 서버는 자기 그룹에 있고(작업 제어), 끊김 신호를 무시하는 서버는 예전에
-  계속 돌고 있었다.
+  계속 돌고 있었다. 둘 다 pty를 `PtySlot`(`dev-services/pty-slot.ts`, #428)에 담는다: 출력(256 KiB), 종료, 트리 멈춤, 그리고
+  실패한 시작(node-pty를 불러오지 못한 경우 포함)은 화면에 알리고 종료를 보낸다.
+- **둘 다** `keeper/held-child.ts` 위에 선다(#428): spawn의 답, 스트림 attach, 출력이 끝난 뒤의 종료 보고(종료 뒤 최대
+  1초, `exit-after-drain.ts`), 키퍼 기록의 release, 그리고 attach와 키퍼의 스트림 종료를 각각 최대 2초 기다리는 detach.
+  스트림을 attach하지 못한 자식은 끝내고(그룹에 KILL) 끝난 뒤에 release한다. 키퍼는 돌고 있는 자식의 release를 거절하므로,
+  곧바로 release하면 읽을 사람도 멈출 사람도 없이 계속 돌았다. 이전 호스트에게서 이어받은 자식은 그 전에 15초 한도로 attach를
+  한 번 더 시도한다(부하가 큰 기계나 키퍼 넘겨주기 때문에 첫 시도가 5초를 넘길 수 있다). 그래도 실패하면 에이전트는 끝낸다. 그
+  세션이 같은 대화에 새 CLI를 띄우는데, 한 스레드에 CLI 둘이 붙으면 충돌하기 때문이다. 터미널과 명령 실행은 다음 호스트가
+  이어받도록 키퍼에 그대로 둔다.
 
 **에이전트를 멈추면 끝나는 것.** 에이전트 CLI는 자기 도우미를 띄운다: Claude Code의 LSP 도구는
 `typescript-language-server`를 띄우고 그것이 `tsserver`를 띄운다(하나가 3.4 GB까지 갔다). 사용자 설정의 MCP 서버, 셸도
@@ -1191,7 +1199,8 @@ pty는 쓸어 내지 않는다: 셸이 끝나면 커널이 터미널의 전경 �
 `spawnClaudeCodeProcess`로 그렇게 한다(`adapters/local-process.ts`). macOS와 Linux에서는 CLI가 자기 프로세스 그룹을
 갖는다. 멈춤은 `kill-tree.ts`의 방식이다: 트리의 모든 그룹에 TERM, 3초 뒤 살아남은 것에 KILL. 끝난 뒤에는 그 그룹을 같은
 방식으로 쓸어 낸다(`stopGroup`). Windows에서 멈춤은 트리에 `taskkill /T /F`이고, 끝난 뒤에는 남긴 것을 부모 링크와 생성
-시각으로 찾아 끝낸다(`collectOrphansWindows`). 자기 그룹에 있으므로 CLI는 더 이상 호스트의 그룹에 있지 않다: SIGKILL을
+시각으로 찾아 끝낸다(`collectOrphansWindows`). 이때 기준이 되는 시작 시각은 띄우기 전에 잰다. 띄우기와 쓸어 내기는 앱
+프로세스와 같은 코드를 쓴다(`dev-services/grouped-child.ts`: `spawnGrouped`, `sweepExited`). 자기 그룹에 있으므로 CLI는 더 이상 호스트의 그룹에 있지 않다: SIGKILL을
 받은 호스트는 stdin EOF로만 그것을 데려간다. codex는 EOF에 바로 끝나고, claude는 하던 턴을 마치고 끝난다. SDK는 자기가
 띄운 프로세스에만 실패 메시지에 CLI의 stderr 끝을 붙이므로, 두 어댑터가 같은 방식으로 붙인다(`withStderrTail`,
 `stream-text.ts`). 호스트가 띄운 자식과 keeper의 자식은 각각 stderr의 마지막 8 KiB를 쥐고(`AgentProcess.stderrTail`), 한
@@ -1226,7 +1235,11 @@ keeper 아래에서도 그 끝을 싣는다.
 (§4.2). 이것은 크래시를 위한 것이다. codex는 아무것도 필요 없다: 소켓이 닫힌 호출은 브리지가 실패시킨다.
 
 **떠돌이.** `strays.ts` 규칙 3은 키퍼의 살아 있는 자식과 그 자손을 우리 것으로 센다. 키퍼 넘겨주기(§4.4) 뒤에는 그
-부모가 init이고, 부모 사슬만 보면 남은 찌꺼기로 내놓게 된다.
+부모가 init이고, 부모 사슬만 보면 남은 찌꺼기로 내놓게 된다. 사람이 고른 것을 멈출 때(`stopStrays`)도 다른 모든 멈춤과
+같은 두 번의 신호를 쓴다: 아직 떠돌이인 것에 SIGTERM, 3초 뒤 여전히 떠돌이이고 같은 명령을 돌리는 것에 SIGKILL. 매번 다시
+잰다(#428). 키퍼가 자기가 쥔 자식을 답하지 못하면 아무것도 멈추지 않는다. 키퍼 넘겨주기 뒤에는 그 에이전트들의 부모가 init이라,
+키퍼의 목록 없이는 떠돌이로 보이기 때문이다. 둘 다
+`kill-tree.ts`처럼 `dev-services/proc-table.ts`로 프로세스 표를 걷는다.
 
 **활동.** 넘겨받은 터미널·실행·살아 있는 세션은 다시 호스트 자신의 항목이므로 활동 보고는 전처럼 그것을 센다. 호스트가
 없는 동안 키퍼는 아무것도 세지 않는다. 유휴 한도는 30분이고 죽은 호스트는 몇 초 안에 돌아온다.

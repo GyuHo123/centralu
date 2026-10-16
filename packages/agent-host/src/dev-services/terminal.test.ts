@@ -323,6 +323,22 @@ describe('when a shell ends or fails to launch', () => {
     expect(h.history()).toContain('posix_spawnp failed')
     expect(seen.some((e) => e.data?.includes('posix_spawnp failed'))).toBe(true)
   })
+
+  /** It was only written to the history: the screen, already attached, waited for a shell that never came (#428) */
+  it('says so on screen and ends the stream when node-pty itself does not load', () => {
+    const seen: { terminalId: string; data?: string; exitCode?: number | null }[] = []
+    const svc = new TerminalService((e) => seen.push(e))
+    ;(svc as unknown as { loadPty: () => unknown }).loadPty = () => {
+      throw new Error('Cannot find module node-pty')
+    }
+    const h = svc.create(tmp(), 80, 24)
+    expect(h.alive).toBe(false)
+    expect(h.history()).toContain('Could not open terminal: Cannot find module node-pty')
+    expect(seen).toEqual([
+      { terminalId: h.id, data: expect.stringContaining('Could not open terminal: Cannot find module node-pty') },
+      { terminalId: h.id, exitCode: null },
+    ])
+  })
 })
 
 describe('shell selection', () => {
@@ -354,6 +370,12 @@ describe('shell selection', () => {
     const shell = interactiveShell('win32', { SystemRoot: 'C:\\Windows' }, () => null)
     expect(shell).toEqual({ file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', args: ['-NoLogo'] })
     expect(shell.args).not.toContain('-l')
+  })
+
+  /** A relative SystemRoot or ComSpec was used as it was: Windows looks such a path up in the project folder first (#428) */
+  it('on Windows never starts a shell from a relative SystemRoot or ComSpec', () => {
+    expect(interactiveShell('win32', { SystemRoot: 'Windows' }, () => null).file).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    expect(commandShell('npm test', 'win32', { ComSpec: 'cmd.exe', SystemRoot: '' }).file).toBe('C:\\Windows\\System32\\cmd.exe')
   })
 
   it('a project command runs under the login shell off Windows, and cmd.exe on Windows', () => {

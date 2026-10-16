@@ -1,12 +1,14 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, renameSync, statSync, writeSync } from 'node:fs'
 import type { Socket } from 'node:net'
 import { dirname } from 'node:path'
 import { Client, type PriorDiscovery, type Tool } from '@modelcontextprotocol/client'
 import { CLIENT_INFO } from '@cc/protocol'
-import { KILL_GRACE_MS, collectOrphansWindows, hasProcessGroups, stopGroup, stopTree } from '../../dev-services/kill-tree.js'
+import { KILL_GRACE_MS, hasProcessGroups, stopTree } from '../../dev-services/kill-tree.js'
+import { killHandle, spawnGrouped, sweepExited } from '../../dev-services/grouped-child.js'
 import { rotateIfLarge } from '../../log-file.js'
 import { LineTail, lineSplitter } from '../../stream-text.js'
+import { ExitAfterDrain } from '../../exit-after-drain.js'
 import { resolveCommand } from '../../tool-launch.js'
 import { StreamTransport } from './stream-transport.js'
 
@@ -44,6 +46,13 @@ export type SpawnSpec = {
    */
   serveFd3?: (fd3: Socket, note: (line: string) => void) => () => void
 }
+
+/**
+ * How long an app's exit waits for `close` (every pipe closed) before it is reported anyway. Shorter than an agent's
+ * `EXIT_AFTER_OUTPUT_MS`: a failed start waits only `RuntimeTiming.startExitWaitMs` (250 ms) for the exit, and the
+ * reason it reports needs the stderr flushed by then.
+ */
+const EXIT_AFTER_CLOSE_MS = 150
 
 export type ExitInfo = { code: number | null; signal: string | null; error: string | null }
 
@@ -108,17 +117,15 @@ export class AppProcess {
        * grandchild the app spawned inherited the pipe and is holding it open, 'close' never comes. So
        * a short cap is used instead.
        */
-      let done = false
       const finish = () => {
-        if (done) return
-        done = true
         this.log.flush()
         this.log.note(`exited (${describeExit(info)})`)
         for (const w of this.exitWaiters.splice(0)) w()
         if (!this.stopping) this.onUnexpectedExit?.(this.reason(`exited (${describeExit(info)})`))
       }
-      child.once('close', finish)
-      setTimeout(finish, 150).unref()
+      const report = new ExitAfterDrain(finish, EXIT_AFTER_CLOSE_MS)
+      child.once('close', () => report.drained())
+      report.exited()
     }
     child.once('exit', (code, signal) => settle({ code, signal, error: null }))
     child.once('error', (e) => settle({ code: null, signal: null, error: e.message }))
@@ -142,8 +149,7 @@ export class AppProcess {
     log.note(`starting: ${spec.command} ${spec.args.join(' ')}`)
     // Windows: `npx` is `npx.cmd`, which cannot be spawned without a shell (tool-launch.ts)
     const launch = resolveCommand(spec.command, spec.env)
-    const spawnedAt = Date.now()
-    const child = spawn(launch.command, [...launch.args, ...spec.args], {
+    const { child, spawnedAt } = spawnGrouped(launch.command, [...launch.args, ...spec.args], {
       cwd: spec.cwd,
       env: spec.env,
       /*
@@ -162,10 +168,8 @@ export class AppProcess {
        * Not on Windows (#14): there `detached` means DETACHED_PROCESS, which leaves the app with no
        * console at all, so every console program it starts opens a visible window of its own. Windows
        * has no groups to gain, and its tree is ended with `taskkill /T` (kill-tree.ts). Attached and
-       * hidden, the app shares the host's windowless console.
+       * hidden, the app shares the host's windowless console (`spawnGrouped`).
        */
-      detached: hasProcessGroups(),
-      windowsHide: true,
     })
     const proc = new AppProcess(child, (child.stdio[3] as Socket | undefined) ?? null, log, spec.probeTimeoutMs, spawnedAt)
     if (proc.fd3 && spec.serveFd3) proc.closeFd3Server = spec.serveFd3(proc.fd3, (line) => log.note(line))
@@ -234,10 +238,10 @@ export class AppProcess {
       this.fd3?.end()
       if (this.alive && !(await this.waitExit(graceMs))) {
         this.log.note(`did not exit within ${graceMs}ms of stdin and fd 3 closing — stopping the process tree`)
-        stopTree({ pid: this.child.pid, kill: (s) => this.child.kill(s as NodeJS.Signals) }, KILL_GRACE_MS, () => this.alive)
+        stopTree(killHandle(this.child), KILL_GRACE_MS, () => this.alive)
         if (opts.awaitKill !== false) await this.waitExit(KILL_GRACE_MS + 1000)
-      } else {
-        this.signalOwnGroup()
+      } else if (hasProcessGroups()) {
+        void this.collectLeftovers()
       }
       this.fd3?.destroy()
       const leftovers = !hasProcessGroups() && !this.alive ? this.collectLeftovers() : null
@@ -282,18 +286,15 @@ export class AppProcess {
     })
   }
 
-  /** Windows: ends what the app left running once it has ended (kill-tree's `collectOrphansWindows`). Never rejects */
+  /**
+   * Ends what the app left running once it has ended (`sweepExited`): its group on macOS and Linux, at once; on
+   * Windows what descends from it by parent links (kill-tree's `collectOrphansWindows`). Never rejects
+   */
   private async collectLeftovers(): Promise<void> {
     const pid = this.child.pid
-    if (typeof pid !== 'number' || this.exitedAt === null) return
-    const ended = await collectOrphansWindows({ pid, spawnedAt: this.spawnedAt, exitedAt: this.exitedAt })
-    if (ended.length > 0) this.log.note(`ended ${ended.length} process(es) it left running: ${ended.join(', ')}`)
-  }
-
-  private signalOwnGroup(): void {
-    const pid = this.child.pid
     if (typeof pid !== 'number') return
-    stopGroup(pid, KILL_GRACE_MS)
+    const ended = await sweepExited({ pid, spawnedAt: this.spawnedAt, exitedAt: this.exitedAt ?? Date.now() })
+    if (ended.length > 0) this.log.note(`ended ${ended.length} process(es) it left running: ${ended.join(', ')}`)
   }
 }
 
