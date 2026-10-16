@@ -1,9 +1,17 @@
-import type { NormalizedEvent, RequestInput, SessionActivity, TokenUsage } from '@cc/protocol'
+import type { NormalizedEvent, RequestInput, TokenUsage } from '@cc/protocol'
+import { TouchedFiles } from '../file-changes.js'
+import { inlineImageEvent, undrawnImageEvent } from '../images.js'
+import { todoWritePlan } from '../plan.js'
+import { addTokens, NO_TOKENS, tokenCount } from '../token-usage.js'
+import { toolResultEvent } from '../tool-result.js'
+import { stepLine } from '../tool-titles.js'
 import { UnmappedTypes } from '../unmapped.js'
+import { RetryActivity } from '../retry-activity.js'
 import { ClaudeBackgroundTracker } from './background-tracker.js'
 import { ClaudeGoalTracker } from './goal-tracker.js'
 import { str, type Json } from './json.js'
-import { agentReport, agentStats, approvalDetail, editedPaths, resultOutput, stepLine, toolSummary } from './tool-summary.js'
+import { ClaudeTaskPlan } from './task-plan.js'
+import { agentReport, agentStats, approvalDetail, editedPaths, resultOutput, toolSummary } from './tool-summary.js'
 
 export { ClaudeBackgroundTracker, ClaudeGoalTracker, approvalDetail, toolSummary }
 
@@ -91,7 +99,7 @@ export function normalizeMessage(
    *
    * Files are the exception — a file a subagent edited is still a file changed inside this
    * session's own working folder, so it is still reported to conflict detection and highlighting
-   * (FR-2, FR-5).
+   * (FR-2, FR-5), from its steps, once the edit's result says it went through (`ClaudeStreamNormalizer`).
    *
    * **What the subagent did is kept, under its launch card** (#222). Its text, readable thinking,
    * tool calls and their results go out as `subagent_event`s tagged with that same
@@ -114,8 +122,6 @@ export function normalizeMessage(
         out.push({ type: 'subagent_event', sessionId, parentCallId: parent, step: e })
       } else if (e.type === 'tool_result') {
         out.push({ type: 'subagent_event', sessionId, parentCallId: parent, step: e })
-      } else if (e.type === 'files_touched') {
-        out.push(e)
       }
     }
     return out
@@ -327,7 +333,10 @@ export function normalizeMessage(
       if (str(block.type) === 'tool_use') {
         const name = str(block.name)
         const input = (block.input ?? {}) as Json
-        // `input` is the record (#221): a Write's content and an Edit's both sides, which the title reduces to a path
+        /*
+         * `input` is the record (#221): a Write's content and an Edit's both sides, which the title reduces to a path.
+         * The files it changes are marked when its result says it went through (`ClaudeStreamNormalizer`, #843).
+         */
         out.push({
           type: 'tool_call',
           sessionId,
@@ -335,21 +344,21 @@ export function normalizeMessage(
           summary: toolSummary(name, input),
           ...(block.input !== undefined ? { input: block.input } : {}),
         })
-        const paths = editedPaths(toolSummary(name, input))
-        if (paths.length) out.push({ type: 'files_touched', sessionId, paths })
+        // The todo list is the session's plan too (#843); a subagent's is not, and its steps keep no plan
+        out.push(...todoWritePlan(sessionId, name, block.input))
       }
     }
-    // Usage also comes carried on an assistant message.
+    // Usage also comes carried on an assistant message: this one request's, which `ClaudeStreamNormalizer` adds to the running reading
     const usage = (m.message as Json | undefined)?.usage as Json | undefined
     if (usage) {
       out.push({
         type: 'usage_update',
         sessionId,
         tokens: {
-          inputTokens: Number(usage.input_tokens ?? 0),
-          outputTokens: Number(usage.output_tokens ?? 0),
-          cacheReadTokens: Number(usage.cache_read_input_tokens ?? 0),
-          cacheCreationTokens: Number(usage.cache_creation_input_tokens ?? 0),
+          inputTokens: tokenCount(usage.input_tokens),
+          outputTokens: tokenCount(usage.output_tokens),
+          cacheReadTokens: tokenCount(usage.cache_read_input_tokens),
+          cacheCreationTokens: tokenCount(usage.cache_creation_input_tokens),
         },
       })
     }
@@ -387,15 +396,12 @@ export function normalizeMessage(
     for (const block of content) {
       if (str(block.type) === 'tool_result') {
         const c = block.content
-        const output = agentDone ?? resultOutput(c)
-        out.push({
-          type: 'tool_result',
-          sessionId,
-          callId: str(block.tool_use_id),
-          ok: block.is_error !== true,
-          summary: agentDone?.slice(0, 300) ?? (typeof c === 'string' ? c : JSON.stringify(c ?? '')).slice(0, 300),
-          ...(output ? { output } : {}),
-        })
+        /*
+         * The card reads the answer as the record does (#843): a list of blocks used to be cut out of its JSON, so a
+         * card, and every session reading it (read_session, recall, the handoff record), got `[{"type":"text",…` or
+         * an image's base64 instead of the text.
+         */
+        out.push(toolResultEvent(sessionId, str(block.tool_use_id), block.is_error !== true, agentDone ?? resultOutput(c)))
         /*
          * An image carried in a tool result (#40). This is where one arrives when a screenshot is
          * taken or an image file is Read — the measured shape:
@@ -413,23 +419,11 @@ export function normalizeMessage(
              * existing image-failure cases (too large, file missing).
              */
             if (str(source.type) !== 'base64' || !str(source.data)) {
-              out.push({
-                type: 'message_image', sessionId, mime: '', data: '',
-                note: `Cannot display an image of this format yet (source: ${str(source.type) || 'none'})`,
-              })
+              out.push(undrawnImageEvent(sessionId, `Cannot display an image of this format yet (source: ${str(source.type) || 'none'})`))
               continue
             }
-            const data = str(source.data)
-            const mime = str(source.media_type) || 'image/png'
-            // ~11M base64 characters is roughly an 8MB original. Beyond that, this explains why it is not shown instead of rendering it.
-            if (data.length > 11_000_000) {
-              out.push({
-                type: 'message_image', sessionId, mime, data: '',
-                note: `Image is too large (~${Math.round((data.length * 3) / 4 / 1048576)}MB)`,
-              })
-            } else {
-              out.push({ type: 'message_image', sessionId, mime, data })
-            }
+            // Beyond the ceiling every image is held to (adapters/images.ts), this explains why it is not shown instead of rendering it
+            out.push(inlineImageEvent(sessionId, str(source.media_type), str(source.data)))
           }
         }
       }
@@ -489,7 +483,7 @@ export function normalizeMessage(
        * the CLI log (Opus) used only 200/363 output tokens against 24k-80k cache input tokens.
        * What got recorded was the small model's share.
        */
-      const sum = (field: string) => models.reduce((n, u) => n + Number(u[field] ?? 0), 0)
+      const sum = (field: string) => models.reduce((n, u) => n + tokenCount(u[field]), 0)
       out.push({
         type: 'usage_update',
         sessionId,
@@ -636,6 +630,13 @@ export class ClaudeStreamNormalizer {
   private readonly requestsSeen: string[] = []
   /** The parent's last `usage_update` reading, which a subagent's request repeats (see `withRequest`) */
   private lastTokens: TokenUsage | null = null
+  /** The last turn result's reading, the process's total then, and the parent's requests since (see `withRequest`) */
+  private resultTokens: TokenUsage | null = null
+  private sinceResult: TokenUsage = NO_TOKENS
+  /** Claude Code's task list, kept as the plan (see `followTasks`) */
+  private readonly taskPlan: ClaudeTaskPlan
+  /** Edits whose result has not come yet (see `touch`) */
+  private readonly touched: TouchedFiles
   /** The session's /goal, read off the stream (see `ClaudeGoalTracker`). */
   readonly goal: ClaudeGoalTracker
   /** Message types this session received that nothing maps or ignores on purpose, said once each in host.log (#58) */
@@ -643,14 +644,8 @@ export class ClaudeStreamNormalizer {
 
   /** The session's background work (see `ClaudeBackgroundTracker`). */
   readonly tasks: ClaudeBackgroundTracker
-  /**
-   * The CLI is retrying a failed API call (`system/api_retry`, #304): the `retrying` activity is up, and
-   * `activityBefore` is what was showing before it. The CLI sends no "recovered" message — the next stream event or
-   * assistant message is the sign that output flows again, so that is where the previous activity is put back. The
-   * same shape as the Codex adapter's.
-   */
-  private retrying = false
-  private activityBefore: SessionActivity | null = null
+  /** The CLI is retrying a failed API call (`system/api_retry`, #304): the same rule as Codex's (`RetryActivity`) */
+  private readonly retry: RetryActivity
   /**
    * What the CLI said when the model refused and no fallback ran (`model_refusal_no_fallback`, #304), held until the
    * turn's result: if the turn failed, this is its message (the result itself only says *that* it failed); if not, it
@@ -667,8 +662,11 @@ export class ClaudeStreamNormalizer {
     private readonly settings: () => ClaudeLaunchedSettings = () => ({ model: null, effort: null, verbosity: null, serviceTier: null }),
   ) {
     this.goal = new ClaudeGoalTracker(sessionId)
+    this.touched = new TouchedFiles(sessionId)
+    this.taskPlan = new ClaudeTaskPlan(sessionId)
     this.unmapped = new UnmappedTypes('claude', sessionId, CLAUDE_KNOWN_TYPES)
     this.tasks = new ClaudeBackgroundTracker(sessionId)
+    this.retry = new RetryActivity(sessionId)
   }
 
   /**
@@ -721,19 +719,32 @@ export class ClaudeStreamNormalizer {
    * by then, since it launched the subagent from a message of its own.
    */
   private withRequest(m: Json, events: NormalizedEvent[], subagent: boolean): NormalizedEvent[] {
-    if (!subagent) {
-      this.lastTokens = readingOf(events) ?? this.lastTokens
-    }
     const message = (m.message ?? {}) as Json
     const id = str(message.id)
     const usage = message.usage as Json | undefined
-    if (!id || !usage || this.requestsSeen.includes(id)) return events
+    const fresh = !!usage && !(id && this.requestsSeen.includes(id))
+    if (!subagent) {
+      /*
+       * `TokenUsage` is a running reading (#843): the turn's result carries the process's total, and an assistant
+       * message only its own request. Sent as it came, that request replaced the session's figures mid-turn (a reading
+       * of 2M dropped to one request's 80k), and the result put them back. The running reading is the last result's
+       * plus each request since, each counted once however many messages repeat it.
+       */
+      const request = readingOf(events)
+      if (request && fresh) this.sinceResult = addTokens(this.sinceResult, request)
+      if (request) {
+        const running = addTokens(this.resultTokens ?? NO_TOKENS, this.sinceResult)
+        events = events.map((e) => (e.type === 'usage_update' ? { ...e, tokens: running } : e))
+        this.lastTokens = running
+      }
+    }
+    if (!id || !usage || !fresh) return events
     this.requestsSeen.push(id)
     if (this.requestsSeen.length > 32) this.requestsSeen.shift()
     const request: RequestInput = {
-      inputTokens: Number(usage.input_tokens ?? 0),
-      cacheReadTokens: Number(usage.cache_read_input_tokens ?? 0),
-      cacheCreationTokens: Number(usage.cache_creation_input_tokens ?? 0),
+      inputTokens: tokenCount(usage.input_tokens),
+      cacheReadTokens: tokenCount(usage.cache_read_input_tokens),
+      cacheCreationTokens: tokenCount(usage.cache_creation_input_tokens),
       ...(subagent ? { agent: str(m.parent_tool_use_id) } : {}),
       ...ttlOf(usage.cache_creation),
     }
@@ -743,35 +754,48 @@ export class ClaudeStreamNormalizer {
     return events.map((e) => (e.type === 'usage_update' ? { ...e, request } : e))
   }
 
+  /**
+   * The files an edit changed, marked by its result rather than its call (#843), for the parent's own calls and a
+   * subagent's steps alike: a denied edit's result is an error, and it marks nothing.
+   */
+  private touch(events: NormalizedEvent[]): NormalizedEvent[] {
+    const out: NormalizedEvent[] = []
+    for (const e of events) {
+      out.push(e)
+      const step = e.type === 'subagent_event' ? e.step : e
+      if (step.type === 'tool_call') this.touched.call(step.callId, editedPaths(step.summary))
+      else if (step.type === 'tool_result') out.push(...this.touched.result(step.callId, step.ok))
+    }
+    return out
+  }
+
+  /**
+   * The task list as the plan (`ClaudeTaskPlan`, #843), from the parent's own calls: a subagent's tasks are not the
+   * session's plan. The message's `tool_use_result` is read only when it carries one result.
+   */
+  private followTasks(m: Json, events: NormalizedEvent[]): NormalizedEvent[] {
+    const results = (((m.message as Json | undefined)?.content ?? []) as Json[]).filter((b) => str(b?.type) === 'tool_result')
+    const record = results.length === 1 && typeof m.tool_use_result === 'object' && m.tool_use_result !== null ? (m.tool_use_result as Json) : undefined
+    const out: NormalizedEvent[] = []
+    for (const e of events) {
+      out.push(e)
+      if (e.type === 'tool_call') this.taskPlan.call(e.callId, e.summary.tool, e.input)
+      else if (e.type === 'tool_result') out.push(...this.taskPlan.result(e.callId, e.ok, e.output ?? '', record))
+    }
+    return out
+  }
+
   /** The adapter interrupted the turn (see `stopping` above). */
   stopped(): void {
     this.stopping = true
   }
 
-  /** Raises `retrying` once per episode and puts the previous activity back when output flows again (see `retrying`). */
+  /** Raises `retrying` once per episode and puts the previous activity back when output flows again (see `retry`). */
   private followRetry(type: string, events: NormalizedEvent[]): NormalizedEvent[] {
-    const out: NormalizedEvent[] = []
-    for (const e of events) {
-      if (e.type === 'activity' && e.activity === 'retrying') {
-        // Each attempt sends its own message; one indication is enough
-        if (this.retrying) continue
-        this.retrying = true
-      } else if (e.type === 'activity') {
-        // A status message says what is happening now by itself, which ends the retry indication too
-        this.activityBefore = e.activity
-        this.retrying = false
-      }
-      out.push(e)
-    }
-    if (this.retrying && (type === 'stream_event' || type === 'assistant')) {
-      this.retrying = false
-      out.unshift({ type: 'activity', sessionId: this.sessionId, activity: this.activityBefore })
-    }
-    // A finished turn takes its activity with it (the state machine clears it on leaving working)
-    if (type === 'result') {
-      this.retrying = false
-      this.activityBefore = null
-    }
+    const out = events.filter((e) => e.type !== 'activity' || this.retry.admit(e.activity))
+    const resumed = type === 'stream_event' || type === 'assistant' ? this.retry.resumed() : null
+    if (resumed) out.unshift(resumed)
+    if (type === 'result') this.retry.ended()
     return out
   }
 
@@ -795,14 +819,7 @@ export class ClaudeStreamNormalizer {
        * one field.) So the whole of it is the result's record, as for a foreground agent.
        */
       const output = agentReport(str(m.summary), agentStats(usage.tool_uses, usage.duration_ms, status))
-      const done: NormalizedEvent = {
-        type: 'tool_result',
-        sessionId: this.sessionId,
-        callId,
-        ok: status === 'completed',
-        summary: output.slice(0, 300),
-        ...(output ? { output } : {}),
-      }
+      const done = toolResultEvent(this.sessionId, callId, status === 'completed', output)
       if (!this.textStreamed && !this.reasoningStreamed) return [...tasks, done]
       this.deferred.push(done)
       return tasks
@@ -824,7 +841,16 @@ export class ClaudeStreamNormalizer {
     ]
     if (type === 'assistant') events = this.withRequest(m, events, subagent)
     // The turn's result is a running reading too: a subagent's request repeats whichever came last
-    else if (type === 'result' && !subagent) this.lastTokens = readingOf(events) ?? this.lastTokens
+    else if (type === 'result' && !subagent) {
+      const total = readingOf(events)
+      if (total) {
+        this.lastTokens = total
+        this.resultTokens = total
+        this.sinceResult = NO_TOKENS
+      }
+    }
+    events = this.touch(events)
+    if (!subagent) events = this.followTasks(m, events)
     if (subagent) return events
     events = this.followRetry(type, events)
     if (type === 'result' && this.refusal !== null) {

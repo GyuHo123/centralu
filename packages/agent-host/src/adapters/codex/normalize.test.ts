@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { __resetWarningsForTest, approvalDetailFrom, CodexRequestInputs, fileChangesOf, CompactionMarks, normalizeNotification, toCodexDecision } from './normalize.js'
+import { __resetWarningsForTest, approvalDetailFrom, CodexChildTracker, CodexRequestInputs, fileChangesOf, CompactionMarks, normalizeNotification, toCodexDecision } from './normalize.js'
 
 /**
  * A-2 contract tests. The fixtures are trimmed-down versions of protocol output **actually
@@ -122,9 +122,31 @@ describe('streaming and tool calls', () => {
     expect(out[1]).toMatchObject({ paths: ['src/a.ts'] })
   })
 
+  it('a declined file change marks no file, a failed one still does (it may have written some); a move marks both paths (#843)', () => {
+    const change = (status: string) => n('item/completed', { item: { type: 'fileChange', id: 'fc', status, changes: [{ path: 'src/a.ts', diff: '+1' }] } })
+    expect(change('declined').map((e) => e.type)).toEqual(['tool_result'])
+    expect(change('failed')).toMatchObject([{ type: 'tool_result', ok: false }, { type: 'files_touched', paths: ['src/a.ts'] }])
+    const moved = n('item/completed', {
+      item: { type: 'fileChange', id: 'fc', status: 'completed', changes: [{ path: 'src/a.ts', diff: '', kind: { type: 'update', move_path: 'src/b.ts' } }] },
+    })
+    expect(moved[1]).toMatchObject({ type: 'files_touched', paths: ['src/a.ts', 'src/b.ts'] })
+  })
+
   it('a failed tool gets ok=false', () => {
     const out = n('item/completed', { item: { type: 'commandExecution', id: 'e', status: 'failed', output: 'error' } })
     expect(out[0]).toMatchObject({ type: 'tool_result', ok: false })
+  })
+
+  it('a declined command or edit, and an interrupted agent call, close as not ok and say so (#843)', () => {
+    const declined = n('item/completed', { item: { type: 'commandExecution', id: 'e', status: 'declined', command: 'rm -rf build', aggregatedOutput: null } })
+    expect(declined[0]).toMatchObject({ type: 'tool_result', ok: false, summary: '(declined)' })
+    expect(declined[0]).not.toHaveProperty('output')
+    const edit = n('item/completed', { item: { type: 'fileChange', id: 'f', status: 'declined', changes: [{ path: 'src/a.ts', diff: '+1', kind: { type: 'update' } }] } })
+    expect(edit[0]).toMatchObject({ type: 'tool_result', ok: false, summary: '(declined)' })
+    const agent = n('item/completed', { item: { type: 'collabAgentToolCall', id: 'c', tool: 'wait', status: 'interrupted' } })
+    expect(agent[0]).toMatchObject({ type: 'tool_result', ok: false, summary: '(interrupted)' })
+    const dynamic = n('item/completed', { item: { type: 'dynamicToolCall', id: 'd', tool: 't', status: 'completed', success: false } })
+    expect(dynamic[0]).toMatchObject({ type: 'tool_result', ok: false })
   })
 
   /*
@@ -161,9 +183,9 @@ describe('streaming and tool calls', () => {
         summary: { tool: string; title: string }
       }).summary
     expect(summary({ command: 'propose_skill', args: { name: 'weekly-report', content: 'x' } }).tool).toBe('propose_skill')
-    expect(summary(JSON.stringify({ command: 'propose_worktree_session', args: { branch: 'feat/login-fix' } }))).toMatchObject({
-      tool: 'propose_worktree_session',
-      title: 'feat/login-fix',
+    expect(summary(JSON.stringify({ command: 'ask_project', args: { project: 'Docs' } }))).toMatchObject({
+      tool: 'ask_project',
+      title: 'Docs',
     })
     // Called from inside exec, the item carries no arguments: it stays the call, which the screen answers by re-reading both lists
     expect(summary({}).tool).toBe('centralu_run')
@@ -181,6 +203,19 @@ describe('streaming and tool calls', () => {
     expect(title.length).toBeLessThan(120)
     expect(title).toContain('message: xxx')
     expect(title.endsWith('…}')).toBe(true)
+  })
+
+  it("an MCP tool's image is drawn after its card, not dropped (#843)", () => {
+    const out = n('item/completed', {
+      item: {
+        type: 'mcpToolCall', id: 'm5', server: 'browser', tool: 'screenshot', status: 'completed',
+        result: { content: [{ type: 'text', text: 'Took a screenshot' }, { type: 'image', data: 'aWJs', mimeType: 'image/jpeg' }], structuredContent: null },
+      },
+    })
+    expect(out).toMatchObject([
+      { type: 'tool_result', ok: true, summary: 'Took a screenshot' },
+      { type: 'message_image', sessionId: S, mime: 'image/jpeg', data: 'aWJs' },
+    ])
   })
 
   it('an MCP failure carries a reason — an empty card says nothing', () => {
@@ -732,5 +767,27 @@ describe('CodexRequestInputs', () => {
 
   it('gives nothing for a notification without input', () => {
     expect(new CodexRequestInputs().take({ tokenUsage: {} })).toBeUndefined()
+  })
+})
+
+describe('a spawnAgent card held open while its child runs (#843)', () => {
+  const result = { type: 'tool_result' as const, sessionId: S, callId: 'spawn', ok: true, summary: '' }
+  const ended = (thread: string) => ({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'c', status: 'completed' } } })
+
+  it('lets the result go when every child it started ended, and not before', () => {
+    const tracker = new CodexChildTracker(S)
+    expect(tracker.hold(result, ['a', 'b'])).toBe(true)
+    expect(tracker.push('a', ended('a')).filter((e) => e.type === 'tool_result')).toEqual([])
+    expect(tracker.push('b', ended('b')).filter((e) => e.type === 'tool_result')).toEqual([result])
+  })
+
+  it('does not hold for a child that already ended, and closes a held card with the reason when the process goes', () => {
+    const tracker = new CodexChildTracker(S)
+    tracker.push('a', ended('a'))
+    expect(tracker.hold(result, ['a'])).toBe(false)
+    expect(tracker.hold(result, ['b'])).toBe(true)
+    expect(tracker.release('Ended with the session process').filter((e) => e.type === 'tool_result')).toEqual([
+      { type: 'tool_result', sessionId: S, callId: 'spawn', ok: false, summary: 'Ended with the session process' },
+    ])
   })
 })

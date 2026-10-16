@@ -1,4 +1,6 @@
-import { NO_PATH, type ApprovalDetail, type ToolSummary } from '@cc/protocol'
+import { launchesSubagent, type ApprovalDetail, type ToolSummary } from '@cc/protocol'
+import { diffLines, fileEditDetail, type FileChange } from '../file-changes.js'
+import { isCentraluTool } from '../tool-titles.js'
 import { str, type Json } from './json.js'
 
 const FILE_EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
@@ -8,7 +10,7 @@ const FILE_EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
  * command's full name and its arguments. Null when it names no command, which leaves the card as the call.
  */
 function commandRunOf(name: string, input: Json): { name: string; input: Json } | null {
-  if (!name.endsWith('__centralu_run')) return null
+  if (!isCentraluTool({ name }, 'centralu_run')) return null
   const command = str(input.command).trim()
   if (!/^[a-z]+(?:_[a-z]+)*$/.test(command)) return null
   let args: unknown = input.args ?? {}
@@ -38,16 +40,14 @@ export function toolSummary(name: string, input: Json): ToolSummary {
     if (p) paths.push(p)
     title = `${name}: ${p || '?'}`
   } else if (name === 'Grep' || name === 'Glob') title = `${name}: ${str(input.pattern)}`
-  // The only channel through which a proposal card can pre-fill a branch name (#69) — carried in the title.
-  else if (name.endsWith('propose_worktree_session')) title = str(input.branch, name)
   // The project asked (#371) — the caller's card names it, and finds the delegated session by it before the answer
-  else if (name.endsWith('__ask_project')) title = str(input.project, name)
+  else if (isCentraluTool({ name }, 'ask_project')) title = str(input.project, name)
   /*
    * An agent card's title is the work handed to it (#98). While it was just the name, every card
    * said "Agent Agent", and launching three agents side by side left no way to tell which card was
    * which (a dogfooding session: all three showed the same line).
    */
-  else if (name === 'Agent' || name === 'Task') title = str(input.description, name)
+  else if (launchesSubagent(name)) title = str(input.description, name)
   return { tool: name, title, paths }
 }
 
@@ -60,21 +60,6 @@ export function toolSummary(name: string, input: Json): ToolSummary {
  */
 export function editedPaths(s: ToolSummary): string[] {
   return FILE_EDIT_TOOLS.has(s.tool) ? s.paths : []
-}
-
-/**
- * One line of a subagent's step — appended to that agent card's live output (#98).
- *
- * Uses the same title rule as the parent's own card (`toolSummary`), but with the tool name
- * prepended: Bash's title is the full command text, so without the name what remains is what was
- * typed, not what it actually did. A multi-line command (a heredoc) only keeps its first line —
- * the card's tail is three lines, so a single command would otherwise take up the whole thing.
- */
-export function stepLine(s: ToolSummary): string {
-  const lines = s.title.split('\n')
-  const first = lines[0] ?? ''
-  const head = first.slice(0, 200) + (lines.length > 1 || first.length > 200 ? ' …' : '')
-  return head === s.tool || head.startsWith(`${s.tool}:`) ? head : `${s.tool}: ${head}`
 }
 
 /** "34 tool uses · 2m 13s" — the opening of an agent card's result (#98). */
@@ -92,13 +77,13 @@ export function agentStats(toolUses: unknown, durationMs: unknown, status?: stri
 /**
  * An agent card's result body — the step count plus the opening of the report.
  *
- * A card's result is cut at 300 characters for every tool (see `tool_result` below). An agent's
+ * A card's result is cut at `RESULT_SUMMARY_CHARS` for every tool (adapters/tool-result.ts). An agent's
  * report routinely runs to tens of thousands of characters (dogfooding: 15-24KB), so only the
  * opening lands on the card, while the parent receives the full text and writes it in its own
  * words — if the card rendered the full text too, that is exactly what "the answer appears
  * twice" means.
  *
- * This returns the report uncut: its first 300 characters are the card's `summary`, and the whole of it is the
+ * This returns the report uncut: its opening is the card's `summary`, and the whole of it is the
  * result's `output`, the record (#221).
  */
 export function agentReport(report: string, stats: string): string {
@@ -109,8 +94,8 @@ export function agentReport(report: string, stats: string): string {
  * The whole text of a `tool_result` block — its `output` (#221): the string itself, or the blocks' text joined.
  *
  * Images are left out: they are saved as attachments (#40), and base64 would make the row as large as the picture.
- * So is any other block that carries base64 (a document, say). Other blocks are kept as their JSON, which is how the
- * card's summary has always shown them. Measured on this machine's transcripts (2026-09-30), a result is a string
+ * So is any other block that carries base64 (a document, say). Other blocks are kept as their JSON. The card's
+ * summary is the opening of this text too (#843). Measured on this machine's transcripts (2026-09-30), a result is a string
  * (25,150), text blocks (3,167), an image (493), image and text (26) or a `tool_reference` from ToolSearch (235);
  * joining only the text would leave a ToolSearch result empty.
  */
@@ -123,15 +108,43 @@ export function resultOutput(content: unknown): string {
     .join('\n')
 }
 
-/** Normalizes an approval request into one of 3 kinds the banner can judge (core/approval decides based on `kind` alone). */
-export function approvalDetail(name: string, input: Json, cwd: string): ApprovalDetail {
+/**
+ * What an Edit, Write or NotebookEdit call would do to its file, as Codex's file changes are read (#843). The card
+ * showed only the new text, cut at 400 characters: an edit read the same whatever it replaced, and a Write that makes
+ * a file the same as one that overwrites it. An Edit is its removed and its added lines; a notebook cell is its new
+ * source. A Write is its content: as added lines when it makes a new file (`isNew`, which the adapter finds out, since
+ * it knows the working folder), under a line saying it replaces the whole file when one is there, and under a line
+ * saying it writes the whole file when that is not known. A Write's content is not marked as added to a file it
+ * replaces, since nothing says which of its lines are new.
+ */
+export function claudeFileChange(name: string, input: Json, isNew?: boolean): FileChange {
+  const path = str(input.file_path ?? input.notebook_path)
+  if (name === 'Edit') {
+    const diff = [diffLines('-', str(input.old_string)), diffLines('+', str(input.new_string))].filter(Boolean).join('\n')
+    return { path, diff: input.replace_all === true && diff ? `(every occurrence)\n${diff}` : diff }
+  }
+  if (name === 'Write') {
+    const content = str(input.content)
+    if (isNew === true) return { path, diff: diffLines('+', content), change: 'add' }
+    const head = isNew === false ? '(replaces the whole file)' : '(writes the whole file)'
+    return { path, diff: content ? `${head}\n${content.replace(/\n$/, '')}` : '' }
+  }
+  const mode = str(input.edit_mode)
+  const diff = diffLines('+', str(input.new_source))
+  return { path, diff: mode === 'delete' ? `(deletes cell ${str(input.cell_id) || '?'})` : mode === 'insert' ? `(inserts a cell)\n${diff}` : diff }
+}
+
+/**
+ * Normalizes an approval request into one of 3 kinds the banner can judge (core/approval decides based on `kind` alone).
+ * `isNew` says whether a Write makes its file (`claudeFileChange`); absent when not known.
+ */
+export function approvalDetail(name: string, input: Json, cwd: string, isNew?: boolean): ApprovalDetail {
   // Running outside the sandbox is part of what is asked (#683 review): the card says so, and no list row answers it
   if (name === 'Bash') return { kind: 'command', command: str(input.command), cwd, ...(input.dangerouslyDisableSandbox === true ? { unsandboxed: true } : {}) }
   if (FILE_EDIT_TOOLS.has(name)) {
-    const path = str(input.file_path ?? input.notebook_path, NO_PATH)
-    const preview =
-      str(input.new_string) || str(input.content) || str(input.new_source) || JSON.stringify(input).slice(0, 400)
-    return { kind: 'file_edit', path, diffPreview: preview.slice(0, 400), multi: false }
+    const change = claudeFileChange(name, input, isNew)
+    // A call that carries none of the fields read is shown as it came, rather than as an empty card
+    return fileEditDetail([change.diff ? change : { ...change, diff: JSON.stringify(input) }])
   }
   return { kind: 'other', raw: `${name} ${JSON.stringify(input).slice(0, 300)}` }
 }

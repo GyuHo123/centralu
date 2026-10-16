@@ -1,5 +1,10 @@
-import { NO_PATH, type ApprovalDetail, type BackgroundTask, type NormalizedEvent, type RequestInput, type SessionGoal, type SubagentStep } from '@cc/protocol'
 import { asObj, finite, str } from '../../json-value.js'
+import { type ApprovalDetail, type BackgroundTask, type NormalizedEvent, type RequestInput, type SessionGoal, type SubagentStep } from '@cc/protocol'
+import { fileEditDetail, type FileChange } from '../file-changes.js'
+import { mcpImageEvents } from '../images.js'
+import { planUpdate } from '../plan.js'
+import { firstLine, isCentraluTool, stepLine } from '../tool-titles.js'
+import { toolResultEvent } from '../tool-result.js'
 import { noticeWords } from './notices.js'
 
 /**
@@ -61,6 +66,17 @@ function resultSummary(item: Record<string, unknown>): string {
 }
 
 /**
+ * Whether a completed tool item went through (#843). Every status but `completed` says it did not: a command or a
+ * file change the person declined ends `declined` (generated v2 `CommandExecutionStatus`, `PatchApplyStatus`), a
+ * collab call `interrupted` (`CollabAgentToolCallStatus`), and any of them `failed`. Only `failed` was read, so a
+ * declined command or edit closed its card as green. A dynamic tool also says `success: false`.
+ */
+export function codexItemOk(item: Record<string, unknown>): boolean {
+  const status = str(item.status)
+  return status !== 'failed' && status !== 'declined' && status !== 'interrupted' && item.success !== false
+}
+
+/**
  * The fields of a thread item that say how it went rather than what was asked (generated/v2/ThreadItem.ts): the
  * status, a command's output, exit code and PTY, an MCP call's result and error, a dynamic tool's content, a search's
  * results, a generated image (base64) and where it was saved. On `item/started` they are empty or null; they are
@@ -106,7 +122,7 @@ function itemSummary(item: Record<string, unknown>): { tool: string; title: stri
      * the claude side, when its arguments are on the item. A call made from inside `exec` carries none and
      * stays centralu_run; the screen re-reads both proposal lists for such a call.
      */
-    if (tool === 'centralu_run' && (!server || server === 'centralu')) {
+    if (isCentraluTool({ server, tool }, 'centralu_run')) {
       const args = jsonObject(item.arguments ?? asObj(item.invocation).arguments)
       const command = str(args.command).trim()
       if (/^[a-z]+(?:_[a-z]+)*$/.test(command)) {
@@ -115,7 +131,7 @@ function itemSummary(item: Record<string, unknown>): { tool: string; title: stri
       }
     }
     // ask_project (#371) — the project asked is the title, the same rule as toolSummary on the claude side
-    if (tool === 'ask_project' && (!server || server === 'centralu')) {
+    if (isCentraluTool({ server, tool }, 'ask_project')) {
       const rawArgs = item.arguments ?? asObj(item.invocation).arguments
       let project = ''
       try {
@@ -125,18 +141,6 @@ function itemSummary(item: Record<string, unknown>): { tool: string; title: stri
         /* If the arguments are not JSON, the card names no project — it still finds the session it asked */
       }
       return { tool, title: project || tool, paths: [] }
-    }
-    // Worktree proposal (#69) — the branch name is the title, and that title is the only channel for the UI's prefill
-    if (tool.endsWith('propose_worktree_session')) {
-      const rawArgs = asObj(item.invocation).arguments
-      let branch = ''
-      try {
-        const parsed = typeof rawArgs === 'string' ? (JSON.parse(rawArgs) as unknown) : rawArgs
-        branch = str(asObj(parsed).branch)
-      } catch {
-        /* If the arguments are not JSON, the card just shows up with no name — the window opens with a blank name */
-      }
-      return { tool, title: branch || tool, paths: [] }
     }
     /*
      * **The arguments go on the title too** (dogfooding 2026-09-08).
@@ -167,8 +171,7 @@ function itemSummary(item: Record<string, unknown>): { tool: string; title: stri
    */
   if (type === 'collabAgentToolCall') {
     const tool = str(item.tool) || type
-    const line = str(item.prompt).split('\n')[0] ?? ''
-    return { tool, title: line.length > 200 ? `${line.slice(0, 200)} …` : line || tool, paths: [] }
+    return { tool, title: firstLine(str(item.prompt)) || tool, paths: [] }
   }
   return { tool: type || 'tool', title: str(item.title) || type, paths: [] }
 }
@@ -202,8 +205,6 @@ function argsPreview(raw: unknown): string {
  * each `{ path, kind, diff }`). The adapter remembers them per item id, because the approval request
  * for that item does not carry them (see approvalDetailFrom).
  */
-export type FileChange = { path: string; diff: string; change?: 'add' | 'update' | 'delete' | 'move'; movePath?: string }
-
 export function fileChangesOf(item: Record<string, unknown>): FileChange[] {
   const changes = Array.isArray(item.changes) ? item.changes : []
   return changes.map((c) => ({ path: str(asObj(c).path), diff: str(asObj(c).diff), ...changeKindOf(asObj(asObj(c).kind)) }))
@@ -279,30 +280,6 @@ export function approvalDetailFrom(
     return fileEditDetail(changes)
   }
   return { kind: 'other', raw: JSON.stringify(params).slice(0, 2000) }
-}
-
-/**
- * The card for one or more file changes. The card prints the path and then the preview, so a single file's
- * preview is its diff alone; with several files each diff is headed by its own path, or the hunks of two files
- * would read as one. `(no path)` when nothing names a file — an empty string looks like a card that failed to
- * draw rather than a request that did not say.
- */
-function fileEditDetail(changes: readonly FileChange[]): ApprovalDetail {
-  const named = changes.filter((c) => c.path)
-  const diff =
-    named.length > 1
-      ? named.map((c) => `${c.path}\n${c.diff}`).join('\n\n')
-      : changes.map((c) => c.diff).filter(Boolean).join('\n')
-  // One file's own kind of change (a delete, a move) is said on its card; several files are one card that opens
-  const one = named.length === 1 ? named[0]! : null
-  return {
-    kind: 'file_edit',
-    path: named[0]?.path || NO_PATH,
-    diffPreview: diff.slice(0, 4000),
-    multi: named.length > 1,
-    ...(one?.change ? { change: one.change } : {}),
-    ...(one?.movePath ? { movePath: one.movePath } : {}),
-  }
 }
 
 /**
@@ -483,17 +460,9 @@ export function normalizeNotification(sessionId: string, n: Notification): Norma
      * (measured: this turn's items were only userMessage, reasoning, agentMessage and
      * commandExecution).
      */
-    case 'turn/plan/updated': {
-      const steps = (Array.isArray(p.plan) ? p.plan : []).map((raw) => {
-        const it = asObj(raw)
-        const raw_ = str(it.status)
-        // An unknown status falls back to pending — progress display must not die outright over one new status value
-        const status: 'pending' | 'inProgress' | 'completed' =
-          raw_ === 'inProgress' || raw_ === 'completed' ? raw_ : 'pending'
-        return { text: str(it.step), status }
-      })
-      return steps.length > 0 ? [{ type: 'plan_update', sessionId, steps }] : []
-    }
+    case 'turn/plan/updated':
+      // The same steps Claude's TodoWrite gives (adapters/plan.ts)
+      return Array.isArray(p.plan) && p.plan.length > 0 ? [planUpdate(sessionId, p.plan, 'step')] : []
 
     /*
      * Output while a command is running (measured for #58): {threadId, turnId, itemId, delta}.
@@ -574,20 +543,21 @@ export function normalizeNotification(sessionId: string, n: Notification): Norma
         return path ? [{ type: 'message_image', sessionId, mime: '', data: '', path }] : []
       }
       const s = itemSummary(item)
-      // The card shows the first 2,000 characters; the result's record is all of it (#221)
-      const output = resultSummary(item)
-      const out: NormalizedEvent[] = [
-        {
-          type: 'tool_result',
-          sessionId,
-          callId: str(item.id),
-          ok: str(item.status) !== 'failed',
-          summary: output.slice(0, 2000),
-          ...(output ? { output } : {}),
-        },
-      ]
-      // If a file was actually changed, announce it for conflict detection and highlighting (FR-2, FR-5)
-      if (s.paths.length > 0) out.push({ type: 'files_touched', sessionId, paths: s.paths })
+      // The card shows the opening; the result's record is all of it (#221). A declined or interrupted item usually
+      // carries no output, so its card says which it was rather than fail blank, as a note, not as output (#843)
+      const ending = str(item.status) === 'declined' ? 'declined' : str(item.status) === 'interrupted' ? 'interrupted' : undefined
+      const out: NormalizedEvent[] = [toolResultEvent(sessionId, str(item.id), codexItemOk(item), resultSummary(item), ending)]
+      // An MCP tool's images (a browser's screenshot, say) come after its card, as Claude's do (#40, #843)
+      if (type === 'mcpToolCall') out.push(...mcpImageEvents(sessionId, asObj(item.result).content))
+      /*
+       * If a file was actually changed, announce it for conflict detection and highlighting (FR-2, FR-5). A declined
+       * change wrote nothing (#843), so it marks nothing. A failed one is marked all the same: a patch is applied file by
+       * file, and the item does not say which of its files were written before it failed. A move changes the file it
+       * leaves and the one it makes, and only the first was named.
+       */
+      const moved = type === 'fileChange' ? fileChangesOf(item).flatMap((c) => (c.movePath ? [c.movePath] : [])) : []
+      const paths = [...s.paths, ...moved]
+      if (paths.length > 0 && str(item.status) !== 'declined') out.push({ type: 'files_touched', sessionId, paths })
       return out
     }
 
@@ -864,6 +834,9 @@ export function childSteps(sessionId: string, parentCallId: string, n: Notificat
   }
   const out: NormalizedEvent[] = []
   for (const e of normalizeNotification(sessionId, n)) {
+    // Each call is a line of the launch card's live output too, as a Claude subagent's are (#98, #843): the card said
+    // nothing while the child worked
+    if (e.type === 'tool_call') out.push({ type: 'tool_output_delta', sessionId, callId: parentCallId, text: `${stepLine(e.summary)}\n` })
     if (e.type === 'tool_call' || e.type === 'tool_result') out.push(step(e))
     else if (e.type === 'files_touched') out.push(e)
   }
@@ -975,6 +948,14 @@ export function __resetWarningsForTest(): void {
   warnedImpossible = false
 }
 
+/** The child threads a completed `spawnAgent` call started (`receiverThreadIds`), none for any other item (#222, #843) */
+export function launchedThreads(n: Notification): string[] {
+  if (n.method !== 'item/completed') return []
+  const item = asObj(asObj(n.params).item)
+  if (str(item.type) !== 'collabAgentToolCall' || str(item.tool) !== 'spawnAgent' || !codexItemOk(item)) return []
+  return (Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []).filter((t): t is string => typeof t === 'string' && t !== '')
+}
+
 /**
  * A Codex session's background work: its child agents (#290).
  *
@@ -999,14 +980,43 @@ export class CodexChildTracker {
   /** Linked children: thread to its launch call and description. Only these are listed. */
   private readonly linked = new Map<string, { callId: string; description: string }>()
   private lastLive = '[]'
+  /**
+   * Launch cards held open while the children they started run (#843). A `spawnAgent` item completes the moment the
+   * child starts (measured: its `item/completed` names the child's thread before the child has done anything), so its
+   * card closed at once, and the screen, which draws live output only on an open card, never showed the child's steps
+   * (`childSteps`). The result is held until every child it named ends, as a Claude background agent's card stays open
+   * until its `task_notification`.
+   */
+  private readonly held = new Map<string, { result: NormalizedEvent; threads: Set<string> }>()
+  /** Children whose turn already ended, so a launch result arriving after that is not held (the latest few) */
+  private done: string[] = []
 
   constructor(private readonly sessionId: string) {}
+
+  /** A launch call's result, held while the children it started run; false when it goes out now (none still runs) */
+  hold(result: Extract<NormalizedEvent, { type: 'tool_result' }>, threads: readonly string[]): boolean {
+    const running = threads.filter((t) => !this.done.includes(t))
+    if (running.length === 0) return false
+    this.held.set(result.callId, { result, threads: new Set(running) })
+    return true
+  }
+
+  /** A child's turn ended: the launch results that waited only on it go out */
+  private finished(thread: string): NormalizedEvent[] {
+    this.done = [...this.done.slice(-63), thread]
+    const out: NormalizedEvent[] = []
+    for (const [callId, h] of this.held) {
+      if (!h.threads.delete(thread) || h.threads.size > 0) continue
+      this.held.delete(callId)
+      out.push(h.result)
+    }
+    return out
+  }
 
   /** A `spawnAgent` call named this thread. */
   link(thread: string, callId: string, prompt: string): NormalizedEvent[] {
     if (this.linked.has(thread)) return []
-    const line = prompt.split('\n')[0]?.trim() ?? ''
-    this.linked.set(thread, { callId, description: line.length > 200 ? `${line.slice(0, 200)} …` : line || 'Child agent' })
+    this.linked.set(thread, { callId, description: firstLine(prompt.trim()) || 'Child agent' })
     return this.changed()
   }
 
@@ -1022,7 +1032,7 @@ export class CodexChildTracker {
         const was = t.active
         t.active = false
         t.turnId = null
-        return was ? this.changed([this.ended(thread, 'failed', 'The child thread hit a system error')]) : []
+        return [...(was ? this.changed([this.ended(thread, 'failed', 'The child thread hit a system error')]) : []), ...this.finished(thread)]
       } else t.active = false
       return this.changed()
     }
@@ -1037,7 +1047,7 @@ export class CodexChildTracker {
       t.turnId = null
       const status = raw === 'interrupted' ? 'stopped' : raw === 'failed' ? 'failed' : 'completed'
       const message = str(asObj(asObj(p.turn).error).message)
-      return this.changed([this.ended(thread, status, message || undefined)])
+      return [...this.changed([this.ended(thread, status, message || undefined)]), ...this.finished(thread)]
     }
     return []
   }
@@ -1054,8 +1064,11 @@ export class CodexChildTracker {
       t.active = false
       t.turnId = null
     }
-    if (live.length === 0) return []
-    return this.changed(live.map((task) => ({ ...task, status: 'stopped' as const, summary: why })))
+    // A launch card still held open closes with the reason, as a Claude agent that never reported back does
+    const held: NormalizedEvent[] = [...this.held.keys()].map((callId) => ({ type: 'tool_result', sessionId: this.sessionId, callId, ok: false, summary: why }))
+    this.held.clear()
+    if (live.length === 0) return held
+    return [...this.changed(live.map((task) => ({ ...task, status: 'stopped' as const, summary: why }))), ...held]
   }
 
   private ended(thread: string, status: 'completed' | 'failed' | 'stopped', summary?: string): BackgroundTask | null {

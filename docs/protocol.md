@@ -61,7 +61,7 @@ type NormalizedEvent =
       from?, label?, audience?: 'you'|'centralu', summary?, items?, hint? }  // #304: text the tool wants read, one line; #342: made readable
   // in-turn progress (display-only, never persisted)
   | { type: 'activity';         sessionId, activity|null }      // compacting / reviewing / retrying (codex reconnecting, claude api_retry)
-  | { type: 'plan_update';      sessionId, steps: {text, status}[] }  // #58: codex turn/plan/updated snapshot
+  | { type: 'plan_update';      sessionId, steps: {text, status}[] }  // #58: codex turn/plan/updated, claude's TodoWrite or task list (#843), a snapshot
   | { type: 'tool_output_delta';sessionId, callId, text }       // #58: live command output tail; #98: a subagent's steps, on the Agent call that spawned it
   // what a native subagent did — kept apart from the conversation (#222)
   | { type: 'subagent_event';   sessionId, parentCallId, step: SubagentStep, stepSeq? }  // step: a message_delta, reasoning_delta, tool_call or tool_result
@@ -78,7 +78,7 @@ type NormalizedEvent =
   | { type: 'limit_reached';    sessionId, resumeAt?, usedPercent?, windowMins? }
   | { type: 'session_title';    sessionId, title, auto }        // auto=false: human-given, never overwritten
   | { type: 'settings_changed'; sessionId, model, effort, verbosity, serviceTier?, permissionPreset?, by?, person? }  // #30: a non-human hand changed settings; by 'tool': the agent tool switched by itself (#304); person: a client called agents.updateSettings (#659)
-  | { type: 'files_touched';    sessionId, paths: string[] }    // FR-2 conflict detection, FR-5 highlighting
+  | { type: 'files_touched';    sessionId, paths: string[] }    // FR-2 conflict detection, FR-5 highlighting; once the change went through (#843)
   | { type: 'goal';             sessionId, goal: SessionGoal|null }  // the badge; codex announces it, claude's is read from the CLI's /goal replies and Stop hook feedback
   | { type: 'background_tasks'; sessionId, live: BackgroundTask[], ended?: BackgroundTask[], clearEnded? }  // #290: the live set (REPLACE) and what just ended
   | { type: 'agent_version';    sessionId, version }            // #297: the CLI version this process runs, once per process; kept as SessionInfo.agentVersion
@@ -102,7 +102,7 @@ type NormalizedEvent =
 
 **A tool call's `summary` is its card; `input` and `output` are its record, and they never leave the host**
 ([#221](https://github.com/ijun17/centralu/issues/221)). The adapter sends both: `summary` is what the card shows (a
-command, a path, the first 300 characters of a Claude result or 2,000 of a Codex one), `input` is what the tool received
+command, a path, the first 2,000 characters of a result, the same for both tools), `input` is what the tool received
 (a Write's content, an Edit's both sides, Codex's file changes with their diffs) and `output` is the whole text it
 answered, images excluded (they are attachments, #40). The host stores the event as it came and strips `input` and
 `output` from everything it sends — the event stream and the history pages (`messages.load`, `trash.read`) — so on this

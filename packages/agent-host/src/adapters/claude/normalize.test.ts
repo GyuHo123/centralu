@@ -4,6 +4,9 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { NormalizedEvent } from '@cc/protocol'
+import { DIFF_PREVIEW_CHARS } from '../file-changes.js'
+import { IMAGE_MAX_BYTES } from '../images.js'
+import { RESULT_SUMMARY_CHARS } from '../tool-result.js'
 import { ClaudeStreamNormalizer, approvalDetail, normalizeMessage, toolSummary } from './normalize.js'
 
 const SID = 's1'
@@ -111,13 +114,69 @@ describe('tool calls (the actual shape from the spike)', () => {
     expect(out[0]).toMatchObject({ type: 'tool_call', callId: 'tu1', summary: { tool: 'Bash', title: 'npm run build' } })
   })
 
-  it('a Write tool_use becomes a tool_call plus files_touched (for conflict detection)', () => {
-    const out = n({
+  it('a Write marks its file (for conflict detection) once its result says it went through', () => {
+    const stream = new ClaudeStreamNormalizer(SID)
+    const call = stream.push({
       type: 'assistant',
       message: { content: [{ type: 'tool_use', id: 'tu2', name: 'Write', input: { file_path: '/tmp/hello.txt', content: 'hi' } }] },
     })
-    expect(out.map((e) => e.type)).toEqual(['tool_call', 'files_touched'])
-    expect(out[1]).toMatchObject({ type: 'files_touched', paths: ['/tmp/hello.txt'] })
+    expect(call.map((e) => e.type)).toEqual(['tool_call'])
+    const done = stream.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu2', content: 'wrote' }] } })
+    expect(done.map((e) => e.type)).toEqual(['tool_result', 'files_touched'])
+    expect(done[1]).toMatchObject({ type: 'files_touched', paths: ['/tmp/hello.txt'] })
+  })
+
+  it('an edit the person denied marks no file (#843)', () => {
+    const stream = new ClaudeStreamNormalizer(SID)
+    const events = [
+      ...stream.push({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: '/repo/a.ts', old_string: 'a', new_string: 'b' } }] } }),
+      ...stream.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'e1', content: 'The user denied this edit', is_error: true }] },
+      }),
+    ]
+    expect(events.map((e) => e.type)).toEqual(['tool_call', 'tool_result'])
+  })
+
+  it("a subagent's edit marks its file once its own result went through (#843)", () => {
+    const stream = new ClaudeStreamNormalizer(SID)
+    const call = stream.push({
+      type: 'assistant',
+      parent_tool_use_id: 'agent1',
+      message: { content: [{ type: 'tool_use', id: 's1', name: 'Edit', input: { file_path: '/repo/b.ts', old_string: 'a', new_string: 'b' } }] },
+    })
+    expect(call.some((e) => e.type === 'files_touched')).toBe(false)
+    const done = stream.push({
+      type: 'user',
+      parent_tool_use_id: 'agent1',
+      message: { content: [{ type: 'tool_result', tool_use_id: 's1', content: 'ok' }] },
+    })
+    expect(done.find((e) => e.type === 'files_touched')).toMatchObject({ paths: ['/repo/b.ts'] })
+  })
+
+  it("a TodoWrite call is the session's plan as well as its card (#843)", () => {
+    const todos = [
+      { content: 'Read the code', status: 'completed', activeForm: 'Reading the code' },
+      { content: 'Fix the bug', status: 'in_progress', activeForm: 'Fixing the bug' },
+      { content: 'Run the tests', status: 'pending', activeForm: 'Running the tests' },
+    ]
+    const out = n({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'td', name: 'TodoWrite', input: { todos } }] } })
+    expect(out.map((e) => e.type)).toEqual(['tool_call', 'plan_update'])
+    expect(out[1]).toEqual({
+      type: 'plan_update',
+      sessionId: SID,
+      steps: [
+        { text: 'Read the code', status: 'completed' },
+        { text: 'Fix the bug', status: 'inProgress' },
+        { text: 'Run the tests', status: 'pending' },
+      ],
+    })
+    // An emptied list clears the panel; a subagent's list is not the session's plan
+    expect(n({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [] } }] } })[1]).toEqual({
+      type: 'plan_update', sessionId: SID, steps: [],
+    })
+    const sub = n({ type: 'assistant', parent_tool_use_id: 'a1', message: { content: [{ type: 'tool_use', id: 't3', name: 'TodoWrite', input: { todos } }] } })
+    expect(sub.some((e) => e.type === 'plan_update')).toBe(false)
   })
 
   it('Read does not count as touching a file — it emits no files_touched (#185)', () => {
@@ -135,16 +194,19 @@ describe('tool calls (the actual shape from the spike)', () => {
   it('a centralu_run call is summarized as the command it runs', () => {
     const out = n({
       type: 'assistant',
-      message: { content: [{ type: 'tool_use', id: 'tu9', name: 'mcp__centralu__centralu_run', input: { command: 'propose_worktree_session', args: { branch: 'feat/login-fix' } } }] },
+      message: { content: [{ type: 'tool_use', id: 'tu9', name: 'mcp__centralu__centralu_run', input: { command: 'ask_project', args: { project: 'Docs' } } }] },
     })
     expect(out[0]).toMatchObject({
       type: 'tool_call',
-      summary: { tool: 'mcp__centralu__propose_worktree_session', title: 'feat/login-fix' },
-      input: { command: 'propose_worktree_session', args: { branch: 'feat/login-fix' } },
+      summary: { tool: 'mcp__centralu__ask_project', title: 'Docs' },
+      input: { command: 'ask_project', args: { project: 'Docs' } },
     })
     expect(toolSummary('mcp__centralu__centralu_run', { command: 'propose_skill', args: '{"name":"a","content":"b"}' }).tool).toBe('mcp__centralu__propose_skill')
     expect(toolSummary('mcp__centralu__centralu_run', { command: 'x__y' }).tool).toBe('mcp__centralu__centralu_run')
     expect(toolSummary('mcp__centralu__centralu_run', {}).tool).toBe('mcp__centralu__centralu_run')
+    // Another server's tools of the same names are not Centralu's (#843: Codex already read the server)
+    expect(toolSummary('mcp__other__centralu_run', { command: 'ask_project' }).tool).toBe('mcp__other__centralu_run')
+    expect(toolSummary('mcp__other__ask_project', { project: 'Docs' }).title).toBe('mcp__other__ask_project')
   })
 
   // Nothing reads it and every card folds; the two adapters' guesses had drifted (#428)
@@ -157,6 +219,28 @@ describe('tool calls (the actual shape from the spike)', () => {
     expect(out[0]).toMatchObject({ type: 'tool_result', callId: 'tu1', ok: true, summary: 'M0_SPIKE_OK' })
     const err = n({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'nope', is_error: true }] } })
     expect(err[0]).toMatchObject({ ok: false })
+  })
+
+  it('a result of text blocks reads as its text on the card, not as their JSON (#843)', () => {
+    const out = n({
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu1',
+            content: [{ type: 'text', text: 'Answer from the session' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aWJs' } }],
+          },
+        ],
+      },
+    })
+    expect(out[0]).toMatchObject({ type: 'tool_result', summary: 'Answer from the session', output: 'Answer from the session' })
+  })
+
+  it('cuts a card at the same length as every other tool, and keeps the whole answer (#843)', () => {
+    const long = 'x'.repeat(RESULT_SUMMARY_CHARS + 500)
+    const out = n({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: long }] } })
+    expect(out[0]).toMatchObject({ summary: long.slice(0, RESULT_SUMMARY_CHARS), output: long })
   })
 
   /*
@@ -182,7 +266,8 @@ describe('tool calls (the actual shape from the spike)', () => {
   })
 
   it('an image that is too large explains why instead of rendering it', () => {
-    const big = 'a'.repeat(11_000_001)
+    // One byte over the ceiling an image read from disk is held to (#843: the two used to differ)
+    const big = 'a'.repeat(Math.ceil(((IMAGE_MAX_BYTES + 1) * 4) / 3) + 4)
     const out = n({
       type: 'user',
       message: {
@@ -192,7 +277,13 @@ describe('tool calls (the actual shape from the spike)', () => {
       },
     })
     const img = out.find((e) => e.type === 'message_image')
-    expect(img).toMatchObject({ data: '', note: expect.stringContaining('too large') })
+    expect(img).toMatchObject({ data: '', note: 'Image is too large (8MB)' })
+    const under = 'a'.repeat(Math.floor((IMAGE_MAX_BYTES * 4) / 3))
+    const drawn = n({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: [{ type: 'image', source: { type: 'base64', data: under, media_type: 'image/png' } }] }] },
+    }).find((e) => e.type === 'message_image')
+    expect(drawn).toMatchObject({ data: under })
   })
 
   it('a non-base64 image source becomes a visible failure (#58 — it used to vanish silently)', () => {
@@ -214,7 +305,28 @@ describe('normalizing an approval request (input to the banner\'s judgment)', ()
 
   it('Write/Edit become file_edit (a diff needs to be shown)', () => {
     const d = approvalDetail('Edit', { file_path: '/a.ts', new_string: 'const a = 1' }, '/p')
-    expect(d).toMatchObject({ kind: 'file_edit', path: '/a.ts', diffPreview: 'const a = 1', multi: false })
+    expect(d).toMatchObject({ kind: 'file_edit', path: '/a.ts', diffPreview: '+const a = 1', multi: false })
+  })
+
+  it('an edit shows what it removes as well as what it adds, and a Write to no file is a new file (#843)', () => {
+    const edit = approvalDetail('Edit', { file_path: '/a.ts', old_string: 'const a = 1\nconst b = 2', new_string: 'const a = 3' }, '/p')
+    expect(edit).toMatchObject({ kind: 'file_edit', path: '/a.ts', diffPreview: '-const a = 1\n-const b = 2\n+const a = 3' })
+    expect(edit).not.toHaveProperty('change')
+    const created = approvalDetail('Write', { file_path: '/new.ts', content: 'x\n' }, '/p', true)
+    expect(created).toMatchObject({ kind: 'file_edit', path: '/new.ts', diffPreview: '+x', change: 'add' })
+  })
+
+  it('a Write over a file says it replaces the whole file, and marks none of its lines as added (#843 review)', () => {
+    const replaced = approvalDetail('Write', { file_path: '/old.ts', content: 'a\nb\n' }, '/p', false)
+    expect(replaced).toMatchObject({ kind: 'file_edit', path: '/old.ts', diffPreview: '(replaces the whole file)\na\nb' })
+    expect(replaced).not.toHaveProperty('change')
+    // Not known in time: it says what it does without claiming either
+    expect(approvalDetail('Write', { file_path: '/x.ts', content: 'a' }, '/p')).toMatchObject({ diffPreview: '(writes the whole file)\na' })
+  })
+
+  it('an edit card carries as much of its diff as a Codex one (#843)', () => {
+    const d = approvalDetail('Write', { file_path: '/a.ts', content: 'y'.repeat(DIFF_PREVIEW_CHARS * 2) }, '/p')
+    expect(d.kind === 'file_edit' && d.diffPreview.length).toBe(DIFF_PREVIEW_CHARS)
   })
 
   it('everything else becomes other', () => {
@@ -441,8 +553,8 @@ describe('streamed thinking is not repeated from the finished message', () => {
 })
 
 /*
- * A tool call is kept whole (#221). The card's summary stays as it was — a result's first 300 characters, a file
- * edit's path — and the record goes in `output` and `input`.
+ * A tool call is kept whole (#221). The card's summary stays as it was — a result's opening (`RESULT_SUMMARY_CHARS`), a
+ * file edit's path — and the record goes in `output` and `input`.
  */
 describe('the whole record of a tool call (#221)', () => {
   const resultOf = (content: unknown, extra: Record<string, unknown> = {}) =>
@@ -451,11 +563,11 @@ describe('the whole record of a tool call (#221)', () => {
       output?: string
     }
 
-  it('a result keeps its whole output, and the card still shows the first 300 characters', () => {
-    const log = `${'compiling…\n'.repeat(100)}error TS2322: the conclusion is at the end`
+  it('a result keeps its whole output, and the card still shows its opening', () => {
+    const log = `${'compiling…\n'.repeat(300)}error TS2322: the conclusion is at the end`
     const result = resultOf(log)
-    expect(log.length).toBeGreaterThan(300)
-    expect(result.summary).toBe(log.slice(0, 300))
+    expect(log.length).toBeGreaterThan(RESULT_SUMMARY_CHARS)
+    expect(result.summary).toBe(log.slice(0, RESULT_SUMMARY_CHARS))
     expect(result.output).toBe(log)
   })
 
@@ -491,11 +603,11 @@ describe('the whole record of a tool call (#221)', () => {
   })
 
   it('a finished foreground agent keeps its whole report, not the head the card shows', () => {
-    const report = `## Findings\n\n${'A long paragraph of the report. '.repeat(40)}\n\nThe conclusion is at the end.`
+    const report = `## Findings\n\n${'A long paragraph of the report. '.repeat(100)}\n\nThe conclusion is at the end.`
     const result = resultOf([{ type: 'text', text: `[Subagent hand-back] The text below is the final report…\n\n${report}` }], {
       tool_use_result: { status: 'completed', agentId: 'a1', content: [{ type: 'text', text: report }], totalToolUseCount: 3, totalDurationMs: 4000 },
     })
-    expect(result.summary).toBe(`3 tool uses · 4s\n\n${report}`.slice(0, 300))
+    expect(result.summary).toBe(`3 tool uses · 4s\n\n${report}`.slice(0, RESULT_SUMMARY_CHARS))
     expect(result.output).toBe(`3 tool uses · 4s\n\n${report}`)
   })
 
@@ -515,7 +627,7 @@ describe('the whole record of a tool call (#221)', () => {
       summary: report,
       usage: { tool_uses: 2, duration_ms: 9000 },
     }) as { summary: string; output?: string }[]
-    expect(done?.summary).toBe(`2 tool uses · 9s\n\n${report}`.slice(0, 300))
+    expect(done?.summary).toBe(`2 tool uses · 9s\n\n${report}`.slice(0, RESULT_SUMMARY_CHARS))
     expect(done?.output).toBe(`2 tool uses · 9s\n\n${report}`)
   })
 })
@@ -727,6 +839,34 @@ describe('a model request, for prompt cache accounting', () => {
     expect(ttl('none', { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 })).toBeUndefined()
   })
 
+  it("keeps the session's reading running mid-turn: the last result's total plus each request since (#843)", () => {
+    const stream = new ClaudeStreamNormalizer(SID)
+    const tokensOf = (events: NormalizedEvent[]) => events.find((e) => e.type === 'usage_update')
+    stream.push({
+      type: 'result',
+      subtype: 'success',
+      total_cost_usd: 0.5,
+      modelUsage: { m: { inputTokens: 100, outputTokens: 1_000, cacheReadInputTokens: 2_000_000, cacheCreationInputTokens: 50_000 } },
+    })
+    const first = [...stream.push(block('msg_1', [{ type: 'text', text: 'a' }])), ...stream.push(block('msg_1', [{ type: 'text', text: 'b' }]))]
+    expect(first.filter((e) => e.type === 'usage_update').map((e) => (e as { tokens: unknown }).tokens)).toEqual([
+      { inputTokens: 109, outputTokens: 1_040, cacheReadTokens: 2_080_412, cacheCreationTokens: 54_213, costUsd: 0.5 },
+      // The same request repeated by a second message of one response is not counted again
+      { inputTokens: 109, outputTokens: 1_040, cacheReadTokens: 2_080_412, cacheCreationTokens: 54_213, costUsd: 0.5 },
+    ])
+    expect(tokensOf(stream.push(block('msg_2', [])))).toMatchObject({ tokens: { cacheReadTokens: 2_160_824 } })
+    // The next result is the process's total again, and the requests since start over from it
+    stream.push({ type: 'result', subtype: 'success', modelUsage: { m: { inputTokens: 200, outputTokens: 2_000, cacheReadInputTokens: 3_000_000, cacheCreationInputTokens: 60_000 } } })
+    expect(tokensOf(stream.push(block('msg_3', [])))).toMatchObject({ tokens: { inputTokens: 209, cacheReadTokens: 3_080_412 } })
+  })
+
+  it('reads a count that is not a number as 0, not NaN (#843)', () => {
+    const out = n({ type: 'assistant', message: { id: 'm', content: [], usage: { input_tokens: 'many', output_tokens: { n: 1 }, cache_read_input_tokens: 5 } } })
+    expect(out.find((e) => e.type === 'usage_update')).toMatchObject({
+      tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 5, cacheCreationTokens: 0 },
+    })
+  })
+
   it("is not carried by the turn's result, which is a running total", () => {
     const stream = new ClaudeStreamNormalizer(SID)
     const out = stream.push({
@@ -736,5 +876,51 @@ describe('a model request, for prompt cache accounting', () => {
     })
     expect(out.some((e) => e.type === 'usage_update')).toBe(true)
     expect(requests(out)).toEqual([])
+  })
+})
+
+/*
+ * Claude Code's task tools as the plan (#843). The bundled CLI offers TaskCreate/TaskUpdate rather than TodoWrite
+ * unless CLAUDE_CODE_ENABLE_TASKS is false. Shapes from transcripts (CLI 2.1.223): a TaskCreate's id comes only with
+ * its result, in `tool_use_result.task` and in the text.
+ */
+describe("Claude Code's task list as the session's plan (#843)", () => {
+  const use = (id: string, name: string, input: unknown, extra: Record<string, unknown> = {}) => ({
+    type: 'assistant', ...extra, message: { id: `m-${id}`, content: [{ type: 'tool_use', id, name, input }] },
+  })
+  const result = (id: string, text: string, record?: unknown, extra: Record<string, unknown> = {}) => ({
+    type: 'user', ...extra, message: { content: [{ type: 'tool_result', tool_use_id: id, content: text }] }, ...(record ? { tool_use_result: record } : {}),
+  })
+  const plans = (events: NormalizedEvent[]) => events.flatMap((e) => (e.type === 'plan_update' ? [e.steps] : []))
+
+  it('creates tasks from their results, and follows their updates', () => {
+    const stream = new ClaudeStreamNormalizer(SID)
+    expect(plans(stream.push(use('c1', 'TaskCreate', { subject: 'Read the code', description: 'd' })))).toEqual([])
+    expect(plans(stream.push(result('c1', 'Task #1 created successfully: Read the code', { task: { id: '1', subject: 'Read the code' } })))).toEqual([
+      [{ text: 'Read the code', status: 'pending' }],
+    ])
+    stream.push(use('c2', 'TaskCreate', { subject: 'Fix the bug', description: 'd' }))
+    // Without the record (a message carrying several results), the id is read from the text
+    expect(plans(stream.push(result('c2', 'Task #2 created successfully: Fix the bug')))).toEqual([
+      [{ text: 'Read the code', status: 'pending' }, { text: 'Fix the bug', status: 'pending' }],
+    ])
+    stream.push(use('u1', 'TaskUpdate', { taskId: '1', status: 'completed' }))
+    stream.push(use('u2', 'TaskUpdate', { taskId: '2', status: 'in_progress' }))
+    const updated = [...stream.push(result('u1', 'Updated task #1 status')), ...stream.push(result('u2', 'Updated task #2 status'))]
+    expect(plans(updated).at(-1)).toEqual([{ text: 'Read the code', status: 'completed' }, { text: 'Fix the bug', status: 'inProgress' }])
+    stream.push(use('u3', 'TaskUpdate', { taskId: '1', status: 'deleted' }))
+    expect(plans(stream.push(result('u3', 'Updated task #1 deleted')))).toEqual([[{ text: 'Fix the bug', status: 'inProgress' }]])
+  })
+
+  it('takes a TaskList as the whole list, and ignores a failed call and a subagent', () => {
+    const stream = new ClaudeStreamNormalizer(SID)
+    stream.push(use('l1', 'TaskList', {}))
+    expect(plans(stream.push(result('l1', '#1 [completed] A', { tasks: [{ id: '1', subject: 'A', status: 'completed', blockedBy: [] }, { id: '2', subject: 'B', status: 'pending', blockedBy: [] }] })))).toEqual([
+      [{ text: 'A', status: 'completed' }, { text: 'B', status: 'pending' }],
+    ])
+    stream.push(use('u1', 'TaskUpdate', { taskId: '2', status: 'completed' }))
+    expect(plans(stream.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'u1', content: 'Task not found', is_error: true }] } }))).toEqual([])
+    stream.push(use('s1', 'TaskCreate', { subject: 'Sub', description: 'd' }, { parent_tool_use_id: 'agent' }))
+    expect(plans(stream.push(result('s1', 'Task #3 created successfully: Sub', { task: { id: '3', subject: 'Sub' } }, { parent_tool_use_id: 'agent' })))).toEqual([])
   })
 })
