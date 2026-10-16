@@ -1,7 +1,7 @@
 // Everything this app knows about GitHub. It talks to GitHub only through the person's own `gh`
 // CLI (`gh api graphql` for the board, `gh api repos/…` and `gh pr` for CI and merging), so the app
 // holds no token: gh keeps its login in the system keychain, and
-// nothing here reads, stores or prints it. GitHub is the only copy of the board; server.mjs keeps a
+// nothing here reads, stores or prints it. GitHub is the only copy of the board; board.mjs keeps a
 // short in-memory cache and nothing on disk.
 import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -299,9 +299,10 @@ const firstLine = (e) =>
     .map((l) => l.replace(/^gh:\s*/, '').trim())
     .find(Boolean) ?? 'no message'
 // Failures that say nothing about the thing asked for: gh cannot reach GitHub at all.
-const FATAL = new Set(['network', 'auth', 'gh-missing'])
+export const FATAL = new Set(['network', 'auth', 'gh-missing'])
 
-function checkRepo(repo) {
+/** Refuses anything but owner/name before it reaches a REST path. */
+export function checkRepo(repo) {
   if (!REPO.test(String(repo))) throw new GitHubError('input', `"${repo}" is not a repository; give owner/name.`)
 }
 
