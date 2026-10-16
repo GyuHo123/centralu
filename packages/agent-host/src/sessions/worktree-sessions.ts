@@ -5,18 +5,21 @@ import { foldsPathCase } from '../os.js'
 import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { exec } from 'node:child_process'
 import type {
+  BackgroundTask,
   NormalizedEvent,
   PermissionPreset,
   SessionInfo,
 } from '@cc/protocol'
 import {
   APP_SLUG,
+  frameField,
   isProjectId,
   isSessionId,
+  liveBackgroundTasks,
 } from '@cc/protocol'
 import type { SessionHandle } from '../adapters/contract.js'
 import type { Store } from '../dev-services/store.js'
-import { sessionBusy } from '../idle.js'
+import { inTurn, sessionBusy } from '../idle.js'
 import {
   gitSummary,
   gitHeadSha,
@@ -357,7 +360,26 @@ export class WorktreeSessions {
     if (!target.worktree?.base || !target.projectId) {
       return { ok: false, error: `"${target.name}" works in no worktree of its own, so there is nothing to clean up — the person deletes a session` }
     }
-    if (target.state === 'working' || target.state === 'waiting_approval' || this.host.agentRuns.has(target.id) || sessionBusy({ ...target, live: this.host.handles.has(target.id) })) {
+    /*
+     * Background work left after the turn (#718) is named, and it is what agent_session's stop stops. A timer the tool
+     * holds (`/loop`, a scheduled prompt) is not work: stop cannot reach it, so it does not hold the cleanup either
+     */
+    const live = this.host.handles.has(target.id)
+    const work = live ? liveBackgroundTasks(target.backgroundTasks).filter((t) => !t.timer) : []
+    if (inTurn(target.state) || this.host.agentRuns.has(target.id) || sessionBusy({ ...target, live, backgroundTasks: work })) {
+      if (!inTurn(target.state) && !this.host.agentRuns.has(target.id) && !target.pendingApproval && !target.pendingQuestions.length) {
+        const names = (tasks: readonly BackgroundTask[]) => tasks.map((t) => frameField(t.description)).join(', ')
+        const stoppable = work.filter((t) => t.stoppable)
+        const other = work.filter((t) => !t.stoppable)
+        return {
+          ok: false,
+          error: [
+            `"${target.name}" has finished its turn, but its background work is still running: ${names(work)}.`,
+            stoppable.length ? `agent_session(action="stop") stops ${names(stoppable)}.` : '',
+            other.length ? `${names(other)} cannot be stopped from here: wait for it, or ask the child or the person to stop it.` : '',
+          ].filter(Boolean).join(' '),
+        }
+      }
       return { ok: false, error: `"${target.name}" is still working — stop it or wait first` }
     }
     // A folder that is already gone holds no work to lose (#715): cleanup goes on without a snapshot
