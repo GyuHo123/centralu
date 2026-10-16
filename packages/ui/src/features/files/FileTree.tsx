@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { FsEntry } from '@cc/platform/ports'
+import { wireParent } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
 import { useStore } from '../../store/store.js'
 import { useProjectMachine } from '../../store/selectors.js'
@@ -199,12 +200,6 @@ function useTree(): TreeContext {
   return ctx
 }
 
-/** `src/app/a.ts` → `src/app`. The root is an empty string — exactly the notation listDir uses */
-function parentOf(path: string): string {
-  const cut = path.lastIndexOf('/')
-  return cut < 0 ? '' : path.slice(0, cut)
-}
-
 /**
  * The four things the tree does to files (#18, #19).
  *
@@ -233,7 +228,7 @@ function useFileOps(projectId: string, refresh: (...dirs: string[]) => void) {
         try {
           const res = await platform.fs.trash(projectId, target.path)
           if (!res.supported) return setToast(res.reason ?? 'Deleting files is not available here')
-          refresh(parentOf(target.path))
+          refresh(wireParent(target.path))
           setToast(`Moved to Trash: ${target.name} — put it back from there`)
         } catch (e) {
           setToast(`Could not delete ${target.name}: ${(e as Error).message}`)
@@ -243,7 +238,7 @@ function useFileOps(projectId: string, refresh: (...dirs: string[]) => void) {
         try {
           const res = await platform.fs.move(projectId, from, toDir)
           // moved:false means it was dropped back where it already was — a missed drop, not a failure, so nothing is said
-          if (res.moved) refresh(parentOf(from), toDir)
+          if (res.moved) refresh(wireParent(from), toDir)
         } catch (e) {
           setToast((e as Error).message)
         }
