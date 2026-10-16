@@ -11,7 +11,7 @@
 //! What it does:
 //!   - holds the host: launches it, restarts it by the same rules the app used, stops it;
 //!   - runs every host from a per-build copy under the data folder (`source.rs`);
-//!   - answers a user-only control socket (`server.rs`) through which the app attaches, learns
+//!   - answers a user-only control socket (`server/`) through which the app attaches, learns
 //!     the host's port, token and build, and asks to stop or switch builds;
 //!   - applies background mode: with it off (the default) the keeper and host stop when the last
 //!     window detaches, as quitting the app always did; with it on they keep running;
@@ -38,6 +38,7 @@
 //! verifies and copies the new build's signed content first and hands over to the keeper in that
 //! copy, and its hosts run from the copy as well.
 
+mod accept;
 pub mod children;
 pub mod appimage;
 pub mod carried;
@@ -90,6 +91,11 @@ pub const RELAUNCH_GRACE: Duration = Duration::from_secs(60);
 /// The longest grace a request may ask for. A relaunch that has not attached in five minutes has
 /// failed, and a keeper with background mode off should not outlive its window by more than that.
 pub const MAX_RELAUNCH_GRACE: Duration = Duration::from_secs(300);
+
+/// How long a keeper that closed a window itself (it stopped taking its status, #840 item 5)
+/// waits for that window to attach again before the idle rule applies as usual. A window that was
+/// only stalled (suspended, in a debugger, its reader blocked) attaches again once it runs.
+pub const REATTACH_GRACE: Duration = Duration::from_secs(300);
 
 pub fn is_keeper_invocation(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| a == KEEPER_FLAG)
@@ -176,6 +182,11 @@ pub struct KeeperView {
     pub keeps_agents: Option<bool>,
 }
 
+/// Seconds since the epoch, as every record the keeper keeps writes its times.
+pub(super) fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeeperInfo {
@@ -190,6 +201,21 @@ pub struct KeeperInfo {
     /// predate step 4, which cannot hand themselves over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildSource>,
+}
+
+impl KeeperInfo {
+    /// This process, started now, serving `data`, from the build `build`. A fresh keeper and one
+    /// that took over from another describe themselves the same way.
+    pub(super) fn of_this_process(data: &Path, build: BuildSource) -> KeeperInfo {
+        KeeperInfo {
+            pid: std::process::id(),
+            protocol: KEEPER_PROTOCOL,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            started_at: now_secs(),
+            data_dir: data.to_string_lossy().to_string(),
+            build: Some(build),
+        }
+    }
 }
 
 /// Everything the idle rule looks at, so the rule can be tested without a clock.

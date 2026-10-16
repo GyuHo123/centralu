@@ -1489,6 +1489,13 @@ be the keeper's own. Newline-delimited JSON, one request per connection except `
 | `{"op":"restart"}` | Retry after the host gave up (refused during a swap) |
 | `{"op":"settings"}` / `{"op":"set_background","on":bool}` | background mode, kept in `<data>/keeper-settings.json` |
 
+A window that does not take a status push within 5 s (it stopped reading) is closed by the keeper, which is its
+detach; the window then attaches again. Before #840 item 5 it was only taken off the push list, kept counting as
+attached, and got no status again. A window the keeper closed itself may only be stalled (suspended, in a debugger,
+its reader blocked), so its detach does not stop the keeper even when it was the last one and background mode is
+off: for 5 minutes (`REATTACH_GRACE`) the keeper waits for a window as it does for an announced relaunch, the next
+attach spends that, and if none comes the idle rule applies as usual.
+
 **The legacy folder.** Before anything creates the default data folder, the app and the keeper move the
 pre-rename folder to the new name by the same rule as `data-dir.ts`: the host leaves a legacy folder alone once
 the new one exists, so creating `~/.centralu` first (for `keeper.log` or the socket) would strand the data.
@@ -1496,6 +1503,15 @@ the new one exists, so creating `~/.centralu` first (for `keeper.log` or the soc
 **One keeper per data folder.** `flock` on `<data>/keeper.lock`, released by the OS however the keeper ends.
 A second keeper whose predecessor answers on the socket exits with code 3 and starts no host; one whose
 predecessor holds the lock but does not answer (on its way out) waits up to 15 s for it.
+
+**Descriptors.** A keeper started from Finder or launchd gets a soft descriptor limit of 256, which a few dozen
+relays and attached streams used up. It raises its soft limit to 10,240 (or the hard limit) as it starts; what it
+starts (hosts, agents, terminals, commands) gets the limit from before back, so a `select`-based program is never
+handed a descriptor past 1,024. When an `accept` still fails for want of one, each of its three listeners (`keeper.sock`,
+`children.sock`, the front door) is left alone for 100 ms and the failure is logged once every 10 s with a count,
+instead of the loop coming straight back to the waiting connection (one core and thousands of log lines a second on
+Linux; macOS drops the connection instead), and a thread the OS refuses for a connection closes that connection
+rather than aborting the keeper (`keeper/accept.rs`, #840 item 3).
 
 **When it ends.** `idle_decision` in `keeper/mod.rs`: with a window attached, never. During an announced
 relaunch's grace (§4.5), not yet, in either mode. With background mode off, when the last window detaches. With it on, after 30 minutes with no window and no activity reported by the
@@ -1649,7 +1665,7 @@ They share the CLI's process group, which `setsid` made the CLI's own, so the gr
 nothing else. A stop signals that group: the host's TERM, and the KILL that follows when the CLI is still there after
 its grace (the SDK's 5 s; codex's 2 s after EOF), reach the helpers too. And whenever an agent exits, however it ended
 (a stop, a crash, a CLI that does not clean up), the keeper sweeps its group: TERM at once, KILL 2 s later to whatever
-is still in it (`Sweep`, `keeper/children/mod.rs`). Before, only the CLI's pid was signalled, and what it left was
+is still in it (`Sweep`, `keeper/children/stop.rs`). Before, only the CLI's pid was signalled, and what it left was
 reparented to launchd/init and kept running with its memory. A group number is not reused while anyone is in it, and
 no sweep is sent while any process holds the CLI's pid (its zombie not yet reaped, or the number given to someone
 else), so a sweep never reaches another group; the keeper's own group is never a target (#350). A sweep still
@@ -1677,7 +1693,9 @@ is sent to the tool, a waiting approval stays waiting, and output still in fligh
 closes. App processes and the in-process tool servers stop, as they live in the host. *Stop* — the keeper's `stop`
 event, or any ending without the child service — is the old path: sessions disposed, terminals and runs killed.
 After a stop the keeper ends whatever is left (stdin EOF and SIGHUP, 2 s, TERM to each group, 1 s, KILL), and
-what exited agents left in their groups.
+what exited agents left in their groups. For a terminal each step reaches every process group in its session, so a
+job its shell put in a group of its own (a dev server sent to the background, one that ignores the hang-up) ends
+too (#840 item 2); before, only the shell's own group was signalled and such a job kept its port.
 
 **Re-attach.** At startup the host lists the keeper's children. Live agents re-attach after `listen`, through
 `resumeSession`, so a screen waking the same session joins the re-attach instead of starting a second process.

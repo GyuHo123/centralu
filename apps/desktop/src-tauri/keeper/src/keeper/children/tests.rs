@@ -37,7 +37,7 @@ impl Control {
         c
     }
     fn send(&mut self, v: &Value) {
-        self.w.write_all(&event_line(v)).unwrap();
+        self.w.write_all(&json_line(v)).unwrap();
     }
     fn line(&mut self) -> Value {
         let mut l = String::new();
@@ -83,7 +83,7 @@ impl Control {
 fn attach(data: &Path, id: &str, stream: &str) -> (UnixStream, Value) {
     let mut s = UnixStream::connect(socket_path(data)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    s.write_all(&event_line(&json!({ "op": "attach", "protocol": CHILDREN_PROTOCOL, "id": id, "stream": stream })))
+    s.write_all(&json_line(&json!({ "op": "attach", "protocol": CHILDREN_PROTOCOL, "id": id, "stream": stream })))
         .unwrap();
     // The answer line, read one byte at a time so no raw output is swallowed with it.
     let mut line = Vec::new();
@@ -267,6 +267,29 @@ fn stop_all_ends_pipes_and_ptys_the_host_left_running() {
     assert!(!socket_path(&d.0).exists(), "the socket goes with the stop");
 }
 
+/**
+ * #840 item 2: "Quit completely" with a terminal whose shell runs a job of its own. Job control
+ * puts the job in a process group of its own, in the shell's session, and it does not hear the
+ * hang-up (here it ignores it, as a dev server started with `nohup` does). The stop used to signal
+ * the shell's group alone, so the job kept running, and its port, after the keeper had gone.
+ */
+#[test]
+fn stop_all_ends_every_group_in_a_terminals_session() {
+    let d = temp_dir("ptyjobs");
+    let keeper = Children::start(&d.0).unwrap();
+    let mut host = Control::open(&d.0);
+    let (id, pid) = host.spawn("pty", "set -m; trap '' HUP; sleep 300 & echo $!; wait");
+    let job = helper_of(&d.0, &id);
+    let _kill = KillOnDrop(vec![job]);
+    // SAFETY: plain syscalls on a pid this test started.
+    let (job_group, job_session) = unsafe { (libc::getpgid(job), libc::getsid(job)) };
+    assert_eq!(job_session, pid, "the job is in the terminal's session");
+    assert_ne!(job_group, pid, "and in a process group of its own");
+    keeper.stop_all(Duration::from_millis(300));
+    assert!(gone(pid), "the shell is gone");
+    assert!(gone_within(job, Duration::from_secs(1)), "the terminal's job {job} outlived the stop");
+}
+
 #[test]
 fn asking_the_host_to_stop_waits_for_it_to_hang_up() {
     let d = temp_dir("askstop");
@@ -345,6 +368,20 @@ fn bare_reactor(d: &Dir) -> Reactor {
 }
 
 /// A long control line, once answered, does not leave its size behind in the read buffer (#392).
+/// #840 item 3 (review): a pause that has run out is over even when no connection comes to end it,
+/// so the reactor goes back to waking once a second.
+#[test]
+fn an_accept_pause_that_ran_out_lets_the_reactor_sleep_again() {
+    let d = temp_dir("pauseover");
+    let mut r = bare_reactor(&d);
+    assert_eq!(r.poll_timeout(), 1000);
+    r.accept_paused_until = Some(Instant::now() + Duration::from_secs(60));
+    assert_eq!(r.poll_timeout(), 100, "paused: look again soon");
+    r.accept_paused_until = Some(Instant::now() - Duration::from_millis(1));
+    assert_eq!(r.poll_timeout(), 1000, "the pause is over");
+    assert!(r.accept_paused_until.is_none());
+}
+
 #[test]
 fn a_long_control_line_gives_its_read_memory_back_once_it_is_answered() {
     let d = temp_dir("rbuf");
@@ -522,3 +559,30 @@ fn a_child_table_without_its_sweeps_is_refused() {
     full["sweeps"] = serde_json::json!([]);
     assert!(serde_json::from_value::<ReactorState>(full).is_ok());
 }
+
+/**
+ * #840 item 3: a keeper out of descriptors (a soft limit of 256 from Finder, a few dozen relays and
+ * attaches) failed every `accept` while a connection waited, and the readable listener brought the
+ * reactor straight back to it: one core spinning, thousands of log lines a second. The listener is
+ * now left alone for a moment after such a failure, and the connection is accepted once a
+ * descriptor is free.
+ */
+#[test]
+fn a_keeper_out_of_descriptors_pauses_accepting_instead_of_spinning() {
+    let Some(stderr) = super::super::accept::few_descriptors::rerun("keeper::children::tests::a_keeper_out_of_descriptors_pauses_accepting_instead_of_spinning")
+    else {
+        let d = temp_dir("emfile");
+        let _keeper = Children::start(&d.0).unwrap();
+        let mut held = super::super::accept::few_descriptors::exhaust(64);
+        // One descriptor for the client's end; the keeper has none left for its own.
+        drop(held.pop());
+        // Linux leaves it in the listen queue; macOS drops it with the failed accept.
+        let _waiting = UnixStream::connect(socket_path(&d.0)).unwrap();
+        thread::sleep(Duration::from_secs(1));
+        drop(held);
+        let _host = Control::open(&d.0);
+        return;
+    };
+    super::super::accept::few_descriptors::assert_accepts_paused(&stderr, "the reactor");
+}
+
