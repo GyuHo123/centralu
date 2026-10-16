@@ -5,7 +5,7 @@ import type { AgentStartRecord, AgentStartRequest, ChildOwnership, Delegation, L
 import type { AppRef } from '../apps/external/runtime.js'
 import { AgentRunWait, finalAnswer } from './app-agents.js'
 import { ASK_WAIT_MS, clipAnswer, pathsIn, readableGrants, taskLine } from './ask-project.js'
-import { AGENT_CEILING, agentBranch, agentFrame, agentNoteFrame, agentName, presetWithin } from './start-agent.js'
+import { AGENT_CEILING, agentBranch, agentChoice, agentFrame, agentNoteFrame, agentName, presetWithin } from './start-agent.js'
 import { labelOf } from './transcript-view.js'
 import type {
   ApprovalDetail,
@@ -447,13 +447,20 @@ export class DelegationFlow {
     if (!adapter) return done({ ok: false, error: `No agent named "${tool}" here. Installed tools: ${[...this.host.adapters.keys()].join(', ') || 'none'}.` })
     const full = this.agentCeilingError(callerId, project.id)
     if (full) return done({ ok: false, error: full })
-    // The project's remembered choice for that tool (#107), as a session the person opens there gets. A remembered
-    // effort belongs to the remembered model: with another model named, that model's default effort is used
-    const remembered = this.host.store.projectToolDefaults(project.id)[tool]
-    const model = opts.model ?? remembered?.model ?? undefined
-    const effort = opts.effort ?? (!opts.model || opts.model === remembered?.model ? (remembered?.effort ?? undefined) : undefined)
-    const checked = await this.agentChoiceError(tool, opts.model, opts.effort, model)
-    if (checked.error) return done({ ok: false, error: checked.error })
+    // The model named, else the person's for the difficulty named (#729), else the project's remembered one (#107)
+    const { model, effort, difficulty } = agentChoice(opts, this.host.store.projectToolDefaults(project.id)[tool], this.host.uiPreferences().agentModels?.[tool])
+    // A setting's choice is checked as a named one is: a model retired since it was picked is refused with the list.
+    // The caller never named it, so the remedy it reads is to tell the person or name a model, not to leave it out
+    const setting = difficulty ? `the person's choice for ${difficulty} work in Settings → Orchestrator` : ''
+    const checked = await this.agentChoiceError(
+      tool, difficulty ? model : opts.model, difficulty ? effort : opts.effort, model,
+      difficulty ? `name a model (it is ${setting})` : undefined,
+    )
+    if (checked.error) {
+      // Only what the setting chose: an effort the caller named with a difficulty is the caller's own
+      const theirs = difficulty && (checked.on === 'model' || !opts.effort)
+      return done({ ok: false, error: checked.error + (theirs ? ` That is ${setting}: tell them, or name a model.` : '') })
+    }
     const unchecked = checked.unchecked
     progress.unchecked = unchecked
     const found = await adapter.detect()
@@ -468,6 +475,7 @@ export class DelegationFlow {
       project: { id: project.id, name: project.name },
       tool: adapter.descriptor.label,
       ...(model ? { model } : {}),
+      ...(difficulty ? { difficulty } : {}),
       preset: caller.permissionPreset,
       ...(worktree ? { worktree: { branch: worktree.branch } } : {}),
       text: taskLine(opts.task),
@@ -1036,7 +1044,9 @@ export class DelegationFlow {
     askedModel: string | undefined,
     askedEffort: string | undefined,
     model: string | undefined,
-  ): Promise<{ error: string | null; unchecked?: string }> {
+    /** What to do if the first turn fails on a name that could not be checked; the caller's own names can be left out */
+    remedy = 'start again without it',
+  ): Promise<{ error: string | null; on?: 'model' | 'effort'; unchecked?: string }> {
     if (!askedModel && !askedEffort) return { error: null }
     /*
      * **A bounded wait on a cached list (#660).** The check helps a caller that misspelled a model; it must never
@@ -1046,16 +1056,16 @@ export class DelegationFlow {
     const adapter = this.host.adapters.get(tool)
     if (!adapter?.listModels) return { error: null }
     const what = [askedModel && `model "${askedModel}"`, askedEffort && `effort "${askedEffort}"`].filter(Boolean).join(' and ')
-    const notChecked = (why: string) => ({ error: null, unchecked: `${what} not checked: ${why}. If the session's first turn fails on it, start again without it` })
-    const mismatch = (models: ModelOption[]): string | null => {
+    const notChecked = (why: string) => ({ error: null, unchecked: `${what} not checked: ${why}. If the session's first turn fails on it, ${remedy}` })
+    const mismatch = (models: ModelOption[]): { error: string; on: 'model' | 'effort' } | null => {
       const find = (name: string) => {
         const n = name.toLowerCase()
         return models.find((m) => m.id.toLowerCase() === n) ?? models.find((m) => m.id.toLowerCase().includes(n) || m.label.toLowerCase().includes(n))
       }
-      if (askedModel && !find(askedModel)) return `${tool} has no model "${askedModel}". Its models: ${models.map((m) => m.id).join(', ')}.`
+      if (askedModel && !find(askedModel)) return { error: `${tool} has no model "${askedModel}". Its models: ${models.map((m) => m.id).join(', ')}.`, on: 'model' }
       if (askedEffort) {
         const m = model ? find(model) : models[0]
-        if (m && m.efforts.length > 0 && !m.efforts.includes(askedEffort)) return `${m.id} has no effort "${askedEffort}". Its efforts: ${m.efforts.join(', ')}.`
+        if (m && m.efforts.length > 0 && !m.efforts.includes(askedEffort)) return { error: `${m.id} has no effort "${askedEffort}". Its efforts: ${m.efforts.join(', ')}.`, on: 'effort' }
       }
       return null
     }
@@ -1070,7 +1080,7 @@ export class DelegationFlow {
       if (got.models.length === 0) return notChecked(`${tool} listed no models`)
       wrong = mismatch(got.models)
     }
-    return { error: wrong }
+    return wrong ?? { error: null }
   }
 
   /**

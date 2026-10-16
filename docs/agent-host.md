@@ -298,7 +298,7 @@ own budget (`AGENT_TOOLS`, `AGENT_BUDGET_CHARS`).
 
 | Tool | Arguments → what comes back |
 |---|---|
-| `start_agent` | `{ task, tool?: string, model?, effort?, wait?, worktree?, branch?, lsp? }` → the child's id and name, and its answer (`done`) or `working`; or `pending` with a request handle while the person's card stands (#673), or, with `lowMemory`, while an allowed start waits for memory (§1.2.4, #686). `lsp: true` keeps the child's code intelligence (§1.2.4) |
+| `start_agent` | `{ task, tool?: string, model?, effort?, difficulty?: light\|standard\|heavy, wait?, worktree?, branch?, lsp? }` → the child's id and name, and its answer (`done`) or `working`; or `pending` with a request handle while the person's card stands (#673), or, with `lowMemory`, while an allowed start waits for memory (§1.2.4, #686). `lsp: true` keeps the child's code intelligence (§1.2.4) |
 | `agent_session` | `{ sessionId, action: status\|send\|wait\|stop\|delete\|answer, text?, card?, ifBusy? }` → the same states, plus `at_rest` (nothing the caller gave it runs; its last answer), `asking` and `answered` (a card in the turn the caller gave it, §1.2.2, #676), `busy` and `queued` (a send to a session busy with a turn that is not the caller's, §1.2.3, #677), `stopped` and `deleted` (a child moved to the trash; worktree cleanup also preserves local work, #608/#637) |
 
 The optional `tool` is a registry name, accepted as a string by the schema and checked against the
@@ -353,6 +353,21 @@ below retained for `safe` and `normal`:
    minute) and waits at most `START_AGENT_MODEL_CHECK_MS` (3 s) for a missing one; without a list in time the child
    starts on the name as given and the answer says it was not checked (an empty list is said to be empty). A name the
    cached list lacks is refused only after a fresh read (the CLI may have been updated).
+
+   **By difficulty** (#729). A `difficulty` with no `model` takes the person's model and effort for that tool and
+   difficulty instead, from Settings → Orchestrator → Models for the agents a session starts (`prefs.agentModels`, the
+   whole map in one patch; nothing chosen for it falls back to the remembered choice). A model named still wins
+   (`agentChoice` in `sessions/start-agent.ts`). The card names a model the setting chose, "(gpt-6, your choice for
+   heavy work)". The setting's model and effort are checked as named ones are: a retired one is refused with the list,
+   and the refusal adds "That is the person's choice for heavy work …: tell them, or name a model" only when the
+   setting's own model or effort is at fault, not an effort the caller named; one that could not be checked says to
+   name a model if the first turn fails, not to start again without it, since the caller never named it.
+
+   The words on `difficulty` and `worktree` are the loose guidance #729 asked for (an agent may ignore them, and a
+   project's AGENTS.md wins): light for lookups, small fixes and reviews, heavy for design, security and data loss; a
+   worktree for edits that end in a pull request, none for research or edits the person watches live. They are in the
+   schema, not in an answer, because a caller needs them before its first call. The child's frame (`agentFrame`) asks
+   it to wait for its own background work that ends (a test run, a build) inside its turn before it answers (§7 below).
 4. **Consent** (`ensureAgentConsent`). **The project's trust is the consent for a `normal` caller** (#673, owner
    decision 2026-10-14): trusting the project (#655) was already the person's decision about it, and a card in a
    session they were not looking at only made the session work alone. Read at each call, nothing remembered; no
@@ -402,9 +417,10 @@ below retained for `safe` and `normal`:
    already finished its turn during the swap, so a later turn the person starts there is never reported as the
    assigned work (#166); that answer stays readable through `agent_session`. Paths the
    answer names inside the child's folder become readable to the caller, as ask_project's do.
-   Each answer that promises the notice (`working` with the report armed, `pending`) says to wait for it rather than
-   check with `status`, which is for a long silence only; each that names `send` (`done`, `at_rest`) says to start a
-   new agent for another kind of work, since the child's name and role came from its first task (#747: a parent
+   Each answer that promises the notice (`working` with the report armed, `pending`) says not to check with `status`
+   meanwhile, and that `wait` is the one call that blocks until the end; `pending` no longer names `status`. Each that
+   names `send` (`done`, `at_rest`) says to start a new agent for another kind of work, with the task written in full,
+   since it starts without the old one's context and the old one's name and role came from its first task (#747: a parent
    called `status` more than ten times in a row, and sent read-only research children the editing). In the answers,
    not the descriptions: an answer costs nothing until it is shown.
 7. **Work that waits on its own background tasks** (#721). The caller hears of the work's last turn end, not its
@@ -643,7 +659,7 @@ must use `purgeSession` if added. Gitlinks found only in older merged superproje
 follow-up ([#623](https://github.com/ijun17/centralu/issues/623)); a superproject merge does not prove
 that module commits were pushed. Writes by other programs during capture are outside this session's lock.
 
-**Size.** The two definitions are 1,085 characters (`AGENT_BUDGET_CHARS` 1,100; 1,060 before #686's `lsp`, which carries no description; 990 before #677's `ifBusy`, 956 before #676's `answer` action and `card`, 992 before the registry-name schema, 918 before the worktree arguments, 974 before `delete`). Claude loads `start_agent` (a request
+**Size.** The two definitions are 1,332 characters (`AGENT_BUDGET_CHARS` 1,350; 1,085 before #729's `difficulty` and the words on it and on `worktree`, +247 characters and +68 tokens, measured, in every ordinary Claude request, whose resident Centralu part goes from 2,313 to 2,560 characters; 1,060 before #686's `lsp`, which carries no description; 990 before #677's `ifBusy`, 956 before #676's `answer` action and `card`, 992 before the registry-name schema, 918 before the worktree arguments, 974 before `delete`). Claude loads `start_agent` (a request
 made in words, like ask_project's, which deferred was not found) and defers `agent_session`, which every
 `start_agent` answer names; Codex reaches both through its `exec` tool. Measured in tool-cost.md §10: +170 tokens per ordinary Claude request (412 → 582); "Have Codex …" reached `start_agent` 3 of 3 on Claude, "another agent" went to each CLI's own sub-agents. No `name` argument: the child
 is named from its task and the person renames it.

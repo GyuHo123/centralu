@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { ToolName } from '@cc/protocol'
+import { AgentDifficulty, ToolName } from '@cc/protocol'
 import type { BusyChoice, ChildRunResult, AskProjectResult, IfBusy, OrchestratorTools, RoutedCard } from '../adapters/contract.js'
 
 const IF_BUSY: readonly IfBusy[] = ['note', 'queue', 'fork', 'fork_read']
@@ -344,10 +344,20 @@ export const AGENT_TOOLS = [
       tool: z.string().optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
+      /*
+       * #729: the person picks a model per tool and difficulty in Settings, so a caller says how hard the job is and
+       * needs no model names. The guidance is here, not in an answer, because it is needed before the first call; the
+       * words cost every request (AGENT_BUDGET_CHARS)
+       */
+      difficulty: AgentDifficulty.optional().describe('Instead of model. light: lookups, small fixes, reviews; heavy: design, security, data loss.'),
       wait: z.boolean().optional().describe('false: do not wait; you are told when it ends.'),
-      // A new worktree (#561 part 2): a boolean and a name rather than a workspace enum, each cheaper and either alone
-      // enough (a branch implies the worktree; without one the branch is named from the job)
-      worktree: z.boolean().optional(),
+      /*
+       * A new worktree (#561 part 2): a boolean and a name rather than a workspace enum, each cheaper and either alone
+       * enough (a branch implies the worktree; without one the branch is named from the job). When to ask for one is
+       * #729's guidance: a worktree for work that ends in a pull request or runs beside other edits; none for research
+       * or for edits the person watches live in their own checkout (UI work under a dev server)
+       */
+      worktree: z.boolean().optional().describe('For PR-bound edits; not research or edits watched live.'),
       branch: z.string().optional(),
       /*
        * Code intelligence (#686): a child starts without its CLI's language server unless this is true. No description:
@@ -380,8 +390,12 @@ export const AGENT_TOOLS = [
  * The ceiling for AGENT_TOOLS, counted like READER_BUDGET_CHARS (both tools, since Codex loads them). Measured in
  * docs/tool-cost.md. 1,000 until #676/#677 gave agent_session `answer`, `card` and `ifBusy` (1,060 with them, no words
  * added: the answers that need them name them). Claude defers agent_session, so its every request does not carry them.
+ * 1,100 until #729: start_agent's `difficulty` and the words on it and on `worktree` (551 → 798 characters, the set
+ * 1,085 → 1,332), loaded on Claude, so every ordinary Claude request carries the 247: 68 tokens, measured live
+ * (docs/tool-cost.md §10). Guidance a caller needs before
+ * its first call has no answer to ride in.
  */
-export const AGENT_BUDGET_CHARS = 1100
+export const AGENT_BUDGET_CHARS = 1350
 
 /**
  * Another project's app tools, on demand (#371 part A) — rides with the reader set, so a project's
@@ -492,6 +506,7 @@ export const READER_BUDGET_CHARS = 1750
  * Like READER_BUDGET_CHARS, raising one is a decision about that seat's every request. The worktree manager's
  * seat went with the role (#561 part 3). Scoped rises from 2,350 to 2,400 for send_to_session's `ifBusy` (#677, an
  * enum with no words: 2,330 on Claude, 2,382 on Codex); nothing makes a new coordinator since #372.
+ * The reader rises with AGENT_BUDGET_CHARS for #729 (4,200 → 4,450): Claude 2,313 → 2,560, Codex 4,150 → 4,397.
  */
 export const RESIDENT_BUDGET_CHARS: Record<ToolProfile, number> = {
   orchestrator: 9_500,
@@ -630,14 +645,14 @@ function askProjectText(r: AskProjectResult): ToolOutput {
  * times in a row while its child worked, though the end is announced on its own. Here rather than in agent_session's
  * description: an answer costs nothing until it is shown, and the description rides in every request.
  */
-const NO_POLLING = 'Wait for that notice rather than checking with status; check only if a long time passes without it.'
+const NO_POLLING = 'Do not check on it with status meanwhile. With nothing else to do, wait is the one call that blocks until the end:'
 
 /**
  * Said wherever an answer names `send` (#747). The same parent gave two children it had started for read-only research
  * the editing work as well: their names, set from the first task, no longer said what they did in the person's list.
  */
 const NEW_ROLE_NEW_AGENT =
-  'For another kind of work (say, editing files after read-only research), start a new agent instead: its name and role came from its first task.'
+  "For another kind of work (say, editing files after read-only research), start a new agent instead, with the task written in full: it starts without this one's context, and this one's name and role came from its first task."
 
 /**
  * What the model reads back from start_agent and agent_session (#561). The child's answer is fenced like ask_project's
@@ -655,7 +670,7 @@ function agentRunText(r: ChildRunResult): ToolOutput {
         `${r.lowMemory.floor} needed; request ${r.sessionId}). It starts when memory frees up, and you will be told when its turn ends; ` +
         `if memory stays low for ${r.lowMemory.maxWaitMinutes} minutes it gives up and you will be told. Carry on with other work, and do not ` +
         `do this with your own subagents instead. ${NO_POLLING} ` +
-        `agent_session(sessionId="${r.sessionId}", action="status") shows where it stands, action="wait" waits, action="stop" withdraws it.`,
+        `agent_session(sessionId="${r.sessionId}", action="wait") waits, action="stop" withdraws it.`,
     }
   }
   if (r.state === 'pending') {
@@ -664,8 +679,7 @@ function agentRunText(r: ChildRunResult): ToolOutput {
         `No session yet: starting ${r.tool} is waiting for the person's answer on the card in your session (request ${r.sessionId}). ` +
         'Carry on with other work, and do not do this with your own subagents instead. If they allow it, the session starts and ' +
         `you will be told when its turn ends; if they refuse or it is withdrawn, you will be told. ${NO_POLLING} ` +
-        `agent_session(sessionId="${r.sessionId}", action="status") shows where it stands, action="wait" waits for the answer, ` +
-        'action="stop" withdraws the request.',
+        `agent_session(sessionId="${r.sessionId}", action="wait") waits for the answer, action="stop" withdraws the request.`,
     }
   }
   const who = `the ${r.tool} session "${r.sessionName}" [${r.sessionId}]` + (r.via === 'fork' ? `, a fork of [${r.forkedFrom}]` : '')
@@ -796,6 +810,8 @@ export async function runOrchestratorTool(
       const tool = str(args.tool)
       const model = str(args.model)
       const effort = str(args.effort)
+      const difficulty = AgentDifficulty.safeParse(str(args.difficulty)).data
+      if (str(args.difficulty) && !difficulty) return { text: 'Give difficulty as light, standard or heavy, or leave it out.', isError: true }
       const branch = str(args.branch)
       return agentRunText(
         await tools.startAgent(
@@ -804,6 +820,7 @@ export async function runOrchestratorTool(
             ...(tool ? { tool } : {}),
             ...(model ? { model } : {}),
             ...(effort ? { effort } : {}),
+            ...(difficulty ? { difficulty } : {}),
             ...(args.wait === false ? { wait: false } : {}),
             ...(args.worktree === true || branch ? { worktree: true } : {}),
             ...(branch ? { branch } : {}),
