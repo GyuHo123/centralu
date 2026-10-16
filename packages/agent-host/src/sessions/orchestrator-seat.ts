@@ -1,5 +1,5 @@
 import type { Attachment, ExternalAppInfo, GitSource, NormalizedEvent, PermissionPreset, SessionInfo, SettingsApplied, ToolName, UpdateStatus } from '@cc/protocol'
-import type { BusyAnswer, BusyChoice, ChildRunResult, LinkedSessions, OrchestratedSession, OrchestratorTools, RecallHit, RoutedCard } from '../adapters/contract.js'
+import type { BusyAnswer, BusyChoice, ChildRunResult, HandoffResult, LinkedSessions, OrchestratedSession, OrchestratorTools, RecallHit, RoutedCard } from '../adapters/contract.js'
 import type { AppCheckReport, AppRef } from '../apps/external/runtime.js'
 import type { QueuedRequest, Store } from '../dev-services/store.js'
 import { inTurn } from '../idle.js'
@@ -65,6 +65,15 @@ export type OrchestratorSeatHost = {
     spec: { name: string; parent?: string; source?: GitSource },
     signal?: AbortSignal,
   ): Promise<{ ok: true; projectId: string; name: string; path: string; machine: string } | { ok: false; error: string }>
+  /** handoff_session (#694): `HandoffFlow.handoff`, after this seat's own scope checks */
+  handoff(
+    callerId: string,
+    target: SessionInfo,
+    opts: { tool?: ToolName; mode?: 'record' | 'agent'; instructions?: string },
+    signal?: AbortSignal,
+  ): Promise<HandoffResult>
+  /** handoff_session's waitFor (#694): `HandoffFlow.wait` */
+  handoffWait(callerId: string, handle: string, signal?: AbortSignal): Promise<HandoffResult>
   builderRefOf(m: Pick<SessionInfo, 'id' | 'appId' | 'projectId'>): AppRef | null
   checkApp(ref: AppRef): Promise<AppCheckReport>
   createApp(params: {
@@ -468,6 +477,32 @@ export function orchestratorToolsFor(
         return { ok: false, error: 'No machine is linked to this computer; leave machine out' }
       }
       return host.createProjectAsked(orchestratorId, { name: spec.name, parent: spec.parent, source: spec.source }, signal)
+    },
+
+    /*
+     * A handoff (#694): the central orchestrator's alone (the profile gives it no other seat; checked here too, as this
+     * object also serves a lead's and a reader's view), a session of this computer in its view. The rest of the rule
+     * (which sessions, mid-turn, the person's card) is HandoffFlow's.
+     */
+    handoffSession: async (spec, signal) => {
+      if (!central) {
+        console.error(`[agent-host] handoff_session by ${orchestratorId.slice(0, 8)} refused: not the central orchestrator`)
+        return { ok: false, error: 'Only the orchestrator hands sessions off' }
+      }
+      // Waiting on a run a "still running" answer named: its own runs only (`HandoffFlow.wait`)
+      if (spec.waitFor) return host.handoffWait(orchestratorId, spec.waitFor, signal)
+      if (!spec.sessionId) return { ok: false, error: 'Give sessionId: the session to hand off, from list_sessions.' }
+      const id = spec.sessionId
+      // Every refusal is logged with who asked and for which session, as the flow's are (#694 review)
+      const refuse = (error: string) => {
+        console.error(`[agent-host] handoff_session by ${orchestratorId.slice(0, 8)} of ${id.slice(0, 8)} refused: ${error}`)
+        return { ok: false as const, error }
+      }
+      if (id === orchestratorId) return refuse('An orchestrator does not hand itself off; the person does that.')
+      if (remoteOf(id)) return refuse('That session runs on a linked machine; hand it off there.')
+      const target = host.meta.get(id)
+      if (!target || !inScope(target)) return refuse(scopeError(id))
+      return host.handoff(orchestratorId, target, { ...(spec.tool ? { tool: spec.tool } : {}), ...(spec.mode ? { mode: spec.mode } : {}), ...(spec.instructions ? { instructions: spec.instructions } : {}) }, signal)
     },
 
     // Checks its own app (C-3) — which app it is is decided by the calling session. Refused if it is not a

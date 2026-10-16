@@ -1065,13 +1065,13 @@ export type AppState = {
    * tool reads it). Defaults to the current tool. Switching tools does not carry over the model,
    * effort, verbosity or speed — those are all tool-specific values, and handing codex's model name
    * to claude would fail right at session creation.
-   * deleteOld: defaults to true. Turning it off leaves the old session standing — a branch, not a
-   * switch.
+   * deleteOld: defaults to the mode's pairing (below): deleted for 'agent', kept for 'record'. Kept, the old session stays
+   * standing — a branch, not a switch.
    */
   /**
-   * mode 'agent' (default): the dying session writes the note. 'record' (#78): asks the agent
-   * nothing and has the host build the record straight from the store's own transcript — the way
-   * out for a session whose service has been cut off.
+   * mode 'record' (default since #694; #78 made it for a session whose service was cut off): asks the
+   * agent nothing and has the host build the note straight from the store's own transcript. 'agent':
+   * the departing session writes the note. deleteOld's default follows the mode: kept for 'record'.
    */
   handoffSession(
     sessionId: string,
