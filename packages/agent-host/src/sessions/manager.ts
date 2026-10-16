@@ -55,6 +55,9 @@ import type {
 } from '@cc/protocol'
 import {
   applyBackgroundTasks,
+  applySessionState,
+  blockedOnQuestion,
+  nextStateFor,
   CENTRALU_APPLY,
   CENTRALU_APPLY_QUESTION,
   sessionOnlyAlways,
@@ -94,6 +97,7 @@ import { Store } from '../dev-services/store.js'
 import type { UpdateService } from '../updates.js'
 import type { UpdateApplyBroker } from '../update-apply.js'
 import { inTurn, sessionIdle, type SessionIdle } from '../idle.js'
+import { appSettingRests, CardRests } from './card-rest.js'
 import {
   gitSummary,
   gitStatusFiles,
@@ -458,6 +462,7 @@ export class SessionManager {
     } = {},
   ) {
     this.children = new ChildOwnership(store)
+    this.cardRests = new CardRests(appSettingRests(store))
     this.delegationFlow = new DelegationFlow(this.delegationHost())
     this.handoffFlow = new HandoffFlow(this.handoffFlowHost(), keeperOpts.handoffTimings)
     this.askProjectFlow = new AskProjectFlow(this.askProjectHost())
@@ -542,6 +547,8 @@ export class SessionManager {
       const requester = [marks.get(s.id), turnGivers.get(s.id), s.askedBy].find((id): id is string => !!id && id !== s.id && this.meta.has(id))
       if (requester) this.quitNotices.push({ sessionId: s.id, requester })
     }
+    // A card the previous host left standing over a kept process closes back into its rest here too (#428)
+    this.cardRests.restore((id) => !!keeperOpts.keptSessions?.has(id) && this.meta.get(id)?.state === 'waiting_approval')
     this.children.restoreReports(this.meta, keeperOpts.keptSessions)
     this.delegationFlow.restoreAgentStarts()
     this.children.restoreTurns(this.meta, keeperOpts.keptSessions)
@@ -1533,6 +1540,7 @@ export class SessionManager {
       info.lastReadSeq = seq // Something we sent counts as read
       this.store.upsertSession(info)
       this.emit({ type: 'user_message', sessionId: id, seq, text: params.initialPrompt, ...(from ? { from } : {}) })
+      this.cardRests.turnAsked(id)
       handle.send(params.initialPrompt)
     }
     return info
@@ -1755,12 +1763,13 @@ export class SessionManager {
         if (this.children.queued.has(k.sessionId)) this.scheduleDrain(k.sessionId)
         if (!r.resumed) {
           console.error(`[agent-host] could not re-attach ${k.sessionId.slice(0, 8)}: ${r.reason ?? 'unknown'}`)
-          if (m.state === 'working' || m.state === 'waiting_approval') {
-            m.state = 'idle'
-            m.waitingSince = null
+          if (inTurn(m.state)) {
+            // The same statement the window gets, through the same rules (#428)
+            const change = { type: 'state_change' as const, sessionId: m.id, state: 'idle' as const, reason: 'reattach_failed' }
+            this.applyStateHint(change, m)
             this.markStoppedByQuit(m, true)
             this.store.upsertSession(m)
-            this.emit({ type: 'state_change', sessionId: m.id, state: 'idle', reason: 'reattach_failed' })
+            this.emit(change)
             // Its turn is over: the report it owed says so now, rather than naming a later turn (#698)
             if (this.children.awaitingReport.has(m.id)) void this.reportBackIfAwaited(m.id, { type: 'state_change', sessionId: m.id, state: 'idle' })
             else void this.tellAskerOfInterruption(m.id, this.children.turnOwners.get(m.id)?.callerId)
@@ -2019,10 +2028,7 @@ export class SessionManager {
         // Listed through onEvent, which also keeps the record for the host after this one
         else if (kept.length > 0) this.onEvent({ type: 'background_tasks', sessionId, live: kept })
       } else {
-        m.state = 'idle'
-        m.waitingSince = null
-        this.store.upsertSession(m)
-        this.emit({ type: 'state_change', sessionId, state: 'idle', reason: 'resumed' })
+        this.settleState(m, { type: 'state_change', sessionId, state: 'idle', reason: 'resumed' })
       }
       void this.listCommands(sessionId).catch(() => {})
 
@@ -2431,7 +2437,9 @@ export class SessionManager {
           m.externalId = handle.externalId
         }
         const wasBusy = inTurn(m.state)
+        const before = m.state
         this.applyStateHint(e, m)
+        this.cardRests.note(e, m.id, before)
         interruptionBefore = m.interruption ?? null
         this.trackInterruption(e, m, wasBusy && !inTurn(m.state))
         // Heard from: an unknown background state is bounded by quiet, not by age (#648, `backgroundKnown`)
@@ -2493,6 +2501,7 @@ export class SessionManager {
     run?.onEvent(e)
     if (e.sessionId) for (const observer of this.turnObservers.get(e.sessionId) ?? []) observer.onEvent(e)
     this.emit(seq != null ? ({ ...e, seq } as NormalizedEvent) : e)
+    this.closeIntoRest(e)
     // After the event that caused it, so a window reads the error first and the reason for it second (#698)
     const nowInterrupted = e.sessionId ? this.meta.get(e.sessionId)?.interruption ?? null : null
     if (e.sessionId && interruptionBefore !== undefined && nowInterrupted !== interruptionBefore) {
@@ -2741,42 +2750,41 @@ export class SessionManager {
     }
   }
 
-  /**
-   * A state hint, for storage.
-   * Authority over the live state belongs to the UI (the core reducer) — since agent-host never
-   * imports core (docs/architecture.md §2), only the minimal hint needed for restore (M1.5) is
-   * recorded here. Deciding transition rules is not done here — that belongs to core.
-   */
+  /** A state hint, for storage: the core reducer's rules on the host's copy (`applySessionState`, protocol session-state.ts) */
   private applyStateHint(e: NormalizedEvent, m: SessionInfo): void {
+    const from = m.state
+    // An illegal transition is ignored and logged, as the window does (docs/state-management.md §2)
+    if (applySessionState(m, e, Date.now()).illegal) console.warn(`[agent-host] ignored ${e.type} for ${m.id.slice(0, 8)}: ${from} cannot go to ${nextStateFor(e)}`)
     this.trackLiveFacts(e, m)
-    const hint =
-      e.type === 'approval_request' ? 'waiting_approval'
-      : e.type === 'turn_complete' ? 'waiting_input'
-      : e.type === 'limit_reached' ? 'limited'
-      : e.type === 'error' ? 'error'
-      : e.type === 'state_change' ? e.state
-      : e.type === 'message_delta' || e.type === 'tool_call' ? 'working'
-      : null
-    if (!hint) return
-    const prev = m.state
-    m.state = hint
-    const waiting = hint === 'waiting_approval' || hint === 'waiting_input' || hint === 'error'
-    m.waitingSince = waiting ? (m.waitingSince ?? Date.now()) : null
-    // The same clearing rules as the core reducer (docs/state-management.md §2):
-    // a kind of busy never outlives being busy, recovering removes the limit banner, and a card for
-    // a requestId that has died (ended by an error, an interrupt, or recovery) is torn down too,
-    // since clicking it would have nowhere to answer — a reconnect restore must never bring a dead
-    // card back to life.
-    if (hint !== 'working' && e.type !== 'activity') m.activity = null
-    if (hint === 'working' || hint === 'idle') m.limit = null
-    const cardsDead =
-      hint === 'error' ||
-      ((hint === 'working' || hint === 'idle') && prev !== hint) ||
-      (prev === 'waiting_approval' && hint === 'waiting_input')
-    if (cardsDead) {
-      m.pendingApproval = null
-      m.pendingQuestions = []
-    }
+  }
+
+  /** The rest an adapter's card raised between turns was raised in (`CardRests`, card-rest.ts), written to the store */
+  private cardRests: CardRests
+
+  /**
+   * An adapter's card raised between turns closes back into that rest once answered (#428), as the host's own cards do
+   * (`restAfterCard`, host-cards.ts): without `onEvent`, since no turn ended (no report, no deferred restart).
+   */
+  private closeIntoRest(e: NormalizedEvent): void {
+    const m = e.sessionId ? this.meta.get(e.sessionId) : undefined
+    const rest = m ? this.cardRests.restAfter(e, m) : null
+    if (!m || rest === null) return
+    this.settleState(m, { type: 'state_change', sessionId: m.id, state: rest })
+  }
+
+  /**
+   * A state the host itself states (a resume, a tool change, a card's rest): through the same rules as an event, so the
+   * stored copy is what the window makes of the same `state_change` (#428), then stored and broadcast. Not `onEvent`:
+   * no turn ended.
+   */
+  private settleState(m: SessionInfo, change: Extract<NormalizedEvent, { type: 'state_change' }>): void {
+    // The host has said what the state is: no card rest or asked-for turn of before stands over it
+    this.cardRests.forget(m.id)
+    this.applyStateHint(change, m)
+    this.store.upsertSession(m)
+    this.emit(change)
+    // At rest by a statement, not a turn's end that `onEvent` would see: a request queued for it goes in now (#677)
+    if (!inTurn(m.state) && this.children.queued.has(m.id)) this.scheduleDrain(m.id)
   }
 
   /**
@@ -2785,28 +2793,11 @@ export class SessionManager {
    * While SessionInfo had none of these fields, a UI that disconnected and came back received only
    * state=waiting_approval, and **had no payload to draw the approval card with** — with no requestId
    * either, it could not even respond. These are never put in the DB (upsert does not know these
-   * fields) — if the host restarts, they really are gone.
+   * fields) — if the host restarts, they really are gone. The cards, the activity and the limit are set with the
+   * state they belong to (`applySessionState`, protocol session-state.ts); these are the rest.
    */
   private trackLiveFacts(e: NormalizedEvent, m: SessionInfo): void {
     switch (e.type) {
-      case 'approval_request':
-        m.pendingApproval = { requestId: e.requestId, detail: e.detail }
-        break
-      case 'approval_resolved':
-        if (m.pendingApproval?.requestId === e.requestId) m.pendingApproval = null
-        break
-      case 'question_request':
-        m.pendingQuestions = [...m.pendingQuestions, { requestId: e.requestId, questions: e.questions }]
-        break
-      case 'question_resolved':
-        m.pendingQuestions = m.pendingQuestions.filter((q) => q.requestId !== e.requestId)
-        break
-      case 'activity':
-        m.activity = e.activity
-        break
-      case 'limit_reached':
-        m.limit = { resumeAt: e.resumeAt, usedPercent: e.usedPercent, windowMins: e.windowMins }
-        break
       case 'usage_update':
         m.usage = e.tokens
         if (e.request) this.cacheLedger.record(m.tool, m.id, e.request)
@@ -3020,6 +3011,8 @@ export class SessionManager {
         : attachments?.length
           ? `${text}\n\n${attachments.map((a) => `@${a.path}`).join('\n')}`
           : text
+    // A turn is asked for now, whether or not the tool announces it before its first card (`CardRests`)
+    this.cardRests.turnAsked(sessionId)
     if (sendInput) sendInput(h, adapterText)
     else h.send(adapterText)
   }
@@ -3110,10 +3103,7 @@ export class SessionManager {
      * saving meta as working, so a screen that reconnected and the orchestrator's list_sessions both
      * saw an interrupted turn as "still working" (the settings tool refused that session outright).
      */
-    m.state = 'idle'
-    m.waitingSince = null
-    this.store.upsertSession(m)
-    this.emit({ type: 'state_change', sessionId, state: 'idle', reason: 'tool_changed' })
+    this.settleState(m, { type: 'state_change', sessionId, state: 'idle', reason: 'tool_changed' })
 
     // The new process only comes up once it is addressed (the same rule as resumeSession — launching it here
     // would run a tool that might never even be used)
@@ -3973,6 +3963,7 @@ export class SessionManager {
     const self = this
     return {
       applyStateHint: (...a) => self.applyStateHint(...a),
+      settleState: (...a) => self.settleState(...a),
       autoBoundaryOpen: (...a) => self.autoBoundaryOpen(...a),
       get emit() {
         return self.emit
@@ -4083,6 +4074,7 @@ export class SessionManager {
         return self.emit
       },
       forgetCommits: (...a) => self.forgetCommits(...a),
+      forgetCardRest: (id) => self.cardRests.forget(id),
       gitTrust: (...a) => self.gitTrust(...a),
       get handles() {
         return self.handles
@@ -4753,8 +4745,10 @@ export class SessionManager {
     const queuedBy = removed ? new Set<string>() : new Set([...this.children.queued.values()].flat().filter((r) => r.callerSessionId === from).map((r) => r.sessionId))
     const delegated = [...this.children.delegations.values()].filter((d) => d.callerId === from)
     const stateOf = (s: SessionInfo): string | null => {
-      if (s.pendingApproval || s.state === 'waiting_approval') return 'waiting for an approval'
+      // A question blocks the session as an approval does (waiting_approval), so its own list is read first
+      if (s.pendingApproval) return 'waiting for an approval'
       if (s.pendingQuestions.length) return 'waiting on a question'
+      if (s.state === 'waiting_approval') return 'waiting for an approval'
       const run = this.agentRuns.get(s.id)
       if (inTurn(s.state) || (run && !run.finished)) return queuedBy.has(s.id) && this.children.turnOwners.get(s.id)?.callerId !== from ? 'busy; your request is queued' : 'working'
       if (queuedBy.has(s.id)) return 'your request is queued'
@@ -5065,7 +5059,7 @@ export class SessionManager {
   }
 
   private busyAnswer(callerId: string, target: SessionInfo, from: QueuedRequest['via']): Extract<BusyAnswer, { state: 'busy' }> {
-    return { state: 'busy', sessionId: target.id, sessionName: target.name, sessionState: this.children.queued.get(target.id)?.length && !inTurn(target.state) ? 'queued requests' : target.state, choices: this.busyChoices(callerId, target, from) }
+    return { state: 'busy', sessionId: target.id, sessionName: target.name, sessionState: this.children.queued.get(target.id)?.length && !inTurn(target.state) ? 'queued requests' : blockedOnQuestion(target) ? 'waiting on a question' : target.state, choices: this.busyChoices(callerId, target, from) }
   }
 
   /** Holds a request for a busy session until its turn ends (#677); the handle and the place in its queue */

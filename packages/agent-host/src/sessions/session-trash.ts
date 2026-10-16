@@ -4,14 +4,14 @@ import type { SessionAppsHub } from './session-apps.js'
 import type { AgentRunWait } from './app-agents.js'
 import { basename } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
-import type {
-  NormalizedEvent,
-  PermissionPreset,
-  ProjectInfo,
-  SessionInfo,
-  SessionState,
-  StoredMessage,
-  TrashedSession,
+import {
+  isInTurn,
+  type NormalizedEvent,
+  type PermissionPreset,
+  type ProjectInfo,
+  type SessionInfo,
+  type StoredMessage,
+  type TrashedSession,
 } from '@cc/protocol'
 import type { AgentAdapter, SessionHandle } from '../adapters/contract.js'
 import type { Store } from '../dev-services/store.js'
@@ -40,6 +40,8 @@ export type SessionTrashHost = {
   readonly delegationFlow: DelegationFlow
   readonly emit: (e: NormalizedEvent) => void
   forgetCommits: (sessionId: string) => void
+  /** The rest a card of it was raised in, if one is remembered (`CardRests`) */
+  forgetCardRest: (sessionId: string) => void
   gitTrust: (projectId: string | null) => { trusted: boolean; }
   readonly handles: Map<string, SessionHandle>
   handoffHeir: (sessionId: string) => string | null
@@ -220,6 +222,7 @@ export class SessionTrash {
     for (const [child, owner] of [...this.host.children.turnOwners]) if (owner.callerId === sessionId) this.host.children.releaseTurn(child)
     this.host.children.dropObserverNotesOf(sessionId)
     this.host.forgetCommits(sessionId)
+    this.host.forgetCardRest(sessionId)
     this.host.stopWatchingReconnect(sessionId)
     this.host.quitNotices = this.host.quitNotices.filter((n) => n.sessionId !== sessionId && n.requester !== sessionId)
     this.host.meta.delete(sessionId)
@@ -350,8 +353,7 @@ export class SessionTrash {
       }
       const back = await this.host.store.restoreSession(sessionId, projectId)
       if (!back) throw Object.assign(new Error(`Not in the trash: ${sessionId}`), { code: 'session_not_found' })
-      const LIVE_ONLY: SessionState[] = ['working', 'waiting_approval']
-      const fixed = LIVE_ONLY.includes(back.state) ? { ...back, state: 'idle' as const, waitingSince: null } : back
+      const fixed = isInTurn(back.state) ? { ...back, state: 'idle' as const, waitingSince: null } : back
       if (recovered && fixed.worktree) fixed.worktree = { ...fixed.worktree, branch: recovered.branch }
       if (fixed !== back || recovered) this.host.store.upsertSession(fixed)
       this.host.meta.set(sessionId, fixed)

@@ -382,8 +382,10 @@ Where it is stored:
 
 ## 3. Session state
 
-`packages/core/src/session/state-machine.ts`. Every change of state goes through this table; the UI never infers a
-state with its own conditions.
+`packages/protocol/src/session-state.ts`, re-exported by `packages/core/src/session/state-machine.ts`. Every change of
+state goes through this table; the UI never infers a state with its own conditions. The host keeps the same state for a
+reconnecting window and the next host after a swap, and runs the same rules on its copy (`applySessionState`, which the
+host's `applyStateHint` and the mock's list run), so a reconnect never hands back a state the window was not showing (#428).
 
 ```mermaid
 stateDiagram-v2
@@ -409,12 +411,28 @@ except `error` itself, and every state but `idle` may go to `idle` when the proc
 |---|---|
 | `idle` | `working`, `error` |
 | `working` | `waiting_approval`, `waiting_input`, `limited`, `error`, `idle` |
-| `waiting_approval` | `working`, `waiting_input`, `error`, `idle` |
+| `waiting_approval` | `working`, `waiting_input`, `limited`, `error`, `idle` |
 | `waiting_input` | `working`, `error`, `idle` |
 | `limited` | `working`, `idle`, `error` |
 | `error` | `working`, `idle` |
 
-- `waiting_approval` covers both an approval and a question: both block the agent on the person.
+- `waiting_approval` covers both an approval and a question: both block the agent on the person. In a turn
+  (`isInTurn`) means `working` or `waiting_approval`.
+- `waiting_approval → limited`: a card the host raised between turns closes back into the rest it was raised in
+  (`restAfterCard`, #673), and `limited` is one of them. Only that statement takes the edge: a `limit_reached` (Codex
+  reports its limits at any time) records the limit but leaves a session on its card.
+- A card an adapter raised while no turn ran closes back into the rest it was raised in too (`CardRests`,
+  `agent-host/src/sessions/card-rest.ts`); inside a turn, answering the last card means working again. The rest is
+  written to the `card_rests` app setting, so a card that stands through a host swap (the keeper keeps the process,
+  the next host adopts it) still closes into it; a start that adopts nothing drops it. Input the host delivers counts
+  as a turn asked for until the tool next moves the state, at most `ASK_WINDOW_MS`, so a tool that raises a card
+  before announcing its turn keeps that card in the turn. Closing into a rest drains a request queued for the session
+  (#677), as a turn's end does.
+- A `tool_result` moves nothing: it closes a call and starts no turn. Results also arrive after a turn ended (a
+  background agent released as its process closes), and read as work they left a session working with nothing to end
+  it (#428).
+- The host's own statements (a resume, a tool change, a failed re-attach, a card's rest) go out as `state_change` and
+  are applied to its copy through the same rules (`settleState`), not written by hand.
 - `waiting_input` means the turn ended. It counts as waiting (`isWaiting`), so it stands in the inbox, but its
   urgency is below `error` (`URGENCY`): an approval blocks the agent, a finished turn does not.
 - An `approval_request` or `question_request` is applied in **any** state: it is a fact the host received, not an
