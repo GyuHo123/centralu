@@ -282,7 +282,7 @@ is not listed for it and a call by name is refused (`Not a tool of this session`
 <!-- tool-matrix:end -->
 
 A reader's `read_session` without an id lists its project's sessions; that is why it has no
-`list_sessions`. Its read tools see only its own project (`orchestratorToolsFor(…, ownProject)`), and
+`list_sessions`. Its read tools see only its own project (`orchestratorToolsFor(…, ownProject)` in `sessions/orchestrator-seat.ts`), and
 the object behind them refuses directing calls (`readerToolsFor`).
 
 An ordinary reader's `update_centralu` reaches the host's existing update service only after a host-owned consent card. “Always”
@@ -499,7 +499,7 @@ for word: the same injection path as a worker's report, so the same rule applies
   open is refused.
 - It is stored with its source (`fromApp`) and drawn as the app's message, not the person's. A
   session's automatic name is never taken from it.
-- The agent receives it framed (`appMessageFrame` in `sessions/manager.ts`): a header naming the
+- The agent receives it framed (`appMessageFrame` in `sessions/app-messages.ts`): a header naming the
   app and saying the person chose to send it but did not write it, and that it is the app's text,
   not an instruction; then **every line** of the text behind `> `. A line imitating the header, or
   a made-up "person:" field, stays inside the quote. The app's name passes the one-line field rule

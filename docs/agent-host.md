@@ -43,7 +43,9 @@ Every session gets one bundle of the `centralu` server's tools, or none. One pur
 (`toolProfileFor` in `sessions/tool-profiles.ts`, from the row's kind, its app and builder slot and
 the Settings switch; `toolBundleFor` names the object behind each profile). The manager asks it in one
 place (`toolChoice`: the profile, and the bundle built when the adapter's options are), used at create, at
-every wake, on every bridge call and by `toolProfileOf`, so they cannot drift apart;
+every wake, on every bridge call and by `toolProfileOf`, so they cannot drift apart. The orchestrator's,
+a coordinator's and the reader's objects are one function, `orchestratorToolsFor` (`sessions/orchestrator-seat.ts`),
+over the narrow view of the manager it is handed (`OrchestratorSeatHost`);
 `profileAllows` decides both what the bundle exposes and what its calls may run, so a name the
 bundle leaves out is refused even through the Codex bridge.
 
@@ -66,7 +68,7 @@ new thread.
 a project's seat that watched its worktree sessions, proposed new ones (`propose_worktree_session`, which the person
 then created) and deleted a merged one behind a hard gate (`delete_worktree_session`). Now a session starts worktree
 agents itself (`start_agent` with `worktree`, §1.2.1), works with them (`agent_session`) and removes an idle child
-with `agent_session` `delete`, keeping local work with the session in the trash (#608, `cleanUpWorktreeChild`). What stayed: the person's own worktree
+with `agent_session` `delete`, keeping local work with the session in the trash (#608, `cleanUpWorktreeChild` in `sessions/worktree-sessions.ts`). What stayed: the person's own worktree
 sessions (the new-session window's option; they now stand alone instead of under a manager made for them), merge and
 pull-request detection on every worktree session, and the project's trunk (`worktrees.setTrunk`, kept in the former slot's row;
 the project menu's "Worktree trunk" entry was removed in #733, so the trunk is detected and used but no screen sets it) The orchestrator gets no replacement for `propose_worktree_session`:
@@ -181,7 +183,7 @@ It never creates a session in another project (#614, owner decision 2026-10-13).
 person's action in that project; `start_agent` creates only within its caller's own project. The global
 orchestrator, which belongs to no project, retains its own create-session tool.
 
-What one call does (`SessionManager.askProject`):
+What one call does (`SessionManager.askProject`, which runs `AskProjectFlow` in `sessions/ask-project-flow.ts`, #428):
 
 1. **The project.** Name or id of another registered project, on this computer or on a linked machine
    (§1.2.4). Its own project is refused; an unknown name lists the other projects, each with the machine
@@ -329,7 +331,7 @@ completion watcher is reused, or a temporary event reader watches the person's t
 is removed when the observation ends. These observations do not add a `waitsOn` dependency,
 prevent an idle caller from sleeping, or stop the target when the caller is interrupted.
 
-What one `start_agent` call does (`SessionManager.startAgent`), with the refusal/card rules
+What one `start_agent` call does (`SessionManager.startAgent`, also `DelegationFlow`), with the refusal/card rules
 below retained for `safe` and `normal`:
 
 1. **Who may.** An ordinary session (`reader` profile) of a trusted project (#382's rule), not one marked `askedBy`:
@@ -367,7 +369,7 @@ below retained for `safe` and `normal`:
    the child with its report armed (the caller is told when its turn ends, as with `wait: false`); a refusal, or a
    start that fails after the approval, is told to the caller as a message from Centralu (`HOST_SENDER`). The card
    lives in the caller's single approval slot, which the caller's own next events clear while its turn goes on; it is
-   raised again (`raiseHostAsks`, not recorded twice) when that turn ends, unless it ended in an error. While it stands
+   raised again (`raiseHostAsks` in `sessions/host-cards.ts`, not recorded twice) when that turn ends, unless it ended in an error. While it stands
    the request is in the store's `agent_start_requests` (v50): a host swap or restart leaves the row (the leaving
    host's call answers `pending`), and the next host raises the card again (`resumeAgentStart`) and starts the child
    when it is approved. An approval (here or there) first reads again what the start rests on (#673 review): the
@@ -842,7 +844,7 @@ new session now takes over the original's **live** work as it is created, before
     happens before the first turn reads the note. If that deletion then fails, both sessions stand and the children
     are with the session the person works in.
   - **An original removed later** (a handoff that kept it, then a delete; or a window that did not say it would
-    remove it) gives its children to the session that inherited its handoff, in `trashSessionOnce` before the
+    remove it) gives its children to the session that inherited its handoff, in `trashSessionOnce` (`sessions/session-trash.ts`) before the
     teardown lets go of them (scope `removed`): settled ones, and working ones it started after the handoff, with the
     reports, turns and delegations that are theirs, since an orphan is worse. What it asked for and the person never
     answered stays behind and goes as before: its standing start_agent cards are withdrawn and the requests it queued
@@ -882,7 +884,9 @@ new session now takes over the original's **live** work as it is created, before
   observer notes, start_agent requests, linked machines' reports, and what a handoff gave away. Each change with a
   store mirror writes it there; the manager reads through read-only maps. The memory side of the move is one call,
   `moveOwner`, which runs the manager's card move for the moving start requests in the middle, in the order above.
-  What moves, the store's transaction, and `askedBy` / `parentSessionId` stay with the manager.
+  What moves, the store's transaction, and `askedBy` / `parentSessionId` stay with the manager. At startup it reads
+  its own rows back (`restoreReports`, `restoreTurns`, `restoreQueued`), as the manager's constructor did; the
+  standing start_agent requests are `DelegationFlow.restoreAgentStarts`, called between the reports and the turns.
 - **The windows** hear `session_owner` (the session's `askedBy` and `parentSessionId` now) and hang the child under
   its new owner; a linked machine's event is qualified (`Qualifier.event`) and patched into the hub's mirror.
 
@@ -1043,7 +1047,7 @@ Implementation rules:
     settings, the tool definitions a profile serves) waits only for the turn: an idle session restarts at once, and a
     mid-turn change applies when the turn ends, whatever runs in the background or is unknown. Any other deferred
     restart (a model, an app set) also waits while listed background work runs, at most one hour
-    (`applyDeferredRestart`). A restart that ends background work, or work that is unknown, says so in the
+    (`applyDeferredRestart`, in `RestartPolicy`, `sessions/restart-policy.ts`). A restart that ends background work, or work that is unknown, says so in the
     conversation first (a `restart` notice naming the tasks).
 - **The CLI version a process runs is reported once per process, as `agent_version`** (#297). Claude: the init
   message's `claude_code_version` (init comes again with every query; only a change is sent). Codex: the `initialize`
@@ -1097,6 +1101,8 @@ Implementation rules:
 `ClaudeSession.start` is the single SDK `query({ options })` construction site. Both
 `SessionManager.createSession` and the resume/wake path use it, for ordinary sessions,
 orchestrators, coordinators, worktree managers, builders, app agents and `start_agent` children.
+The two build the adapter's options in one place (`SessionManager.launchOptions`, #428), so an option
+added there reaches a new session and a wake alike (`sessions/launch-options.test.ts`).
 Its `spawnClaudeCodeProcess` callback sends the SDK's flags and environment to either the local
 spawn or the keeper; a fresh keeper replacement therefore receives the same options.
 

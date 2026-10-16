@@ -38,7 +38,9 @@ claude는 인프로세스, codex는 stdio 다리.
 순수한 규칙 하나가 정한다(`sessions/tool-profiles.ts`의 `toolProfileFor`: 행의 종류, 앱과 빌더
 자리, 설정 스위치로부터. `toolBundleFor`는 프로필마다 뒤에 서는 객체를 댄다). 매니저는 그 규칙에 한
 곳에서 묻는다(`toolChoice`: 프로필, 그리고 어댑터 옵션을 만들 때 함께 만드는 묶음). 생성, 깨울 때마다,
-다리 호출마다, `toolProfileOf`가 모두 이것을 쓴다. 그래서 서로 어긋날 수 없다. 묶음이
+다리 호출마다, `toolProfileOf`가 모두 이것을 쓴다. 그래서 서로 어긋날 수 없다. 오케스트레이터, 코디네이터,
+읽기 세션의 객체는 함수 하나(`sessions/orchestrator-seat.ts`의 `orchestratorToolsFor`)가 만들고, 이 함수는
+매니저를 좁게 보여 주는 `OrchestratorSeatHost`만 받는다. 묶음이
 무엇을 노출하는지와 그 호출이 무엇을 실행할 수 있는지는 둘 다 `profileAllows`가 정하므로,
 묶음에 없는 이름은 Codex 다리를 거쳐도 거절된다.
 
@@ -60,7 +62,7 @@ claude는 인프로세스, codex는 stdio 다리.
 하나씩 워크트리 세션을 지켜보고, 새 세션을 제안하고(`propose_worktree_session`, 만드는 건 사람), 병합된 것을 엄격한
 관문 뒤에서 지우던(`delete_worktree_session`) 자리였다. 이제 세션이 직접 워크트리 에이전트를 띄우고(`start_agent`의
 `worktree`, §1.2.1), 다루고(`agent_session`), 병합되고 깨끗한 것을 같은 관문 뒤에서 `agent_session` `delete`로
-치운다(`cleanUpWorktreeChild`). 남은 것: 사람이 만드는 워크트리 세션(새 세션 창의 선택. 이제 매니저 밑이 아니라
+치운다(`sessions/worktree-sessions.ts`의 `cleanUpWorktreeChild`). 남은 것: 사람이 만드는 워크트리 세션(새 세션 창의 선택. 이제 매니저 밑이 아니라
 홀로 선다), 모든 워크트리 세션의 병합·PR 감지, 프로젝트의 줄기(`worktrees.setTrunk`, 프로젝트 메뉴의 "Worktree
 trunk", 예전 자리의 줄에 보관). 오케스트레이터에는 `propose_worktree_session`을 대신할 것을 주지 않는다: 사람의
 저장소에 가지와 폴더를 만드는 일은 이제 프로젝트 세션의 동의 카드를 거치고, 오케스트레이터는 `send_to_session`으로 그
@@ -161,7 +163,7 @@ It never creates a session in another project (#614, owner decision 2026-10-13).
 person's action in that project; `start_agent` creates only within its caller's own project. The global
 orchestrator, which belongs to no project, retains its own create-session tool.
 
-What one call does (`SessionManager.askProject`):
+호출 한 번이 하는 일(`SessionManager.askProject`, 실제로는 `sessions/ask-project-flow.ts`의 `AskProjectFlow`, #428):
 
 1. **The project.** Name or id of another registered project. Its own project is refused; an unknown
    name lists the other projects. Under `safe`/`normal`, an untrusted caller cannot ask, and a child
@@ -240,7 +242,7 @@ Codex에 넘기고 결과만 검토하는 식이다. 앱이 보여 주지 않는
 있는지 확인한다. 모르는 이름이면 설치된 도구 목록을 담은 오류를 반환하므로, 어댑터를 추가해도
 이 스키마를 고칠 필요가 없다.
 
-`start_agent` 한 번(`SessionManager.startAgent`):
+`start_agent` 한 번(`SessionManager.startAgent`, 역시 `DelegationFlow`):
 
 1. **Who may.** An ordinary session (`reader` profile) of a trusted project (#382's rule), not one marked `askedBy`:
    depth one, so a child cannot start agents, and neither can a session handling an active ask_project task.
@@ -273,7 +275,7 @@ Codex에 넘기고 결과만 검토하는 식이다. 앱이 보여 주지 않는
    걸린다(`wait: false`처럼 그 턴이 끝나면 알린다). 거부하거나, 허용한 뒤 시작에 실패하면 Centralu가 보낸
    메시지(`HOST_SENDER`)로 부르는 세션에게 알린다. 카드는 부르는 세션의 승인 자리 하나를 쓰므로, 그 세션의 턴이
    이어지는 동안에는 그 세션 자신의 다음 이벤트가 자리를 비운다. 턴이 끝나면(오류로 끝난 경우는 빼고) 카드를 다시
-   세운다(`raiseHostAsks`, 대화에 두 번 기록하지 않는다). 카드가 서 있는 동안 요청은 스토어의
+   세운다(`sessions/host-cards.ts`의 `raiseHostAsks`, 대화에 두 번 기록하지 않는다). 카드가 서 있는 동안 요청은 스토어의
    `agent_start_requests`(v50)에 있다. 호스트 교체나 재시작이 일어나도 줄은 남고(떠나는 호스트의 호출은 `pending`으로
    답한다), 다음 호스트가 카드를 다시 세운 뒤(`resumeAgentStart`) 허용되면 자식을 시작한다. 어느 호스트에서든
    허용되면 시작이 기대는 조건을 먼저 다시 읽는다(#673 리뷰): 부르는 세션이 아직 있는지, 프로젝트가 아직 신뢰되는지,
@@ -491,7 +493,7 @@ Centralu는 작업의 종류를 문장에서 추측하지 않는다. 결정은 `
     알아내는 대신 미리 듣는다. 미리 들으면 첫 턴이 노트를 읽기 전에 옮길 수 있다. 그 뒤 삭제가 실패하면 두 세션이 모두
     남고, 자식은 사람이 쓰는 세션에 있다.
   - **나중에 지워지는 원래 세션**(인계가 남겨 둔 뒤 지운 경우, 또는 지운다고 알리지 않은 창)은 아직 가진 것을
-    인계를 이어받은 세션에 넘긴다. `trashSessionOnce`가 정리 작업으로 놓아 버리기 전에 넘긴다(범위 `removed`). 정리된
+    인계를 이어받은 세션에 넘긴다. `sessions/session-trash.ts`의 `trashSessionOnce`가 정리 작업으로 놓아 버리기 전에 넘긴다(범위 `removed`). 정리된
     자식과, 인계 뒤에 원래 세션이 시작해 아직 일하는 자식이 여기에 들고, 그 자식에 딸린 보고, 턴, 위임도 함께 간다.
     주인 없는 자식이 더 나쁘기 때문이다. 원래 세션이 요청했지만 사람이 아직 답하지 않은 것은 넘기지 않고 예전처럼
     처리한다. 서 있는 start_agent 카드는 거두고, 큐에 넣은 요청은 버린다. 그래서 다른 세션을 지웠다는 이유로 이어받는
@@ -527,7 +529,9 @@ Centralu는 작업의 종류를 문장에서 추측하지 않는다. 결정은 `
   보고 표시와 멈춘 보고, 위임된 턴, 대기열 요청과 지금 전달 중인 요청, 위임과 관찰자 메모, start_agent 요청, 연결된
   머신의 보고, 인계가 넘긴 것이 여기에 있다. 저장소 사본이 있는 변경은 여기서 저장소에도 쓰고, 매니저는 읽기 전용
   Map으로 읽는다. 옮기기의 메모리 쪽은 `moveOwner` 한 번의 호출이고, 옮기는 시작 요청의 카드는 그 중간에 매니저가
-  위 순서대로 옮긴다. 무엇을 옮길지, 저장소 트랜잭션, `askedBy`와 `parentSessionId`는 매니저에 남는다.
+  위 순서대로 옮긴다. 무엇을 옮길지, 저장소 트랜잭션, `askedBy`와 `parentSessionId`는 매니저에 남는다. 시작할 때는 자기 행을 직접
+  다시 읽는다(`restoreReports`, `restoreTurns`, `restoreQueued`). 예전에는 매니저 생성자가 하던 일이다. 서 있는
+  start_agent 요청은 `DelegationFlow.restoreAgentStarts`가 읽으며, 보고 표시와 턴 사이에 불린다.
 - **창**은 `session_owner`(그 세션의 지금 `askedBy`와 `parentSessionId`)를 듣고 자식을 새 소유자 아래에 둔다. 연결된
   머신의 이벤트는 `Qualifier.event`가 이름을 붙이고, 허브의 미러에도 반영한다.
 
@@ -672,7 +676,7 @@ interface AdapterCapabilities {
   - **재시작과 백그라운드 작업** (#648). 안전을 바꾸는 재시작(권한 프리셋, 실행 설정, 프로필이 내주는 도구 정의)은
     턴만 기다린다. 유휴 세션은 바로 다시 띄우고, 턴 중의 변경은 백그라운드에서 무엇이 돌든, 모르든 턴이 끝날 때
     적용한다. 그 밖의 미뤄진 재시작(모델, 앱 묶음)은 목록에 오른 백그라운드 작업이 도는 동안 최대 한 시간까지 더
-    기다린다(`applyDeferredRestart`). 백그라운드 작업을 끝내게 되거나 그 작업을 모르는 재시작은 먼저 대화에 그 사실을
+    기다린다(`sessions/restart-policy.ts`의 `RestartPolicy.applyDeferredRestart`). 백그라운드 작업을 끝내게 되거나 그 작업을 모르는 재시작은 먼저 대화에 그 사실을
     알린다(작업 이름을 담은 `restart` 알림).
 - **프로세스가 돌리는 CLI 버전은 프로세스마다 한 번 `agent_version`으로 알린다** (#297). Claude: init 메시지의
   `claude_code_version`(init은 질의마다 다시 오므로 바뀐 것만 보낸다). Codex: `initialize` 응답의 `userAgent`,
