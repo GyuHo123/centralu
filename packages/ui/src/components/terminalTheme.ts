@@ -82,6 +82,33 @@ export function followTheme(
       refit?.()
     }
   }
+  /*
+   * A code font that was still loading when the terminal opened (#731: the app waits for the bundled fonts before it
+   * draws, so this is a font picked later, or one that took longer than that wait). xterm measures its cell once, with
+   * whatever font is there, so when a face of the terminal's family finishes loading the cell is measured again: xterm
+   * measures only when the family changes, so it is set away and back. Only for a face of the terminal's own family,
+   * and once per face: measuring makes the engine resolve fonts, and in WebKit that can end in another `loadingdone`,
+   * which must not start the cycle again.
+   */
+  const fonts = typeof document === 'undefined' ? undefined : document.fonts
+  const measured = new Set<FontFace>()
+  const remeasure = (e: Event) => {
+    const family = term.options.fontFamily
+    if (!family) return
+    const names = family.split(',').map((n) => n.trim().replace(/^["']|["']$/g, '').toLowerCase())
+    const faces = ((e as FontFaceSetLoadEvent).fontfaces ?? []).filter(
+      (f) => !measured.has(f) && names.includes(f.family.replace(/^["']|["']$/g, '').toLowerCase()),
+    )
+    if (!faces.length) return
+    for (const f of faces) measured.add(f)
+    term.options.fontFamily = 'monospace'
+    term.options.fontFamily = family
+    refit?.()
+  }
   window.addEventListener('cc-themechange', update)
-  return () => window.removeEventListener('cc-themechange', update)
+  fonts?.addEventListener?.('loadingdone', remeasure)
+  return () => {
+    window.removeEventListener('cc-themechange', update)
+    fonts?.removeEventListener?.('loadingdone', remeasure)
+  }
 }

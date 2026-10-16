@@ -27,6 +27,17 @@ if (!rootElement) throw new Error('Root element #root not found')
 // The theme the last run chose, before anything is drawn — the preferences arrive a round trip later (theme.ts)
 applyCachedTheme()
 applyCachedTypography()
+/*
+ * The bundled fonts (#731) start loading now, and the app is drawn once they are in (below). Drawn before, the
+ * first layout would use the fallback's metrics and move when the fonts arrive: a conversation pinned to its
+ * bottom would end up above it (seen in CI, where the fonts load slower), and the code font would leave the
+ * first path or terminal blank for its load (font-display: block).
+ */
+const fontsReady = Promise.race([
+  Promise.all([document.fonts?.load('13px Pretendard'), document.fonts?.load('12px D2Coding')]).catch(() => {}),
+  // A font that cannot load must not keep the window blank: after this the app draws with the fallback
+  new Promise((resolve) => setTimeout(resolve, 3000)),
+])
 
 const params = new URLSearchParams(location.search)
 const demo = params.get('demo')
@@ -67,5 +78,6 @@ if (started.error) {
     await seedDemo(started.platform as never, isDemoScene(demo) ? demo : 'focus')
   }
 
+  await fontsReady
   root.render(<App platform={started.platform} />)
 }
