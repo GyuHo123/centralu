@@ -4,6 +4,7 @@ import type { UpdateStatus } from '@cc/protocol'
 import type { OrchestratorTools } from '../adapters/contract.js'
 import {
   AGENT_BUDGET_CHARS,
+  FILL,
   AGENT_TOOLS,
   APP_ACCESS_BUDGET_CHARS,
   APP_ACCESS_TOOLS,
@@ -16,12 +17,16 @@ import {
   READER_INSTRUCTIONS,
   READER_TOOLS,
   RESIDENT_BUDGET_CHARS,
+  TOOL_ARGS,
+  callForm,
   codexToolInstructionsFor,
   instructionsFor,
   orchestratorToolSchemas,
   profileAllows,
   runOrchestratorTool,
   setReaderInstructions,
+  toolDefsFor,
+  type RareTier,
 } from './orchestrator-tools.js'
 import { TOOL_PROFILES, definitionChars, residentCost, servedDefinitions } from './tool-cost.js'
 
@@ -125,6 +130,20 @@ describe('Centralu update tool', () => {
     const refused = async () => ({ ok: false, error: 'No update is installed to apply.' })
     const no = await runOrchestratorTool(toolsWith({ updateCentralu: refused }), 'update_centralu', { action: 'apply' }, { sessionId: 's', profile: 'reader' })
     expect(no).toEqual({ isError: true, text: 'Centralu update was not applied: No update is installed to apply.' })
+  })
+
+  it('names apply in the form the seat calls it: through centralu_run where it is a rare command (#850)', async () => {
+    const installed = async () => ({ ok: true, status: { current: '0.1.0', latest: '0.1.1', newer: true, auto: true, autoApply: false, phase: 'restart_required' as const, error: null, checkedAt: null } })
+    const install = { command: 'update_centralu', args: { action: 'install' } }
+    // The orchestrator reaches update_centralu only through centralu_run in the default tier: a bare name is refused
+    const orchestrator = await runOrchestratorTool(toolsWith({ updateCentralu: installed }), 'centralu_run', install, { sessionId: 'o', profile: 'orchestrator' })
+    expect(orchestrator.text).toContain('or centralu_run(command="update_centralu", args={action: "apply"}) does')
+    expect(orchestrator.text).not.toContain('update_centralu with action')
+    const reader = await runOrchestratorTool(toolsWith({ updateCentralu: installed }), 'update_centralu', { action: 'install' }, { sessionId: 's', profile: 'reader' })
+    expect(reader.text).toContain('or update_centralu(action="apply") does')
+    // The person has no tools to name
+    const person = await runOrchestratorTool(toolsWith({ updateCentralu: installed }), 'update_centralu', { action: 'install' })
+    expect(person.text).toBe('Centralu 0.1.1 is installed. The person applies the installed build from Centralu; their automatic-update setting was not changed.')
   })
 })
 
@@ -403,5 +422,112 @@ describe('the resident cost of each profile', () => {
     expect(residentCost('reader', EAGER_DEVELOPER).residentChars).toBe(sentChars(READER_TOOLS) + sentChars(DELEGATE_TOOLS) + sentChars(AGENT_TOOLS) + sentChars(APP_ACCESS_TOOLS))
     const loaded = [...READER_TOOLS, ...DELEGATE_TOOLS, ...AGENT_TOOLS, ...APP_ACCESS_TOOLS].filter((t) => !('deferred' in t && t.deferred))
     expect(residentCost('reader', DEFERRED_SERVER).residentChars).toBe(sentChars(loaded))
+  })
+})
+
+describe('callForm (#850)', () => {
+  it('writes the tool, centralu_run for a rare command in the commands tier, and nothing for a tool the seat lacks', () => {
+    const args = { sessionId: 'w-1', card: FILL, text: FILL } as const
+    expect(callForm('orchestrator', 'answer_question', args, 'commands')).toBe('centralu_run(command="answer_question", args={sessionId: "w-1", card: …, text: …})')
+    expect(callForm('orchestrator', 'answer_question', args, 'resident')).toBe('answer_question(sessionId="w-1", card=…, text=…)')
+    expect(callForm('orchestrator', 'answer_question', args, 'deferred')).toBe('answer_question(sessionId="w-1", card=…, text=…)')
+    expect(callForm('reader', 'read_session', { sessionId: 'w-1', around: 42 })).toBe('read_session(sessionId="w-1", around=42)')
+    expect(callForm('scoped', 'answer_question', args)).toBeUndefined()
+    expect(callForm('reader', 'handoff_session', { waitFor: 'h' })).toBeUndefined()
+    expect(callForm('human', 'read_session', {})).toBeUndefined()
+    expect(callForm(null, 'read_session', {})).toBeUndefined()
+  })
+})
+
+/** A schema as JSON schema without its words: what a field takes, not how it is described */
+function bare(schema: z.ZodType): { properties: Record<string, unknown>; required?: string[] } {
+  return JSON.parse(JSON.stringify(z.toJSONSchema(schema), (key, v: unknown) => (key === 'description' ? undefined : v)))
+}
+
+/** Arguments the runner reads otherwise than a seat is shown them, each on purpose and said in TOOL_ARGS */
+const READ_OTHERWISE = new Set(['app_guide.topic', 'ask_project.ifBusy', 'centralu_run.args'])
+
+describe('arguments (#850)', () => {
+  it('every tool a seat is shown has one schema to run by, and the keys it is shown are that schema\'s', () => {
+    for (const tier of ['resident', 'deferred', 'commands'] as RareTier[]) {
+      for (const profile of TOOL_PROFILES) {
+        for (const def of toolDefsFor(profile, tier)) {
+          const args = (TOOL_ARGS as Record<string, z.ZodObject<z.ZodRawShape>>)[def.name]
+          expect(args, `${profile}/${def.name}`).toBeDefined()
+          expect(Object.keys(args!.shape), `${profile}/${def.name}`).toEqual(expect.arrayContaining(Object.keys(def.schema.shape)))
+          // …of the same type, unless read otherwise on purpose (TOOL_ARGS says why), and never required where it is not shown required
+          const shown = bare(def.schema)
+          const runs = bare(args!)
+          for (const key of Object.keys(def.schema.shape)) {
+            if (READ_OTHERWISE.has(`${def.name}.${key}`)) continue
+            expect(runs.properties[key], `${profile}/${def.name}.${key}`).toEqual(shown.properties[key])
+          }
+          expect(shown.required ?? [], `${profile}/${def.name}`).toEqual(expect.arrayContaining(runs.required ?? []))
+        }
+      }
+    }
+  })
+
+  it('takes null, and a blank where the field refuses it, as left out, as a Codex model means it (#850 review)', async () => {
+    const tools = {
+      startAgent: vi.fn(async () => ({ ok: true, state: 'working', sessionId: 'c', sessionName: 'C', tool: 'codex', reported: true })),
+      agentSession: vi.fn(async () => ({ ok: true, state: 'working', sessionId: 'c', sessionName: 'C', tool: 'codex', reported: true })),
+      updateSessionSettings: vi.fn(async () => ({ ok: true })),
+      proposeSkill: vi.fn(async () => ({ ok: true })),
+    }
+    const run = (name: string, args: Record<string, unknown>, profile: 'orchestrator' | 'reader') =>
+      runOrchestratorTool(tools as unknown as OrchestratorTools, name, args, { sessionId: 'x', profile })
+    expect((await run('start_agent', { task: 'go', model: null, tool: null, difficulty: '', wait: null }, 'reader')).isError).toBeFalsy()
+    expect(tools.startAgent).toHaveBeenCalledWith({ task: 'go' }, undefined)
+    expect((await run('agent_session', { sessionId: 'c', action: 'wait', text: null, card: null, ifBusy: null }, 'reader')).isError).toBeFalsy()
+    expect(tools.agentSession).toHaveBeenCalledWith({ sessionId: 'c', action: 'wait' }, undefined)
+    expect((await run('centralu_commands', { query: null }, 'orchestrator')).text).toContain('- propose_skill:')
+    // null where the field takes it is kept: the tool's default model
+    await run('update_session_settings', { sessionId: 's', model: null }, 'orchestrator')
+    expect(tools.updateSessionSettings).toHaveBeenCalledWith('s', { model: null })
+    // centralu_run with no arguments object reads the command's own schema, not "args: Invalid input"
+    for (const args of [null, 'null']) {
+      const none = await run('centralu_run', { command: 'propose_skill', args }, 'orchestrator')
+      expect(none).toEqual({ isError: true, text: expect.stringMatching(/^Wrong arguments for propose_skill: name: /) })
+    }
+    expect((await run('centralu_run', { command: 'propose_skill', args: { name: 'weekly', content: 'Steps.', why: null } }, 'orchestrator')).isError).toBeFalsy()
+    expect(tools.proposeSkill).toHaveBeenCalledWith({ name: 'weekly', content: 'Steps.', why: undefined })
+    // A string for a boolean is not read as one: refused, as Claude's schema refuses it
+    expect(await run('start_agent', { task: 'go', wait: 'false' }, 'reader')).toEqual({ isError: true, text: expect.stringMatching(/^Wrong arguments for start_agent: wait: /) })
+  })
+
+  it('logs a centralu_run that fails on its own arguments as a wrong run', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await runOrchestratorTool({} as OrchestratorTools, 'centralu_run', { command: 'create_app', args: 5 }, { sessionId: 'o', profile: 'orchestrator' })
+      expect(log).toHaveBeenCalledWith('[commands] o centralu_run "create_app": wrong arguments')
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('refuses a wrong argument on the path no MCP schema checked (Codex\'s bridge) and runs nothing', async () => {
+    const tools = {
+      updateSessionSettings: vi.fn(async () => ({ ok: true })),
+      sendToSession: vi.fn(async () => ({ ok: true })),
+      createSession: vi.fn(async () => ({ ok: true, sessionId: 'n', name: 'New' })),
+      recall: vi.fn(async () => ({ hits: [] })),
+      agentSession: vi.fn(async () => ({ ok: true, state: 'working', sessionId: 'c', sessionName: 'C', tool: 'codex', reported: true })),
+    }
+    const orchestrator = { sessionId: 'o', profile: 'orchestrator' as const }
+    const run = (name: string, args: Record<string, unknown>, caller: { sessionId: string; profile: 'orchestrator' | 'reader' } = orchestrator) =>
+      runOrchestratorTool(tools as unknown as OrchestratorTools, name, args, caller)
+    // Each of these reached the manager before: a number as a model id, a busy choice that silently became none, a tool
+    // that silently became the project's default, a limit given as text
+    expect(await run('update_session_settings', { sessionId: 's', model: 42 })).toEqual({ isError: true, text: expect.stringMatching(/^Wrong arguments for update_session_settings: model: /) })
+    expect(await run('send_to_session', { sessionId: 's', text: 'go', ifBusy: 'later' })).toEqual({ isError: true, text: expect.stringMatching(/^Wrong arguments for send_to_session: ifBusy: /) })
+    expect(await run('create_session', { tool: 42 })).toEqual({ isError: true, text: expect.stringMatching(/^Wrong arguments for create_session: tool: /) })
+    expect(await run('recall', { query: 'parser', limit: '5' })).toEqual({ isError: true, text: expect.stringMatching(/^Wrong arguments for recall: limit: /) })
+    const reader = { sessionId: 'r', profile: 'reader' as const }
+    expect(await run('agent_session', { sessionId: 'c', action: 'send', text: 'go', ifBusy: 'later' }, reader)).toEqual({ isError: true, text: expect.stringMatching(/^Wrong arguments for agent_session: ifBusy: /) })
+    for (const f of Object.values(tools)) expect(f).not.toHaveBeenCalled()
+    // A right one runs, and an argument the tool does not take is dropped, as Claude's MCP drops it
+    expect((await run('send_to_session', { sessionId: 's', text: 'go', ifBusy: 'queue', extra: 1 })).isError).toBeFalsy()
+    expect(tools.sendToSession).toHaveBeenCalledWith('s', 'go', false, 'queue')
   })
 })

@@ -132,6 +132,14 @@ async function world(preset: 'normal' | 'auto' = 'normal') {
 const handoff = (orch: string, args: Record<string, unknown>) => mgr.runOrchestratorTool(orch, 'centralu_run', { command: 'handoff_session', args })
 
 describe('handoff_session (#694)', () => {
+  it('called by its bare name, as the bridge can, is refused with the call that runs it (#850)', async () => {
+    const { target, orch } = await world('auto')
+    await expect(mgr.runOrchestratorTool(orch, 'handoff_session', { sessionId: target })).rejects.toThrow(
+      'Not a tool of this session: handoff_session. It is one of this session\'s commands: centralu_run(command="handoff_session", args={…}) runs it',
+    )
+    expect(named('Long run')).toHaveLength(1)
+  })
+
   it('under auto: the note comes from the record, the successor takes the name and the instructions, and the original stays', async () => {
     const { target, orch } = await world('auto')
     const r = await handoff(orch, { sessionId: target, tool: 'codex', instructions: 'Finish the parser, then stop.' })
@@ -278,7 +286,8 @@ describe('handoff_session (#694)', () => {
     const { target, orch } = await world('auto')
     const first = await handoff(orch, { sessionId: target, mode: 'agent' })
     expect(first.text).toContain('is still running')
-    const handle = /waitFor "(ho-[^"]+)"/.exec(first.text)![1]!
+    // Named the way this seat calls it (#850): handoff_session is a rare command, reached through centralu_run
+    const handle = /Call centralu_run\(command="handoff_session", args=\{waitFor: "(ho-[^"]+)"\}\) to keep waiting/.exec(first.text)![1]!
     // Another call meanwhile does not start a second handoff
     const h = claude.handles.get(target)!
     expect(h.sent).toHaveLength(2)
