@@ -445,8 +445,25 @@ below retained for `safe` and `normal`:
    | A handoff moves a paused child with its report; the note says "paused on its own background work; its report comes when that work ends" | Not "finished; its report has not been delivered yet": the new session would wait for a report that is not late |
    | Only a turn the delegation's own wait saw end is judged: the delegation's outcome path reports only a wait that failed with no ending event, or one notes held (`tracksInputs`) | Judged again a microtask later, the pause could read as the end once the work had ended |
 
-   Not yet for a linked machine's session (`observeLinked`, `reportLinked`): its report still goes out at the first
-   turn end. Carrying the pause there needs the relayed `background_tasks` level and its own settle wait.
+   A linked machine's session the hub's orchestrator asked to hear about (`reportBack`) pauses the same way (#723,
+   `sessions/linked-reports.ts`). The hub keeps each linked session's task list for every session a machine relays,
+   so work started before the orchestrator asked is known: read whole from the machine's `sessions.list`
+   (`LinkedSessions.backgroundTasks`) each time its link comes up (`machine_resync`: the first link, after a drop, after
+   the hub's start), since a machine resends its work only when it changes, and then changed by the relayed
+   `background_tasks` (the same `applyBackgroundTasks`). A change relayed while that read is out is newer and kept. A
+   completed turn there with its own work running (timers left out) sends the paused notice once and keeps the linked
+   report (`LinkedReport.paused`); a later turn end with none of that work left sends the final report; the work ending
+   with no turn after it settles the report after `PAUSED_REPORT_SETTLE_MS`, saying how each task ended; a failed turn
+   is reported as it ended. The orchestrator has no `agent_session`, so the notice offers no stop, as for its own
+   sessions here; a new `send_to_session` to that session replaces the report, as before. While that send is out, the
+   session's events go to the new wait; a send that fails puts the paused report back and starts its settle wait again.
+   The machine's link dropping while the report is paused sends it at once, saying the link dropped before the work
+   ended and to read the session once it is back (the hub would not see the end), or as settled when the work had
+   already ended and only the settle wait was running. A dropped link forgets that machine's task lists until it is
+   back. A turn in progress keeps its wait across a drop, as before. A machine removed from Centralu reports every wait
+   on it, paused or mid-turn ("…was removed from Centralu before …, so its end will not be reported"), named as the hub
+   last knew the session. A session deleted there drops its report. Linked reports live in the hub's memory: a hub swap
+   drops them, as before.
 
    Codex lists child threads as background work, so a Codex parent thread that ends with a child thread running is
    paused the same way; a tool that cannot report its background work (`capabilities.backgroundTasks` off) never
@@ -2314,7 +2331,8 @@ session keep their own machine's view.
 
 **And directs them** (phase 4 step 2, plan §12.4). `send_to_session` goes to the machine as `host.send` (additive),
 delivered there as an instruction from `<orchestrator> on <this computer>`; with `reportBack`, `observeLinked` watches
-the machine's relayed events for the end of that turn and reports it as for a session here.
+the machine's relayed events for the end of that turn and reports it as for a session here, a turn that ends with the
+session's own background work running included (§1.2.1 step 7, #723).
 `update_session_settings` and `create_session` go through the router (`agents.updateSettings`,
 `agents.createSession`), a project found by name or qualified id on any reachable machine, a name two machines share
 refused with the ids. `create_project { machine }` raises the same card, naming the machine (`project_create`'s
