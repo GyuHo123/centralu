@@ -1,4 +1,4 @@
-import { BackgroundTask, HostReadSessionResult, HostRecallHit, HostSessionRow, SessionId, ToolName } from '@cc/protocol'
+import { BackgroundTask, HostReadSessionResult, HostRecallHit, HostSessionRow, oneLineText, SessionId, ToolName } from '@cc/protocol'
 import type { SessionInfo } from '@cc/protocol'
 import { NOT_REACHABLE, type LinkedProject, type LinkedSessions, type OrchestratedSession, type RecallHit } from '../adapters/contract.js'
 import { trustedJsonText } from '../sessions/orchestrator-tools.js'
@@ -28,19 +28,30 @@ const notRouted: RpcHandler = async (method) => {
 /** Long enough for any name a person or the auto-namer gives (60 characters plus a suffix), short enough to stay a label */
 const LABEL_MAX = 200
 
-/** What breaks a line, or is not text: the control characters, and the two separators a reader may take for a break */
-// eslint-disable-next-line no-control-regex
-const NOT_ONE_LINE = /[\u0000-\u001f\u007f\u2028\u2029]+/g
+/** What breaks a line, or is not text, as `oneLineText` reads it: control and format characters, and the line separators */
+const NOT_ONE_LINE = /[\p{Cc}\p{Cf}\u2028\u2029]/u
 
-/** One line of a machine's text: no line breaks or control characters, cut to a label's length */
+/** One line of a machine's text (`oneLineText`, #428), cut to a label's length */
 function oneLine(value: unknown, max = LABEL_MAX): string {
-  const text = String(value ?? '').replace(NOT_ONE_LINE, ' ').trim()
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text
+  return oneLineText(value, max)
+}
+
+/** The longest path a machine's answer is read with */
+const PATH_MAX = 4096
+
+/**
+ * A machine's path on one line, otherwise as the machine wrote it (#428): only what breaks a line goes (control
+ * characters, U+2028, U+2029). A path is not a label: its runs of spaces and its joiners (a ZWJ in a folder's emoji
+ * name) are part of the name, and `oneLineText` would show the orchestrator a folder that does not exist.
+ */
+function onePath(value: unknown): string {
+  const text = String(value ?? '').replace(/[\p{Cc}\u2028\u2029]+/gu, ' ')
+  return text.length > PATH_MAX ? `${text.slice(0, PATH_MAX)}…` : text
 }
 
 /** A machine's line of a conversation: kept when it is one line, as the machine's code makes it; quoted as one otherwise */
 function fencedLine(line: string): string {
-  return line.replace(NOT_ONE_LINE, '') === line ? line : trustedJsonText(line)
+  return NOT_ONE_LINE.test(line) ? trustedJsonText(line) : line
 }
 
 /**
@@ -100,7 +111,7 @@ export function linkedSessions(
     return {
       id: p.id,
       name: oneLine(p.name),
-      path: oneLine(p.path, 4096),
+      path: onePath(p.path),
       defaultTool: tool.data,
       machine: m.name,
       machineId: m.id,
@@ -287,7 +298,7 @@ export function linkedSessions(
       const r = await attempt(m, async () => ({ preview: (await route('projects.createPreview', { ...spec, machine: m.id })) as { path: string | null; error: string | null } }))
       if (!r.ok) return r
       if (r.preview.error || !r.preview.path) return { ok: false, error: oneLine(r.preview.error ?? 'Give a name for the folder', 300) }
-      const path = oneLine(r.preview.path, 4096)
+      const path = onePath(r.preview.path)
       // A clone named by its repository: the folder the machine would make names it
       return { ok: true, name: spec.name.trim() || (path.split(/[\\/]/).pop() ?? path), path }
     },
@@ -297,7 +308,7 @@ export function linkedSessions(
       if (!m) return { ok: false, error: `No linked machine ${machineId}` }
       return attempt(m, async () => {
         const p = (await route('projects.create', { ...spec, machine: m.id })) as { id: string; name: string; path: string }
-        return { projectId: p.id, name: oneLine(p.name), path: oneLine(p.path, 4096) }
+        return { projectId: p.id, name: oneLine(p.name), path: onePath(p.path) }
       })
     },
 

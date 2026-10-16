@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { builderErrorFrame, builderRequestFrame, frameField, type BuilderRequestFacts } from './app-frames.js'
+import { builderErrorFrame, builderRequestFrame, frameField, oneLineText, type BuilderRequestFacts } from './app-frames.js'
 
 const base: BuilderRequestFacts = { app: { appId: 'notes', name: 'Team notes' }, screen: null, stopped: null, latestRun: null }
 
@@ -8,6 +8,16 @@ describe("frameField — the frame's one-line field (#120)", () => {
     expect(frameField(' a\nb\r\n\tc\u200bd ')).toBe('a b c d')
     expect(frameField('x'.repeat(121))).toBe(`${'x'.repeat(120)}…`)
     expect(frameField('x'.repeat(120))).toBe('x'.repeat(120))
+  })
+
+  it('takes the line and paragraph separators, NEL and bidi controls too, as oneLineText does (#428)', () => {
+    expect(frameField('a\u2028b\u2029c\u0085d\u202Ee\u2066f')).toBe('a b c d e f')
+    expect(oneLineText(' a \t\u00a0 b ')).toBe('a b')
+    expect(oneLineText('abcdef', 3)).toBe('abc…')
+    expect(oneLineText(undefined)).toBe('')
+    // Hidden text in tag characters goes; the joiners a name is written with stay
+    expect(oneLineText('ok\u{e0049}\u{e0067}x')).toBe('ok x')
+    expect(oneLineText('👩\u200d💻 \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 co\u00adop')).toBe('👩\u200d💻 \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 co\u00adop')
   })
 })
 
