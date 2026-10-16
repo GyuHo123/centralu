@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
 import type { ProjectConsent } from '@cc/protocol'
 import { useStore } from '../../store/store.js'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
-import { formatDay } from '../../app/format.js'
+import { useLoad } from '../../app/useLoad.js'
+import { GrantList } from './GrantList.jsx'
 
 const KIND_LABEL: Record<ProjectConsent['kind'], string> = {
   delegate: 'may ask',
@@ -22,23 +22,9 @@ const KIND_LABEL: Record<ProjectConsent['kind'], string> = {
 export function ProjectConsentsSection() {
   const platform = usePlatform()
   const version = useStore((s) => s.projectConsentsVersion)
-  const [list, setList] = useState<ProjectConsent[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let live = true
-    platform.consents
-      .list()
-      .then((l) => live && setList(l))
-      .catch((e: unknown) => {
-        if (!live) return
-        setList([])
-        setError((e as Error).message || 'Could not read the list')
-      })
-    return () => {
-      live = false
-    }
-  }, [platform, version])
+  // Read again whenever a consent is given or revoked elsewhere (`projectConsentsVersion`)
+  const read = useLoad(() => platform.consents.list(), [platform], [version])
+  const keyOf = (c: ProjectConsent) => `${c.fromProjectId}>${c.toProjectId}>${c.kind}`
 
   return (
     <section className="mt-6 border-t border-line pt-4" data-testid="project-consents">
@@ -47,45 +33,32 @@ export function ProjectConsentsSection() {
         When a session asks another project for something, Centralu asks you first. Each pair you allowed always is
         listed here; revoke it and the next request asks again.
       </p>
-      {error && <p className="mt-2 text-sm text-ink-faint">{error}</p>}
-      {list === null ? (
-        <p className="mt-2 text-sm text-ink-faint">Loading…</p>
-      ) : list.length === 0 ? (
-        <p className="mt-2 text-sm text-ink-faint" data-testid="project-consents-empty">
-          No project may reach another yet
-        </p>
-      ) : (
-        <ul className="mt-2 divide-y divide-line/60 rounded-md border border-line" data-testid="project-consents-list">
-          {list.map((c) => {
-            const key = `${c.fromProjectId}>${c.toProjectId}>${c.kind}`
-            return (
-              <li key={key} className="flex items-center gap-2 px-2.5 py-1.5" data-testid={`project-consent-${key}`}>
-                <span className="min-w-0 truncate text-sm text-ink">
-                  {c.fromName} <span className="text-ink-faint">{KIND_LABEL[c.kind]}</span>
-                  {c.kind === 'agents' ? null : ` ${c.toName}`}
-                </span>
-                <span className="readout ml-auto shrink-0 text-2xs text-ink-faint">
-                  {formatDay(c.decidedAt)}
-                </span>
-                <button
-                  className="shrink-0 text-xs text-ink-faint hover:text-ink"
-                  data-testid={`revoke-consent-${key}`}
-                  onClick={async () => {
-                    try {
-                      await platform.consents.revoke(c.fromProjectId, c.toProjectId, c.kind)
-                      setList((l) => (l ?? []).filter((x) => x !== c))
-                    } catch (e) {
-                      setError((e as Error).message || 'Could not revoke it')
-                    }
-                  }}
-                >
-                  Revoke
-                </button>
-              </li>
-            )
-          })}
-        </ul>
-      )}
+      <GrantList
+        load={read}
+        keyOf={keyOf}
+        row={(c) => (
+          <span className="min-w-0 truncate text-sm text-ink">
+            {c.fromName} <span className="text-ink-faint">{KIND_LABEL[c.kind]}</span>
+            {c.kind === 'agents' ? null : ` ${c.toName}`}
+          </span>
+        )}
+        dateOf={(c) => c.decidedAt}
+        action={{
+          label: 'Revoke',
+          failed: 'Could not revoke it',
+          testId: (c) => `revoke-consent-${keyOf(c)}`,
+          run: (c) => platform.consents.revoke(c.fromProjectId, c.toProjectId, c.kind),
+        }}
+        what="the list"
+        empty="No project may reach another yet"
+        testIds={{
+          list: 'project-consents-list',
+          empty: 'project-consents-empty',
+          failed: 'project-consents-failed',
+          error: 'project-consents-error',
+          row: (c) => `project-consent-${keyOf(c)}`,
+        }}
+      />
     </section>
   )
 }

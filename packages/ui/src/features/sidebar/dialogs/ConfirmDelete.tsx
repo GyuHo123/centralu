@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { ToolName } from '@cc/protocol'
 import { usePlatform } from '../../../app/PlatformProvider.jsx'
 import { useToolMeta } from '../../../store/selectors.js'
 import { Modal } from '../../../components/Modal.jsx'
+import { formatChangedCount } from '../../../app/format.js'
+import { useLoad } from '../../../app/useLoad.js'
 
 /**
  * Delete confirmation.
@@ -47,20 +49,9 @@ export function ConfirmDelete({
    * moment the dialog opens.** The session list only holds the path, not whether it is dirty —
    * that is a fact only the filesystem can answer.
    */
-  const [wt, setWt] = useState<{ path: string; branch: string; dirty: boolean; changedFiles: number } | null>(
-    null,
-  )
+  // Unknown until the host answers, and when it cannot: the dialog then says nothing about a worktree
+  const wt = useLoad(() => platform.agents.worktreeStatus(sessionId), [platform, sessionId]).data ?? null
   const [deleteWorktree, setDeleteWorktree] = useState(false)
-  useEffect(() => {
-    let alive = true
-    void platform.agents
-      .worktreeStatus(sessionId)
-      .then((r) => alive && setWt(r))
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [platform, sessionId])
   return (
     <Modal onClose={onCancel} testId="confirm-delete">
       <div className="w-[380px] max-w-[calc(90vw/var(--text-zoom))] rounded-lg border border-line bg-surface-side p-4 shadow-(--shadow-modal)">
@@ -113,8 +104,10 @@ export function ConfirmDelete({
             <p className="mt-1 text-xs text-ink-faint">It stays where it is while the session is in the trash.</p>
             {wt.dirty && (
               <p className="mt-1 text-xs text-ink" data-testid="worktree-dirty">
-                {wt.changedFiles} uncommitted {wt.changedFiles === 1 ? 'change' : 'changes'} would be lost once it is
-                deleted.
+                {wt.unknown
+                  ? // git did not answer: not known to be clean is not clean (#850 review)
+                    'Its changes could not be counted. Uncommitted work in it would be lost once it is deleted.'
+                  : `${formatChangedCount(wt.changedFiles, wt.more)} uncommitted ${wt.changedFiles === 1 && !wt.more ? 'change' : 'changes'} would be lost once it is deleted.`}
               </p>
             )}
             <label className="mt-1.5 flex cursor-pointer items-start gap-2 text-xs text-ink-muted hover:text-ink">

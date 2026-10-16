@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useDismiss } from '../../components/useDismiss.js'
 import { ChevronIcon } from '../../components/icons.jsx'
 import type { ModelOption, PermissionPreset, ToolName } from '@cc/protocol'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
+import { useLoad } from '../../app/useLoad.js'
 import { useStore } from '../../store/store.js'
 
 /**
@@ -44,7 +45,6 @@ export function useModels(
   machine: string | null = null,
 ): { models: ModelOption[]; reason?: string } {
   const platform = usePlatform()
-  const [state, setState] = useState<{ models: ModelOption[]; reason?: string }>({ models: [] })
 
   /*
    * Why `live` is a dependency:
@@ -55,34 +55,35 @@ export function useModels(
    * re-fetched, the selector was permanently left with only "Default" (found in dogfooding).
    * This re-fetches the moment the session wakes up.
    */
-  useEffect(() => {
-    let alive = true
-    /*
-     * **Clears the list first** (dogfooding on 2026-09-09: "this is a Claude session, but Codex
-     * models are showing").
-     *
-     * The list is the tool's own vocabulary — 'sonnet' and 'gpt-5.6-sol' are words in each
-     * other's dictionary that do not exist, so showing another tool's list even briefly offers
-     * something the screen cannot actually pick. This used to leave **the previous tool's list
-     * sitting there** until a new response came back: switching from viewing a Codex session to
-     * opening a Claude session's menu could still show Codex models for a moment, and because
-     * Claude only returns its list once a session is alive (while it is waking up), that window
-     * could stretch for whole seconds.
-     */
-    setState({ models: [] })
-    void platform.agents
-      .models(tool, machine)
-      .then((r) => alive && setState({ models: r.models, reason: r.supported ? undefined : r.reason }))
-      // The session must stay usable even if the list cannot be read — this falls back to the
-      // default and only keeps the reason
-      .catch((e: Error) => alive && setState({ models: [], reason: e.message }))
-    return () => {
-      alive = false
-    }
-  }, [platform, tool, live, machine])
-
-  return state
+  /*
+   * **Clears the list first** (dogfooding on 2026-09-09: "this is a Claude session, but Codex
+   * models are showing").
+   *
+   * The list is the tool's own vocabulary — 'sonnet' and 'gpt-5.6-sol' are words in each
+   * other's dictionary that do not exist, so showing another tool's list even briefly offers
+   * something the screen cannot actually pick. This used to leave **the previous tool's list
+   * sitting there** until a new response came back: switching from viewing a Codex session to
+   * opening a Claude session's menu could still show Codex models for a moment, and because
+   * Claude only returns its list once a session is alive (while it is waking up), that window
+   * could stretch for whole seconds.
+   */
+  // (`useLoad`: the tool and the machine are the subject, so a change clears the list; waking is a refresh of the same
+  // tool's list, which may stay until the new one arrives)
+  const read = useLoad(() => platform.agents.models(tool, machine), [platform, tool, machine], [live])
+  return useMemo(() => {
+    // The session must stay usable even if the list cannot be read — this falls back to the
+    // default and only keeps the reason
+    if (read.error !== null) return { models: read.data?.models ?? [], reason: read.error }
+    if (!read.data) return NO_MODELS
+    return { models: read.data.models, reason: read.data.supported ? undefined : read.data.reason }
+  }, [read.data, read.error])
 }
+
+/** No list yet: the same object each render */
+const NO_MODELS: { models: ModelOption[]; reason?: string } = { models: [] }
+
+/** The same empty list each render, so a menu reading it does not see a new one every time */
+const NO_LEVELS: string[] = []
 
 /**
  * The response-length levels for this tool (#54). If empty, the tool has no such knob, so the
@@ -95,19 +96,8 @@ export function useModels(
  */
 export function useVerbosities(tool: ToolName, machine: string | null = null): string[] {
   const platform = usePlatform()
-  const [levels, setLevels] = useState<string[]>([])
-  useEffect(() => {
-    let alive = true
-    void platform.agents
-      .capabilities(tool, machine)
-      .then((c) => alive && setLevels(c.verbosities))
-      // The menu must still render even if capabilities cannot be read — it just loses one row
-      .catch(() => alive && setLevels([]))
-    return () => {
-      alive = false
-    }
-  }, [platform, tool, machine])
-  return levels
+  // The menu must still render even if capabilities cannot be read — it just loses one row
+  return useLoad(() => platform.agents.capabilities(tool, machine), [platform, tool, machine]).data?.verbosities ?? NO_LEVELS
 }
 
 /**

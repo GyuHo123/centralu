@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { changedFileCount } from '@cc/protocol'
 import { join } from 'node:path'
-import { GIT_DIFF_MAX_CHARS, gitBranches, gitCheckout, gitCommit, gitCommitDetail, gitDiff, gitStage, gitStatusFiles, gitSummary } from './git.js'
+import { GIT_DIFF_MAX_CHARS, gitWorktreeDirty, gitBranches, gitCheckout, gitCommit, gitCommitDetail, gitDiff, gitStage, gitStatusFiles, gitSummary } from './git.js'
 
 /**
  * porcelain v2 parsing is checked against real git output — a hand-written string could
@@ -117,6 +118,183 @@ describe('gitStatusFiles — porcelain v2', () => {
 
     const files = await gitStatusFiles(d)
     expect(files).toEqual([{ path: 'a.txt', staged: false, status: 'M' }])
+  })
+})
+
+/**
+ * A fake git on PATH that answers `status` with `script` and passes every other call to the real one (POSIX only:
+ * on Windows the host spawns git by its absolute path).
+ */
+function fakeStatus(script: string): () => void {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-git-status-'))
+  dirs.push(dir)
+  const real = execFileSync('sh', ['-c', 'command -v git']).toString().trim()
+  writeFileSync(join(dir, 'git'), `#!/bin/sh\nfor a in "$@"; do if [ "$a" = status ]; then ${script}; fi; done\nexec "${real}" "$@"\n`)
+  chmodSync(join(dir, 'git'), 0o755)
+  const previous = process.env.PATH
+  process.env.PATH = `${dir}:${previous ?? ''}`
+  return () => {
+    process.env.PATH = previous
+  }
+}
+
+describe('the change summary on a large or slow tree (#850 review of item 10)', () => {
+  const posix = process.platform !== 'win32'
+
+  it.skipIf(!posix)('counts an endless list of untracked files up to its cap, still a repository', async () => {
+    const { d, git } = repo()
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    // More than the 32 MB a buffered read holds: it used to overflow and read as "not a repository"
+    const restore = fakeStatus(
+      `printf '# branch.oid 0\\0# branch.head main\\0'; i=0; while :; do printf '? new/%s-%0200d\\0' $i 0; i=$((i+1)); done`,
+    )
+    try {
+      const summary = await gitSummary(d, { trusted: true }, { cap: 1000 })
+      expect(summary).toEqual({ isRepo: true, branch: 'main', changedFiles: 1000, more: true })
+    } finally {
+      restore()
+    }
+  }, 60_000)
+
+  it.skipIf(!posix)('a status that does not answer in time is unknown, not "not a repository"', async () => {
+    const { d, git } = repo()
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    const restore = fakeStatus('exec sleep 30')
+    try {
+      const summary = await gitSummary(d, { trusted: true }, { timeoutMs: 500 })
+      expect(summary.isRepo).toBe(true)
+      expect(summary.unknown).toBe(true)
+      // A worktree whose count is unknown is not called clean: removal asks first
+      expect((await gitWorktreeDirty(d, { trusted: true }, { timeoutMs: 500 })).dirty).toBe(true)
+    } finally {
+      restore()
+    }
+  }, 30_000)
+
+  it('stops at the cap with real git, and says there is more', async () => {
+    const { d } = repo()
+    mkdirSync(join(d, 'many'))
+    for (let i = 0; i < 30; i++) writeFileSync(join(d, 'many', `f${i}.ts`), '')
+    expect(await gitSummary(d, {}, { cap: 10 })).toMatchObject({ isRepo: true, changedFiles: 10, more: true })
+    expect((await gitSummary(d, {}, { cap: 30 })).more).toBeUndefined()
+  })
+
+  it.skipIf(!posix)('reads git in English: a translated "not a git repository" is still no repository', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'cc-not-git-'))
+    dirs.push(d)
+    // What git prints under a Korean locale, and the English it prints under C
+    const restore = fakeStatus(
+      `if [ "$LC_ALL" = C ]; then echo 'fatal: not a git repository (or any of the parent directories): .git' >&2; else echo 'fatal: 깃 저장소가 아닙니다' >&2; fi; exit 128`,
+    )
+    const previous = process.env.LC_ALL
+    process.env.LC_ALL = 'ko_KR.UTF-8'
+    try {
+      expect(await gitSummary(d, { trusted: true })).toEqual({ isRepo: false, branch: '', changedFiles: 0 })
+    } finally {
+      if (previous === undefined) delete process.env.LC_ALL
+      else process.env.LC_ALL = previous
+      restore()
+    }
+  })
+
+  it.skipIf(!posix)('takes no optional lock: the agent\'s own git add or commit is not refused for index.lock', async () => {
+    const { d, git } = repo()
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    const seen = join(d, '..', `${d.split('/').pop()}-env`)
+    dirs.push(seen)
+    const restore = fakeStatus(`echo "$GIT_OPTIONAL_LOCKS" > '${seen}'; printf '# branch.head main\\0'; exit 0`)
+    try {
+      await gitSummary(d, { trusted: true })
+      expect(readFileSync(seen, 'utf8').trim()).toBe('0')
+    } finally {
+      restore()
+    }
+  })
+
+  it.skipIf(!posix)('ends when git ends, even if a process git started still holds its output', async () => {
+    const { d, git } = repo()
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    // A hook or filter left running with git's stdout: the pipe stays open after git exits
+    const restore = fakeStatus(`sleep 20 & printf '# branch.head main\\0? a.ts\\0'; exit 0`)
+    try {
+      expect(await gitSummary(d, { trusted: true })).toEqual({ isRepo: true, branch: 'main', changedFiles: 1 })
+    } finally {
+      restore()
+    }
+  }, 10_000)
+
+  it.skipIf(!posix)('ends when it stops git at the cap, even if a process git started still holds its output', async () => {
+    const { d, git } = repo()
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    const restore = fakeStatus(`sleep 20 & printf '# branch.head main\\0'; i=0; while :; do printf '? new/%s\\0' $i; i=$((i+1)); done`)
+    try {
+      expect(await gitSummary(d, { trusted: true }, { cap: 10 })).toEqual({ isRepo: true, branch: 'main', changedFiles: 10, more: true })
+    } finally {
+      restore()
+    }
+  }, 10_000)
+
+  it.skipIf(!posix)('reads a path whose character is cut between two chunks of git\'s output as one path', async () => {
+    const { d, git } = repo()
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    // 가 is EA B0 80: the first write ends inside it. The same path then arrives whole
+    const restore = fakeStatus(`printf '# branch.head main\\0? \\352\\260'; sleep 0.3; printf '\\200.ts\\0? \\352\\260\\200.ts\\0'; exit 0`)
+    try {
+      expect(await gitSummary(d, { trusted: true })).toEqual({ isRepo: true, branch: 'main', changedFiles: 1 })
+    } finally {
+      restore()
+    }
+  })
+
+  it.skipIf(!posix)('does not call a worktree the system denied clean', async () => {
+    const { d, git } = repo()
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    const restore = fakeStatus(`echo 'fatal: cannot open .git/index: Operation not permitted' >&2; exit 128`)
+    try {
+      expect((await gitSummary(d, { trusted: true })).denied).toBe(true)
+      expect((await gitWorktreeDirty(d, { trusted: true })).dirty).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  it('is still "not a repository" for a folder that is not one', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'cc-not-git-'))
+    dirs.push(d)
+    expect(await gitSummary(d)).toMatchObject({ isRepo: false, changedFiles: 0 })
+  })
+
+  it('counts a file staged for removal and still on disk once, as the panel does', async () => {
+    const { d, git } = repo()
+    writeFileSync(join(d, 'a.ts'), 'a\n')
+    git('add', '.')
+    git('commit', '-qm', 'init')
+    // `1 D.` for the index and `? a.ts` for the file still there: one file
+    git('rm', '-q', '--cached', 'a.ts')
+    expect(changedFileCount(await gitStatusFiles(d))).toBe(1)
+    expect((await gitSummary(d)).changedFiles).toBe(1)
+  })
+})
+
+describe('the changed-file count (#850 item 10)', () => {
+  it('is the panel list counted by path: a partly staged file once, each file of a new folder', async () => {
+    const { d, git } = repo()
+    writeFileSync(join(d, 'a.ts'), 'one\n')
+    git('add', '.')
+    git('commit', '-qm', 'init')
+    // Staged, then changed again: under Staged and under Changes
+    writeFileSync(join(d, 'a.ts'), 'two\n')
+    git('add', 'a.ts')
+    writeFileSync(join(d, 'a.ts'), 'three\n')
+    // A new folder: git's default lists the folder, the panel lists its files
+    mkdirSync(join(d, 'new'))
+    writeFileSync(join(d, 'new', 'x.ts'), 'x\n')
+    writeFileSync(join(d, 'new', 'y.ts'), 'y\n')
+
+    const files = await gitStatusFiles(d)
+    expect(files).toHaveLength(4)
+    expect(changedFileCount(files)).toBe(3)
+    expect((await gitSummary(d)).changedFiles).toBe(3)
   })
 })
 

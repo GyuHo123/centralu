@@ -3,12 +3,13 @@ import { open } from 'node:fs/promises'
 import { devNull } from 'node:os'
 import { promisify } from 'node:util'
 import { programPath } from '../tool-launch.js'
+import { killTree } from './kill-tree.js'
 
 const exec = promisify(execFile)
 
 /**
- * The one place the host starts git (#407). Every git call goes through `runGit`; a test fails
- * if a source file under `src/` starts git any other way (`git-exec.test.ts`).
+ * The one place the host starts git (#407). Every git call goes through `runGit` (or `streamGit`, for an answer read
+ * as it arrives); a test fails if a source file under `src/` starts git any other way (`git-exec.test.ts`).
  *
  * **Before a project is trusted, git may not run anything the repository chose.** A folder
  * copied from somewhere (a zip, a shared drive) carries its own `.git/config` and `.git/hooks`,
@@ -231,4 +232,101 @@ export async function runGit(cwd: string, args: string[], opts: RunGitOptions = 
   }
   const { stdout } = await run
   return stdout
+}
+
+/** Why a streamed read ended without git's own answer: it ran past its time, or the caller stopped it */
+export type StreamGitEnd = 'done' | 'stopped'
+
+/** How long a streamed read waits, once git has exited, for a process git started to let go of its output */
+const STREAM_CLOSE_GRACE_MS = 1000
+
+/**
+ * Runs git and hands its stdout over as it arrives, holding none of it (#850 review of item 10). `onEntry` receives
+ * each NUL-terminated entry as bytes, split on 0x00 before any decoding, so a character cut between two chunks of
+ * the pipe stays whole; it returns true to stop: git is ended and the read settles as `'stopped'`. For an answer of
+ * unknown size read once in `-z` form, such as a status count, where a buffered read (`runGit`) would overflow its
+ * `maxBuffer` on a large tree. A last entry without its NUL is handed over at the end.
+ *
+ * - **In English, without optional locks.** `LC_ALL=C` (and `LANGUAGE`) so git's own messages, which the caller
+ *   reads to tell "not a repository" from a failure, are not translated (Git for Windows and WSL follow the locale);
+ *   `GIT_OPTIONAL_LOCKS=0`, the environment form of `--no-optional-locks`, so a read after every turn does not hold
+ *   `index.lock` against the agent's own `git add`. (The flag itself would stand before the subcommand, where
+ *   `gitArgv` reads the subcommand.)
+ * - **It ends when git ends.** A stop or a timeout ends git's whole tree (`killTree`: a hook or filter git started
+ *   holds the same stdout, and on Windows `kill()` reaches git.exe alone). After git exits, the read waits at most
+ *   `STREAM_CLOSE_GRACE_MS` for its output to close, then lets go of the pipes: a process git started can keep them
+ *   open for as long as it runs.
+ *
+ * Rejects with git's stderr (bounded, decoded once at the end) and exit code when git fails, and with
+ * `{ timedOut: true }` when it does not answer within `timeout`.
+ */
+export async function streamGit(
+  cwd: string,
+  args: string[],
+  onEntry: (entry: Buffer) => boolean,
+  opts: Pick<RunGitOptions, 'allowRepoPrograms' | 'timeout' | 'filters'> = {},
+): Promise<StreamGitEnd> {
+  const argv = await gitArgv(cwd, args, opts.allowRepoPrograms, opts.filters)
+  return new Promise<StreamGitEnd>((resolve, reject) => {
+    const child = spawn(programPath('git'), argv, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C', LANGUAGE: 'C', GIT_OPTIONAL_LOCKS: '0' },
+    })
+    let ended: StreamGitEnd | 'timedOut' | null = null
+    let settled = false
+    const end = (why: StreamGitEnd | 'timedOut') => {
+      if (ended) return
+      ended = why
+      killTree({ pid: child.pid, kill: (signal) => void child.kill(signal as NodeJS.Signals | undefined) }, 'SIGKILL')
+      // git itself as well: off Windows it shares the host's process group, which the tree kill spares
+      child.kill('SIGKILL')
+    }
+    const timer = setTimeout(() => end('timedOut'), opts.timeout ?? DEFAULTS.timeout)
+    const stderr: Buffer[] = []
+    let stderrBytes = 0
+    child.stderr!.on('data', (chunk: Buffer) => {
+      if (stderrBytes >= 64 * 1024) return
+      stderr.push(chunk)
+      stderrBytes += chunk.length
+    })
+    let rest: Buffer = Buffer.alloc(0)
+    const give = (entry: Buffer) => {
+      if (!ended && onEntry(entry)) end('stopped')
+    }
+    child.stdout!.on('data', (chunk: Buffer) => {
+      if (ended) return
+      let buf = rest.length > 0 ? Buffer.concat([rest, chunk]) : chunk
+      for (let nul = buf.indexOf(0); nul >= 0 && !ended; nul = buf.indexOf(0)) {
+        give(buf.subarray(0, nul))
+        buf = buf.subarray(nul + 1)
+      }
+      rest = ended ? Buffer.alloc(0) : Buffer.from(buf)
+    })
+    const settle = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.stdout!.destroy()
+      child.stderr!.destroy()
+      const message = Buffer.concat(stderr).toString('utf8')
+      if (ended === 'stopped') return resolve('stopped')
+      if (ended === 'timedOut') return reject(Object.assign(new Error('git did not answer in time'), { timedOut: true, stderr: message }))
+      // The last entry, when git ended its answer without a NUL. git has exited: nothing is left to stop
+      if (code === 0) return resolve(rest.length > 0 && onEntry(rest) ? 'stopped' : 'done')
+      reject(Object.assign(new Error(message || `Git exited with ${code ?? signal}`), { code, stderr: message }))
+    }
+    child.on('error', (e) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(e)
+    })
+    // `close` once every holder of git's output has let go; after git's `exit`, a short grace for that
+    child.on('close', (code, signal) => settle(code, signal))
+    child.on('exit', (code, signal) => {
+      const grace = setTimeout(() => settle(code, signal), STREAM_CLOSE_GRACE_MS)
+      grace.unref?.()
+    })
+  })
 }

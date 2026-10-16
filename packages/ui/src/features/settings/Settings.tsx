@@ -3,11 +3,11 @@ import type { SessionInfo, ToolName, ToolStatus } from '@cc/protocol'
 import { DEFAULT_NOTIFY_POLICY, appKeyOf, explainGridSpan, type NotifyPolicy } from '@cc/core'
 import { useStore } from '../../store/store.js'
 import { usePlatform } from '../../app/PlatformProvider.jsx'
-import { formatDay } from '../../app/format.js'
 import { useMachineName, useTools } from '../../store/selectors.js'
 import { useNavShortcut, useShortcut } from '../../app/shortcut.js'
 import { isPlainEscape } from '../../app/keys.js'
 import { Kbd } from '../../components/primitives.jsx'
+import { useLoad } from '../../app/useLoad.js'
 import { InlineConfirm } from '../../components/InlineConfirm.jsx'
 import { Modal } from '../../components/Modal.jsx'
 import { useFocusReturn } from '../../components/focusReturn.js'
@@ -16,6 +16,8 @@ import { AppSecrets, missingSecrets } from '../pinned-app/AppSecrets.jsx'
 import { SpanButton } from '../../components/SpanPicker.jsx'
 import { TrashSection } from './TrashSection.jsx'
 import { ProjectConsentsSection } from './ProjectConsentsSection.jsx'
+import { SettingToggle } from './SettingToggle.jsx'
+import { GrantList } from './GrantList.jsx'
 import { ThemeSection } from './ThemeSection.jsx'
 import { TypographySection } from './TypographySection.jsx'
 import { AgentCliUpdates, UpdatesSection } from './UpdatesSection.jsx'
@@ -180,7 +182,6 @@ export function Settings() {
   const platform = usePlatform()
   const sc = useShortcut()
   const nav = useNavShortcut()
-  const [rules, setRules] = useState<Rule[] | null>(null)
   const [category, setCategory] = useState<Category>('notifications')
   // Another screen asked for a category (a machine's badge in the sidebar opens Machines, #82, #734)
   const request = useStore((s) => s.settingsRequest)
@@ -189,16 +190,8 @@ export function Settings() {
     if (asked) setCategory(asked.id)
   }, [request])
 
-  const loadRules = useCallback(() => {
-    void platform.rules
-      .list()
-      .then(setRules)
-      .catch(() => setRules([]))
-  }, [platform])
-
-  useEffect(() => {
-    if (open) loadRules()
-  }, [open, loadRules])
+  // Read each time settings open. A failed read says so: it used to be drawn as "No saved rules" (#850 item 8)
+  const rules = useLoad(() => (open ? platform.rules.list() : null), [open, platform])
 
   useEffect(() => {
     if (!open) return
@@ -279,16 +272,12 @@ export function Settings() {
                     ] as [keyof NotifyPolicy, string][]
                   ).map(([key, label]) => (
                     <li key={key}>
-                      <label className="flex items-center gap-2 text-sm text-ink-muted">
-                        <input
-                          type="checkbox"
-                          className="accent-line-strong"
-                          checked={policy[key]}
-                          onChange={(e) => setPolicy({ ...policy, [key]: e.target.checked })}
-                          data-testid={`notify-${key}`}
-                        />
-                        {label}
-                      </label>
+                      <SettingToggle
+                        checked={policy[key]}
+                        onChange={(on) => setPolicy({ ...policy, [key]: on })}
+                        label={label}
+                        testId={`notify-${key}`}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -321,38 +310,24 @@ export function Settings() {
                   Pressing <Kbd>a</Kbd> on an approval adds an always-allow rule here. Delete any of them
                   anytime.
                 </p>
-                {rules === null ? (
-                  <p className="mt-2 text-sm text-ink-faint">Loading…</p>
-                ) : rules.length === 0 ? (
-                  <p className="mt-2 text-sm text-ink-faint" data-testid="rules-empty">
-                    No saved rules
-                  </p>
-                ) : (
-                  <ul className="mt-2 divide-y divide-line/60 rounded-md border border-line" data-testid="rules-list">
-                    {rules.map((r) => (
-                      <li key={r.id} className="flex items-center gap-2 px-2.5 py-1.5">
-                        <code className="truncate font-mono text-sm text-ink">{r.matcher}</code>
-                        <span className="shrink-0 text-2xs text-ink-faint">
-                          {r.scope === 'project' ? 'Project' : 'Session'}
-                        </span>
-                        <RuleOwner rule={r} />
-                        <span className="readout ml-auto shrink-0 text-2xs text-ink-faint">
-                          {formatDay(r.createdAt)}
-                        </span>
-                        <button
-                          className="shrink-0 text-xs text-ink-faint hover:text-ink"
-                          data-testid={`delete-rule-${r.id}`}
-                          onClick={async () => {
-                            await platform.rules.remove(r.id)
-                            loadRules()
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                <GrantList
+                  load={rules}
+                  keyOf={(r) => String(r.id)}
+                  row={(r) => (
+                    <>
+                      <code className="truncate font-mono text-sm text-ink">{r.matcher}</code>
+                      <span className="shrink-0 text-2xs text-ink-faint">
+                        {r.scope === 'project' ? 'Project' : 'Session'}
+                      </span>
+                      <RuleOwner rule={r} />
+                    </>
+                  )}
+                  dateOf={(r) => r.createdAt}
+                  action={{ label: 'Delete', failed: 'Could not delete it', testId: (r) => `delete-rule-${r.id}`, run: (r) => platform.rules.remove(r.id) }}
+                  what="the rules"
+                  empty="No saved rules"
+                  testIds={{ list: 'rules-list', empty: 'rules-empty', failed: 'rules-failed', error: 'rules-error' }}
+                />
                 <ProjectConsentsSection />
               </section>
             )}
@@ -863,22 +838,20 @@ function SessionToolsSwitch() {
   const setPrefs = useStore((s) => s.setPrefs)
   return (
     <div className="mt-6 border-t border-line pt-4">
-      <label className="flex items-center gap-2 text-sm text-ink-muted">
-        <input
-          type="checkbox"
-          className="accent-line-strong"
-          data-testid="settings-session-tools"
-          checked={on}
-          onChange={(e) => void setPrefs({ sessionTools: e.target.checked })}
-        />
-        Let sessions look at their own project
-      </label>
-      <p className="mt-1 text-xs leading-body text-ink-faint">
-        Every session can read the other sessions in its project, search that project&apos;s past
-        conversations, and read Centralu&apos;s guide. With your consent it can also ask another
-        project to do a task and attach apps other projects share. It can start agents in its own project under its own permission preset. Auto opens these boundaries without asking. Turning this off stops those tools at once,
-        apps it attached included; turning it on reaches a session the next time it starts.
-      </p>
+      <SettingToggle
+        checked={on}
+        onChange={(next) => setPrefs({ sessionTools: next })}
+        label="Let sessions look at their own project"
+        testId="settings-session-tools"
+        hint={
+          <>
+            Every session can read the other sessions in its project, search that project&apos;s past
+            conversations, and read Centralu&apos;s guide. With your consent it can also ask another
+            project to do a task and attach apps other projects share. It can start agents in its own project under its own permission preset. Auto opens these boundaries without asking. Turning this off stops those tools at once,
+            apps it attached included; turning it on reaches a session the next time it starts.
+          </>
+        }
+      />
       <label className="mt-4 flex items-center gap-2 text-sm text-ink-muted">
         Running agents per project
         <input
@@ -925,22 +898,19 @@ function AppearanceSection() {
         The project screen's panels (#203) are the grid's panels at the grid's sizes, so it applies there too.
       */}
       <div className="mt-6 border-t border-line pt-4">
-        <label className="flex items-start gap-2 text-sm text-ink-muted">
-          <input
-            type="checkbox"
-            className="mt-0.5 accent-line-strong"
-            checked={fold}
-            onChange={(e) => setFold(e.target.checked)}
-            data-testid="settings-fold-composer"
-          />
-          <span>
-            Fold the message box in the grid and on project screens
-            <span className="mt-1 block text-xs leading-body text-ink-faint">
+        <SettingToggle
+          checked={fold}
+          onChange={setFold}
+          label="Fold the message box in the grid and on project screens"
+          hint={
+            <>
               It rests as a card peeking from the bottom and rises over the conversation when you
               reach for it. Off keeps it open, as before.
-            </span>
-          </span>
-        </label>
+            </>
+          }
+          hintInside
+          testId="settings-fold-composer"
+        />
       </div>
 
       {/*
@@ -955,20 +925,18 @@ function AppearanceSection() {
         used to it would be worse than never offering the option at all.
       */}
       <div className="mt-6 border-t border-line pt-4">
-        <label className="flex items-center gap-2 text-sm text-ink-muted">
-          <input
-            type="checkbox"
-            className="accent-line-strong"
-            data-testid="settings-send-with-mod-enter"
-            checked={modEnter}
-            onChange={(e) => void setPrefs({ sendWithModifierEnter: e.target.checked })}
-          />
-          Send with {sc('mod', 'Enter')}
-        </label>
-        <p className="mt-1 text-xs leading-body text-ink-faint">
-          Enter then writes a new line instead of sending, which is what you want when a prompt
-          runs to several paragraphs. Shift+Enter writes a new line either way.
-        </p>
+        <SettingToggle
+          checked={modEnter}
+          onChange={(on) => setPrefs({ sendWithModifierEnter: on })}
+          label={<>Send with {sc('mod', 'Enter')}</>}
+          hint={
+            <>
+              Enter then writes a new line instead of sending, which is what you want when a prompt
+              runs to several paragraphs. Shift+Enter writes a new line either way.
+            </>
+          }
+          testId="settings-send-with-mod-enter"
+        />
       </div>
     </section>
   )
@@ -982,55 +950,44 @@ function AppearanceSection() {
  * no window must never be one whose consequences someone discovers later.
  */
 function BackgroundSection({ port }: { port: BackgroundPort }) {
-  const [on, setOn] = useState<boolean | null>(null)
+  const read = useLoad(() => port.get(), [port])
+  // What the keeper answered to the last change, over what it said when the section opened
+  const [saved, setSaved] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let alive = true
-    port
-      .get()
-      .then((v) => alive && setOn(v))
-      .catch((e: Error) => alive && setError(e.message))
-    return () => {
-      alive = false
-    }
-  }, [port])
+  const on = saved ?? read.data ?? null
 
   return (
     <section data-testid="settings-background">
-      <label className="flex items-start gap-2 text-sm text-ink-muted">
-        <input
-          type="checkbox"
-          className="mt-0.5 accent-line-strong"
-          data-testid="settings-background-toggle"
-          checked={on ?? false}
-          disabled={on === null}
-          onChange={(e) => {
-            const next = e.target.checked
-            setError(null)
-            port
-              .set(next)
-              .then(setOn)
-              .catch((err: Error) => setError(err.message))
-          }}
-        />
-        <span>
-          Keep agents running after Centralu quits
-          <span className="mt-1 block text-xs leading-body text-ink-faint">
+      <SettingToggle
+        checked={on ?? false}
+        disabled={on === null}
+        onChange={(next) => {
+          setError(null)
+          // Saving holds the switch (`SettingToggle`): a second click raced the keeper's answer to the first
+          return port
+            .set(next)
+            .then(setSaved)
+            .catch((err: Error) => setError(err.message))
+        }}
+        label="Keep agents running after Centralu quits"
+        hint={
+          <>
             Closing the window leaves the agent host and its running sessions going. Opening
             Centralu again picks them up where they are, waiting approvals included. Off, quitting
             is always Quit completely and stops them.
-          </span>
-        </span>
-      </label>
+          </>
+        }
+        hintInside
+        testId="settings-background-toggle"
+      />
       <p className="mt-3 text-xs leading-body text-ink-faint">
         To stop everything anyway, choose <span className="text-ink-muted">Quit completely</span>{' '}
         when you quit: it also stops agents, terminals and running commands. With no window open and
         nothing running for 30 minutes, the background host stops by itself.
       </p>
-      {error && (
+      {(error ?? read.error) && (
         <p className="mt-2 text-xs text-danger" data-testid="settings-background-error">
-          {error}
+          {error ?? read.error}
         </p>
       )}
     </section>
