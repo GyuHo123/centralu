@@ -176,6 +176,26 @@ describe('starting another agent in the same project', () => {
     expect(w.mgr.projectConsents()).toEqual([])
   })
 
+  it('a quit tells no caller anything: the children it stops are the next start\'s to report (#428)', async () => {
+    const s = await session('normal')
+    const child = await startRunning(s)
+    await w.until(() => !!handleOf(child)?.sent.length)
+    const said = () => w.store.loadMessages(s, 50).filter((m) => String((m.payload as { text?: string }).text ?? '').startsWith('[Centralu]'))
+    // The report the quit's failed wait leads to, awaited to its end rather than for a while
+    const reports: Promise<void>[] = []
+    const mgr = w.mgr as unknown as { deliverReport: (...a: unknown[]) => Promise<void> }
+    const deliverReport = mgr.deliverReport.bind(w.mgr)
+    vi.spyOn(mgr, 'deliverReport').mockImplementation((...a) => {
+      const p = deliverReport(...a)
+      reports.push(p)
+      return p
+    })
+    await w.mgr.disposeAll()
+    await w.until(() => reports.length > 0)
+    await Promise.all(reports)
+    expect(said()).toEqual([])
+  })
+
   it('a safe session in a trusted project still asks (#673)', async () => {
     const s = await session('safe')
     const p = w.mgr.startAgent(s, { task: 'write it', wait: false })
