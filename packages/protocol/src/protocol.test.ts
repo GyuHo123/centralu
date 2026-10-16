@@ -41,6 +41,8 @@ const GOLDEN_EVENTS_V1: unknown[] = [
   // The whole record of a tool call (#221) — optional, so the two frames above still parse
   { type: 'tool_call', sessionId: 's1', callId: 'c2', summary: { tool: 'Write', title: 'Write: a.ts', readOnly: false, paths: ['a.ts'] }, input: { file_path: 'a.ts', content: 'export {}' } },
   { type: 'tool_result', sessionId: 's1', callId: 'c2', ok: true, summary: 'wrote', output: 'wrote a.ts' },
+  // A summary with no read-only hint (#428): adapters no longer set it, and it is optional, so the frames above still parse
+  { type: 'tool_call', sessionId: 's1', callId: 'c3', summary: { tool: 'Bash', title: 'git push', paths: [] } },
   // A native subagent's step, under the call that launched it (#222)
   {
     type: 'subagent_event',
