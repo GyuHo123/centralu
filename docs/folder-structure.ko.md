@@ -71,6 +71,19 @@ centralu/
 │  │     │  └─ usage/  settings/  onboarding/
 │  │     ├─ components/         # feature-agnostic shared (Button, Kbd, VirtualList…)
 │  │     ├─ store/              # zustand store + selectors (reducers are imported from core)
+│  │     │                      #   store.ts가 아래 부분들로 스토어 하나를 만든다(#428):
+│  │     │  └─ state.ts(타입)  historyPages.ts(히스토리 페이지와 화면 병합)
+│  │     │     screens.ts(지금 보이는 화면)  appKeys.ts(앱과 그 뷰의 이름)
+│  │     │     sessionList.ts(스토어가 가진 세션: 호스트 목록 병합, 아직 등록되지 않은 세션의 이벤트 보관)
+│  │     │     apps.ts(외부 앱: 목록, 고정 뷰와 대화 속 뷰, 그 액션)
+│  │     │     events/(`dispatchEvent`는 index.ts, 이벤트 계열마다 처리 파일 하나)
+│  │     │     projects.ts(프로젝트, git 요약과 명령)  patch.ts(상태를 쓰는 보조 함수)
+│  │     │     sessions/(세션 액션: 포커스, 보내기, 응답, 프로세스, 생애주기, 인계)
+│  │     │     connection.ts(호스트에 붙기, 재연결 복구, 작업 공간 스냅숏)
+│  │     │     history.ts(대화 히스토리 페이지와 실행 카드의 단계 읽기)
+│  │     │     updates.ts(Centralu 업데이트와 에이전트 CLI 버전)  machines.ts(연결된 기기)
+│  │     │     orchestrator.ts(오케스트레이터와 그 제안)
+│  │     │     layout.ts(창 배치)  navigation.ts(보이는 화면, 뒤로·앞으로)
 │  │     └─ styles/
 │  │
 │  └─ agent-host/               # the Node process (no browser code)

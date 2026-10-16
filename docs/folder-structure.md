@@ -69,6 +69,19 @@ centralu/
 │  │     │  └─ usage/  settings/  onboarding/
 │  │     ├─ components/         # feature-agnostic shared (Button, Kbd, VirtualList…)
 │  │     ├─ store/              # zustand store + selectors (reducers are imported from core)
+│  │     │                      #   store.ts builds the one store out of these parts (#428):
+│  │     │  └─ state.ts (the types)  historyPages.ts (history pages merged with the screen)
+│  │     │     screens.ts (which screen is on)  appKeys.ts (how an app and its views are named)
+│  │     │     sessionList.ts (the sessions it holds: host lists merged in, events held for one not yet listed)
+│  │     │     apps.ts (external apps: the list, pinned and in-conversation views, their actions)
+│  │     │     events/ (`dispatchEvent` in index.ts, one handler file per event family)
+│  │     │     projects.ts (projects, their git summary and commands)  patch.ts (helpers for writing state)
+│  │     │     sessions/ (a session's actions: focus, send, answers, process, lifecycle, handoff)
+│  │     │     connection.ts (attaching to the host, reconnect recovery, the workspace snapshot)
+│  │     │     history.ts (reading a conversation's history pages and a launch card's steps)
+│  │     │     updates.ts (Centralu's update and the agent CLIs' versions)  machines.ts (linked machines)
+│  │     │     orchestrator.ts (the orchestrator and its proposals)
+│  │     │     layout.ts (how the window is arranged)  navigation.ts (which screen, back and forward)
 │  │     └─ styles/
 │  │
 │  └─ agent-host/               # the Node process (no browser code)
