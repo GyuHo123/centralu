@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { oneLineText } from '@cc/protocol'
-import { assertExistingPathSync, isMissingPathError } from '../../dev-services/path-guard.js'
+import { walkAppFolder } from './folder-walk.js'
 import { MANIFEST_FILE, parseManifest, type AppManifest } from './manifest.js'
 
 /**
@@ -70,26 +70,23 @@ export function scaffoldApp(templateDir: string, dest: string, spec: ScaffoldSpe
   if (!parsed.ok) throw new Error(`the template's manifest does not pass with these values: ${parsed.error}`)
 
   mkdirSync(dest)
-  copyTree(templateDir, dest, '', spec)
+  copyTree(templateDir, dest, spec)
   writeFileSync(join(dest, MANIFEST_FILE), text)
   return parsed.manifest
 }
 
-function copyTree(from: string, to: string, rel: string, spec: ScaffoldSpec): void {
-  for (const e of readdirSync(join(from, rel), { withFileTypes: true })) {
-    if (e.name === '.DS_Store') continue
-    const src = join(rel, e.name)
-    const out = join(rel, RENAMED[e.name] && rel === '' ? RENAMED[e.name]! : e.name)
-    if (e.isDirectory()) {
-      mkdirSync(join(to, out))
-      copyTree(from, to, src, spec)
-      continue
-    }
-    if (!e.isFile() || (rel === '' && e.name === MANIFEST_FILE)) continue
-    const buf = readFileSync(join(from, src))
-    const verbatim = src === VERBATIM_DIR || src.startsWith(VERBATIM_DIR + '/') || src.startsWith(VERBATIM_DIR + '\\')
-    writeFileSync(join(to, out), verbatim ? buf : fill(buf.toString('utf8'), extname(e.name), spec))
-  }
+function copyTree(from: string, to: string, spec: ScaffoldSpec): void {
+  // The same walk as every other reader of an app folder (`walkAppFolder`): a dot-name (`.DS_Store`) or a `node_modules` left in the template never reaches an app
+  const out = (rel: string) => (Object.hasOwn(RENAMED, rel) ? RENAMED[rel]! : rel)
+  walkAppFolder(from, {
+    dir: (rel) => void mkdirSync(join(to, out(rel))),
+    file: (rel) => {
+      if (rel === MANIFEST_FILE) return
+      const buf = readFileSync(join(from, rel))
+      const verbatim = rel === VERBATIM_DIR || rel.startsWith(VERBATIM_DIR + '/')
+      writeFileSync(join(to, out(rel)), verbatim ? buf : fill(buf.toString('utf8'), extname(rel), spec))
+    },
+  })
 }
 
 /**
@@ -110,25 +107,4 @@ function escapeHtml(s: string): string {
 /** Reduces a person-supplied name or description to one line — so a line break cannot cut off a code comment */
 export function oneLine(s: string): string {
   return oneLineText(s)
-}
-
-/**
- * Creates the folders down to `<root>/<parts…>` **one segment at a time** — checking at each
- * segment whether it is a link that escapes the root. Creating it all at once with `mkdir -p` would
- * mean an app gets written outside the repository whenever `.centralu` inside a project is a link
- * pointing elsewhere (the same link that discovery and watching reject with their guard — creation
- * has to agree with them).
- */
-export function ensureDirInside(root: string, parts: readonly string[]): string {
-  for (let i = 1; i <= parts.length; i++) {
-    const prefix = join(...parts.slice(0, i))
-    try {
-      if (!assertExistingPathSync(root, prefix).isDirectory()) throw new Error(`${prefix} is not a folder`)
-    } catch (err) {
-      if (!isMissingPathError(err)) throw err
-      mkdirSync(join(root, prefix))
-      assertExistingPathSync(root, prefix)
-    }
-  }
-  return join(root, ...parts)
 }
