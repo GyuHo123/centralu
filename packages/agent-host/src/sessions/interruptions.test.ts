@@ -477,7 +477,7 @@ describe('a tool reconnecting for too long (#698)', () => {
     const a = host()
     const { id, h } = await working(a)
     h.emit({ type: 'activity', sessionId: id, activity: 'retrying' })
-    const clocks = () => (a.mgr as unknown as { reconnecting: Map<string, unknown> }).reconnecting
+    const clocks = () => (a.mgr as unknown as { interruptions: { reconnecting: Map<string, unknown> } }).interruptions.reconnecting
     expect(clocks().has(id)).toBe(true)
     await a.mgr.trashSession(id)
     expect(clocks().has(id)).toBe(false)
@@ -493,6 +493,17 @@ describe('a tool reconnecting for too long (#698)', () => {
     // The next host watches the session from its own first event; this one says nothing after leaving
     expect(interruptions(id)).toEqual([])
     expect(info(a, id).interruption ?? null).toBeNull()
+  })
+
+  it('a reconnect that starts while the host lets its processes go starts no clock on the leaving host', async () => {
+    const a = host()
+    const { id, h } = await working(a)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    // The process still speaks while it is let go: its tool begins retrying then
+    h.dispose = async () => h.emit({ type: 'activity', sessionId: id, activity: 'retrying' })
+    await a.mgr.detachAll()
+    vi.advanceTimersByTime(RECONNECTING_FLAG_MS * 2)
+    expect(interruptions(id)).toEqual([])
   })
 
   it('silence alone is not flagged: a long build or a sleep looks the same', async () => {
