@@ -5,6 +5,7 @@ import { turnAnswer } from './turn-answer.js'
 import { ASK_WAIT_MS, clipAnswer, pathsIn, readableGrants, taskLine } from './ask-project.js'
 import { agentFrame, agentNoteFrame, presetWithin } from './start-agent.js'
 import { labelOf } from './transcript-view.js'
+import { agentDepthRefusal, recordAgentDepth } from './agent-depth.js'
 import type {
   BackgroundTask,
   PermissionPreset,
@@ -517,7 +518,7 @@ export class DelegationFlow {
   // ── Requests to a busy session (#677) ────────────────────────────────────────────────────────────────────────
 
   /**
-   * start_agent's rules for a fork (#677): it starts an agent, so it takes the same gates. Depth one, the project's
+   * start_agent's rules for a fork (#677): it starts an agent, so it takes the same gates. The agent depth, the project's
    * trust and the per-project ceiling here; the person's consent when the fork is made (`ensureAgentConsent`).
    */
   forkGateError(callerId: string, target: SessionInfo): string | null {
@@ -529,9 +530,9 @@ export class DelegationFlow {
     const caller = this.host.meta.get(callerId)
     if (!caller) return 'the requesting session is gone'
     if (!this.host.meta.has(target.id)) return 'it is no longer here'
-    if (this.starts.agentDepthBlocked(caller) && !this.host.autoBoundaryOpen(callerId)) {
-      return 'this session was itself started or asked by another session, so it cannot start a sub-session'
-    }
+    const deep = agentDepthRefusal(this.host, callerId, 'start a sub-session')
+    // Worded for "No fork of …: <why>."
+    if (deep) return deep.replace(/^This/, 'this').replace(/\.$/, '')
     const project = this.host.store.listProjects().find((p) => p.id === target.projectId)
     if (!project) return 'its project is no longer registered'
     if (project.trusted !== true && !this.host.autoBoundaryOpen(callerId)) return "its project is not trusted (the person can trust it from the project menu)"
@@ -622,6 +623,8 @@ export class DelegationFlow {
       } catch (e) {
         return { ok: false, error: `Could not start the fork of "${target.name}": ${(e as Error).message}` }
       }
+      // Its depth stays even when the requester is deleted later (#897 review)
+      recordAgentDepth(this.host, child.id, callerId)
       // Copying and making the session took a while: the gates are read again, with no wait before the delegation
       const lateGate = this.forkTrustError(callerId, target)
       const cap = lateGate ? undefined : lowest(this.host.meta.get(callerId)!.permissionPreset, this.host.meta.get(target.id)!.permissionPreset)

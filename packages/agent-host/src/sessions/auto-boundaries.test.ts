@@ -2,8 +2,10 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PermissionPreset } from '@cc/protocol'
+import type { ModelOption, PermissionPreset } from '@cc/protocol'
 import { crossWorld, type CrossWorld } from './cross-project.test-helpers.js'
+
+const DEPTH_SETTING = 'How deep agents may start agents'
 
 /** Every opened host boundary reads the caller's own preset; no global or project grant is manufactured. */
 describe('auto Centralu boundaries (#603)', () => {
@@ -73,7 +75,9 @@ describe('auto Centralu boundaries (#603)', () => {
     },
   )
 
-  it('auto children cascade into agents and projects, including untrusted callers and targets', async () => {
+  it('auto children cascade into agents and projects, including untrusted callers and targets, as deep as the agent depth', async () => {
+    // A child starts agents and asks projects only from an agent depth of 2 (#867)
+    w.mgr.setUiPreferences({ agentDepth: 2 })
     const parent = await session()
     w.store.setProjectConsent(w.caller.id, w.caller.id, 'agents')
     const first = await start(parent)
@@ -118,10 +122,10 @@ describe('auto Centralu boundaries (#603)', () => {
   it.each(['safe', 'normal'] as const)('%s refuses depth and untrusted delegation', async (preset) => {
     const parent = await session('auto')
     const child = await session(preset, parent)
-    expect(await start(child)).toMatchObject({ ok: false, error: expect.stringContaining('itself started') })
+    expect(await start(child)).toMatchObject({ ok: false, error: expect.stringContaining(DEPTH_SETTING) })
     expect(await w.mgr.askProject(child, { project: w.target.id, task: 'x' })).toMatchObject({
       ok: false,
-      error: expect.stringContaining('itself started'),
+      error: expect.stringContaining(DEPTH_SETTING),
     })
     const own = await session(preset)
     w.mgr.setProjectTrusted(w.caller.id, false)
@@ -129,6 +133,105 @@ describe('auto Centralu boundaries (#603)', () => {
     expect(await w.mgr.askProject(own, { project: w.target.id, task: 'x' })).toMatchObject({
       ok: false,
       error: expect.stringContaining('not trusted'),
+    })
+  })
+
+  /*
+   * How deep agents may start agents (#867). `auto` used to open this boundary: round-4 refactor sessions under auto each
+   * started sessions of their own, twelve ran at once and the load average reached 216 (#862). Now a setting, 1 by
+   * default, that no preset crosses.
+   */
+  describe('the agent depth (#867)', () => {
+    const levelsBelow = (n: number) => `This session is ${n} level${n === 1 ? '' : 's'} below a session the person started`
+    /** An auto chain from a session the person started down to `depth`; the last one's id */
+    const chainTo = async (depth: number) => {
+      let id = await session('auto')
+      for (let level = 1; level <= depth; level++) {
+        const r = await start(id)
+        if (!r.ok) throw new Error(`level ${level}: ${r.error}`)
+        id = r.sessionId
+      }
+      return id
+    }
+
+    it('at the default 1, an auto child cannot start agents nor ask a project, and is told the setting and where it is', async () => {
+      expect(w.mgr.uiPreferences().agentDepth).toBeUndefined()
+      const child = await chainTo(1)
+      const r = await start(child)
+      expect(r).toEqual({
+        ok: false,
+        error: `${levelsBelow(1)}, and "${DEPTH_SETTING}" in Settings → Orchestrator is 1, so it cannot start agents. Say in your answer what is needed instead; the person can raise that setting.`,
+      })
+      expect(await w.mgr.askProject(child, { project: w.target.id, task: 'x' })).toMatchObject({
+        ok: false,
+        error: expect.stringContaining(`${levelsBelow(1)}, and "${DEPTH_SETTING}" in Settings → Orchestrator is 1, so it cannot ask a project`),
+      })
+      expect(w.mgr.listSessions().filter((s) => s.askedBy === child)).toEqual([])
+      expect(w.events.filter((e) => e.type === 'approval_request')).toEqual([])
+    })
+
+    // Every value, each against the level right above it and the first one at it
+    it.each([1, 2, 3])('at %i, auto sessions above it start agents and the first one at it is refused', async (limit) => {
+      w.mgr.setUiPreferences({ agentDepth: limit })
+      const above = await chainTo(limit - 1)
+      const r = await start(above)
+      expect(r).toMatchObject({ ok: true, state: 'working' })
+      const at = r.ok ? r.sessionId : ''
+      expect(await start(at)).toMatchObject({ ok: false, error: expect.stringContaining(`${levelsBelow(limit)}, and "${DEPTH_SETTING}" in Settings → Orchestrator is ${limit}`) })
+      expect(w.mgr.listSessions().filter((s) => s.askedBy === at)).toEqual([])
+    })
+
+    /*
+     * The first gate, before anything is read or asked (#897 review): the later re-read (`agentStartGateError`) refuses
+     * the same caller, so only this shows whether the start got as far as the tool's detection, a model check, a card
+     * or the consent `auto` opens and logs for it.
+     */
+    it.each(['auto', 'safe'] as const)('%s: a caller at it is refused before the tool is detected, a model checked or a card raised', async (preset) => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+      w.store.setProjectConsent(w.caller.id, w.caller.id, 'agents')
+      const parent = await session(preset)
+      const child = await w.mgr.startAgent(parent, { task: 'check', wait: false }, AbortSignal.timeout(5000))
+      if (!child.ok) throw new Error(child.error)
+      const claude = w.adapters.get('claude')!
+      const detect = vi.spyOn(claude, 'detect')
+      const models = vi.fn(async (): Promise<ModelOption[]> => [{ id: 'm', label: 'm', efforts: [], defaultEffort: null, tiers: [] }])
+      claude.listModels = models
+      log.mockClear()
+      expect(await w.mgr.startAgent(child.sessionId, { task: 'deeper', model: 'm', wait: false }, AbortSignal.timeout(5000))).toMatchObject({
+        ok: false,
+        error: expect.stringContaining(DEPTH_SETTING),
+      })
+      expect(detect).not.toHaveBeenCalled()
+      expect(models).not.toHaveBeenCalled()
+      expect(w.mgr.listSessions().find((s) => s.id === child.sessionId)?.pendingApproval).toBeFalsy()
+      expect(log.mock.calls.flat().join('\n')).not.toContain('agent_start')
+    })
+
+    it('deleting the middle of a chain does not let the grandchild start agents; its depth outlives the parent (#897 review)', async () => {
+      w.mgr.setUiPreferences({ agentDepth: 2 })
+      const top = await session('auto')
+      const middle = await start(top)
+      if (!middle.ok) throw new Error(middle.error)
+      const bottom = await start(middle.sessionId)
+      if (!bottom.ok) throw new Error(bottom.error)
+      expect(await start(bottom.sessionId)).toMatchObject({ ok: false, error: expect.stringContaining('2 levels below') })
+      await w.mgr.trashSession(middle.sessionId)
+      expect(w.mgr.listSessions().some((s) => s.id === middle.sessionId)).toBe(false)
+      expect(w.mgr.listSessions().find((s) => s.id === bottom.sessionId)?.askedBy).toBe(middle.sessionId)
+      expect(await start(bottom.sessionId)).toMatchObject({ ok: false, error: expect.stringContaining('2 levels below') })
+      // The record goes with the session when the trash is emptied of it, and only its own
+      expect(await w.store.purgeSession(middle.sessionId)).toBe(true)
+      expect(w.store.appSetting(`agent_depth:${middle.sessionId}`)).toBeNull()
+      expect(w.store.appSetting(`agent_depth:${bottom.sessionId}`)).toBe('2')
+    })
+
+    it('is read at each call: lowering it refuses the next start, raising it allows it again', async () => {
+      w.mgr.setUiPreferences({ agentDepth: 3 })
+      const grandchild = await chainTo(2)
+      w.mgr.setUiPreferences({ agentDepth: 2 })
+      expect(await start(grandchild)).toMatchObject({ ok: false, error: expect.stringContaining(DEPTH_SETTING) })
+      w.mgr.setUiPreferences({ agentDepth: 3 })
+      expect(await start(grandchild)).toMatchObject({ ok: true })
     })
   })
 

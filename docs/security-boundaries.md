@@ -28,8 +28,8 @@ already left out other sessions', and indents a message's later lines, so text c
 `start_agent` and `agent_session` let an ordinary session start a Claude or Codex session in its own project and
 work with it ([agent-host.md](agent-host.md) §1.2.1). They add no reach the caller lacked (the child works on the
 same files under the same or a lower preset), but they multiply what runs. The rules below
-apply to `safe` and `normal`; `auto` opens the consent, depth, ownership and trust
-boundaries (#603), with a log line instead of a card or refusal:
+apply to `safe` and `normal`; `auto` opens the consent, ownership and trust
+boundaries (#603), with a log line instead of a card or refusal. The agent depth binds every preset, `auto` included (#867):
 
 - **The person's consent.** For a `normal` caller it is the project's trust (#673): only a trusted project's
   sessions can start agents at all, and trusting it was the person's decision about that project, so no card is
@@ -43,8 +43,17 @@ boundaries (#603), with a log line instead of a card or refusal:
   more when the child's session exists, before it is given the task; a child that fails them gets none.
 - **Never above the caller**: the child gets the caller's preset; a child the person raised above it takes no
   more work from the caller.
-- **Depth one**: a session marked `askedBy` (started by `start_agent`), or handling an active `ask_project` task, can neither
-  start agents nor ask a project.
+- **The agent depth** (#867): a setting, 1 to 3 and 1 by default ("How deep agents may start agents" in Settings →
+  Orchestrator, `prefs.agentDepth`). A session the person started is depth 0; one started by another (`askedBy`), or
+  working on a task another session gave it (an unsettled delegation: `ask_project`, a fork, `agent_session`), is one
+  deeper than that session, the deepest link counting; a fork whose requester is gone is at least 1, so a fork the
+  orchestrator made (no `askedBy`) counts 1 for good, and a session an `auto` caller reached through `agent_session`
+  counts one deeper than that caller while the delegation is unsettled. A session another session started also
+  records the depth it was started at (`agent_depth:<id>` in `app_settings`, purged with the session), and never
+  counts less: deleting the middle of a chain does not let what hung below it start agents. A session at the
+  setting's depth or deeper can neither start agents, nor fork, nor ask a project, under every preset: `auto` opened
+  this until #867, and children under it each starting their own ran twelve sessions at once (#862). Read at each
+  call (`agentDepthRefusal`), so lowering it applies to the next start; the refusal names the setting and where it is.
 - **Ownership**: `agent_session` normally acts only on a session whose `askedBy` is the caller, in its project.
   Deletion without a worktree accepts either `askedBy` or `parentSessionId` equal to the caller, and requires
   that link in every preset (#637); it uses the same trash path as the sidebar. Stopping a busy child also
@@ -147,7 +156,7 @@ need the project's explicit setup command or an install by the child under its p
 ### Asking another project (#371 part B)
 
 `ask_project` is the one way an ordinary session acts outside its own project. Under `auto`,
-consent and depth/trust refusals are open and logged. The existing target session keeps its own
+consent and trust refusals are open and logged; the agent depth is not (#867), it refuses under every preset. The existing target session keeps its own
 preset; session creation in another project is forbidden under every preset (#614). Under `safe`
 and `normal` it has these controls ([agent-host.md](agent-host.md) §1.2):
 
@@ -159,8 +168,9 @@ and `normal` it has these controls ([agent-host.md](agent-host.md) §1.2):
   preset and project trust; its approvals stand as cards in that session. Under a person's global bypass it runs as freely as that person's
   own sessions there — the owner's decision is that the delegated session may change code in its own
   project. The task arrives framed as sent by another session, never as the person.
-- **Depth one.** A session handling an active cross-project task cannot ask a third project, so two projects that
-  consented to each other cannot pass a task back and forth without a person.
+- **The agent depth** (#867). A session handling an active cross-project task is one level deeper than its asker, so
+  at the default depth of 1 it cannot ask a third project, and two projects that consented to each other cannot pass a
+  task back and forth without a person. No preset opens it.
 - **Trust** (owner decision 2026-10-11, #382). A session in a project the person has not trusted cannot
   ask at all, the rule `attach_app` follows: text in that repository could be the one asking, and the
   card would then be the only thing between a planted instruction and another project. An untrusted
@@ -391,11 +401,11 @@ processes after adoption, at idle or when their current turn finishes (#589).
 | A Centralu tool the profile has | allowed | allowed | allowed | open | allowed | allowed | allowed | open | Claude: `canUseTool`, `isOrchestratorTool` and only when the session was given the server, checked before auto's refusal (`adapters/claude/session-cards.ts`). Codex: `default_tools_approval_mode: 'approve'` on the bridge, and an elicitation for it accepted only on a thread that has it (`adapters/codex/thread-servers.ts` `mcpConfig`, `adapters/codex/server-requests.ts` `onServerRequest`) |
 | A Centralu tool the profile does not have | refused | refused | refused | refused | refused | refused | refused | refused | `profileAllows` (exposure and execution) |
 | `ask_project`, first time for a pair of projects | asks (consent card) | asks | asks | open | asks | asks | asks | open | `ensureProjectAccess` in `SessionManager.askProject`; "always" is kept in `project_consents` |
-| `ask_project` from a session that was itself asked | refused | refused | refused | open | refused | refused | refused | open | `askProject` (depth one) |
+| `ask_project` from a session at the agent depth (default 1: one that was itself started or asked) | refused | refused | refused | refused | refused | refused | refused | refused | `askGateError`, `agentDepthRefusal` (`prefs.agentDepth`, #867) |
 | `ask_project` from an untrusted project | refused | refused | refused | open | refused | refused | refused | open | `askProject` (the caller's project trust, #382) |
 | `ask_project` into an untrusted project, first time for the pair | asks (the card says it is not trusted) | asks | asks | open | asks | asks | asks | open | `ensureProjectAccess` (`to.trusted`), `projectAccessQuestion` |
 | `start_agent`, first time for a session, trusted project | asks (consent card: once, always for this session, always for this project) | allowed (the project's trust is the consent, #673) | allowed | open | asks | allowed | allowed | open | `ensureAgentConsent` (`trustIsAgentConsent`) in `SessionManager.startAgent`; "always for this session" lives while the host serves it, "always for this project" is kept in `project_consents` (kind `agents`); a card past the setup bound stays, and the call answers `pending` (#673) |
-| `start_agent` from a session that was itself started or asked (`askedBy`) | refused | refused | refused | open | refused | refused | refused | open | `startAgent` (depth one; `askProject` refuses the same sessions) |
+| `start_agent` (or a fork) from a session at the agent depth (default 1: one that was itself started or asked) | refused | refused | refused | refused | refused | refused | refused | refused | `setUpAgent`, `agentStartGateError`, `forkTrustError` through `agentDepthRefusal` (`prefs.agentDepth`, 1–3, #867; `askProject` refuses the same sessions) |
 | `start_agent` from an untrusted project | refused | refused | refused | open | refused | refused | refused | open | `startAgent` (the project's trust, #382) |
 | `start_agent` past 4 running children in the project, default setting | refused | refused | refused | open | refused | refused | refused | open | `agentCeilingError` (`prefs.agentCeiling`; empty: auto unlimited, otherwise `AGENT_CEILING`; 0: unlimited) |
 | `agent_session` on a session the caller did not start (except delete without a worktree) | refused | refused | refused | open | refused | refused | refused | open | `agentSession` (same project in every preset; ownership opens under auto) |
@@ -403,7 +413,7 @@ processes after adoption, at idle or when their current turn finishes (#589).
 | `agent_session` delete, an idle worktree child with uncommitted changes or commits absent from the trunk | allowed | allowed | allowed | allowed | allowed | allowed | allowed | allowed | `cleanUpWorktreeChild` (#608): the parent decides; patches and bundles follow the session into the trash before the worktree and branch are removed. Working children are refused; an idle process must be disposed successfully first. |
 | A request (`agent_session` send, `ask_project`, `send_to_session`) to a session busy with a turn that is not the caller's, `ifBusy` `note` (#677) | refused | refused | refused | open | refused | refused | refused | open | `busyChoices`: the caller's own preset; a target CLI that takes mid-turn input; never into another caller's `ask_project` task. Without `ifBusy` the choices come back and nothing is sent |
 | The same, `ifBusy` `queue` | allowed | allowed | allowed | allowed | allowed | allowed | allowed | allowed | `enqueue` / `drainQueue`: behind the request tool's own gates (ownership, the project-pair consent). At delivery they are read again with the caller's preset as it is then (`queuedGateError`): `ask_project`'s trust and depth, the target project still registered, and the pair's remembered consent when only `auto` let the request pass without one (marked on the stored row, `queued_requests.opened_by_auto`, so a host swap keeps the mark; a row an older build wrote is read as marked when the pair has no remembered consent); `agent_session`'s ownership and preset rule. A request kept for an `auto` caller when the person revokes the pair's consent or its project loses trust rests on `auto` alone from then on, and is marked so then (#838; `withdrawReaches`). Moving the caller off `auto`, or a handoff to a successor that is not `auto`, drops what only `auto` let through (`dropOpenedByAuto`). Delivered as the caller's new turn when the running one ends |
-| The same, `ifBusy` `fork` / `fork_read` (not `ask_project`) | asks (start_agent's consent card) | asks | asks | open | asks | asks | asks | open | `forkFor`, `forkGateError`: start_agent's depth, trust and ceiling; the lower of the two presets, `fork_read` at most `safe`; `fork` in a worktree of its own |
+| The same, `ifBusy` `fork` / `fork_read` (not `ask_project`) | asks (start_agent's consent card) | asks | asks | open | asks | asks | asks | open | `forkFor`, `forkGateError`: start_agent's trust and ceiling (`auto` opens them), and its agent depth, which refuses under every preset including `auto` (#867); the lower of the two presets, `fork_read` at most `safe`; `fork` in a worktree of its own |
 | `agent_session` answer / `answer_question`, a question in a turn the caller gave (#676) | allowed | allowed | allowed | allowed | allowed | allowed | allowed | allowed | `answerRoutedCard`: only while the caller owns the session's running turn (`turnOwners`) and the card stands; the person may answer first |
 | `agent_session` answer / `answer_question`, an approval in a turn the caller gave (#676), target `normal` or `auto` | refused | refused | refused | open | refused | refused | refused | open | `answersApproval`: the caller's own preset at the answer; never an app agent or a host-raised card; allow or deny, never always |
 | The same, target `safe` or an app's agent | refused | refused | refused | refused | refused | refused | refused | refused | `answersApproval` (#679 review): the caller's `auto` never raises the target's permissions; the caller is told only |
@@ -436,14 +446,15 @@ Rows that differ by session:
 - **A session `ask_project` addresses** already exists and keeps its own preset, tool and project
   trust. The caller's `auto` skips host consent; it does not raise the target's permissions, which
   includes answering its approval cards: an `auto` caller may answer them only for a `normal` or `auto`
-  target, never a `safe` one or an app's agent (#676, `answersApproval`). Depth
-  one applies during a delegated task under `safe`/`normal`; the target's own `auto` opens that gate.
+  target, never a `safe` one or an app's agent (#676, `answersApproval`). The agent
+  depth applies during a delegated task under every preset (#867).
 - **A session `start_agent` started** (#561) runs in the caller's own folder under **the caller's
   preset**, so it never has more than the session that asked for it: `safe` stays `safe`, `normal` reads
   the person's own settings as the caller does, `auto` stays `auto`. No argument sets it and no tool of
   the caller changes it afterwards; the person may, and a child raised above the caller no longer takes
   work from it. Its approvals stand as cards in its own session. It holds the reader set but cannot start
-  agents or ask a project under `safe`/`normal` (depth one); `auto` opens both.
+  agents or ask a project at the default agent depth of 1, under every preset (#867); a depth of 2 or 3 in
+  Settings lets it.
 - **A builder's `check`** starts its app and runs the app's code without a card, under every preset,
   like any Centralu tool. This is intended (owner decision 2026-10-11, #382): the builder is the
   session writing that code, so a card for running it would ask the person about the builder's own
