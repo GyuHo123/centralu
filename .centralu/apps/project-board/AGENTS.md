@@ -149,6 +149,77 @@ in `tooling/project-board-wait-policy.test.ts`; the executable CLI and fake `gh`
 `tooling/project-board-wait-checks.test.ts`. `PROJECT_BOARD_WAIT_POLL_MS` changes the 30-second
 poll only for tests.
 
+## The merge queue (#956)
+
+Many pull requests, or a stack, landed without anyone holding a call open. A detached shell loop did
+this before and could only write a log line when a pull request went DIRTY; nothing moved for three
+and a half hours. The decisions are pure functions in `queue.mjs`; `queue-driver.mjs` keeps the queue
+file and polls; `queue-tools.mjs` has the tools; `bin/merge-queue.mjs` is the watch command.
+
+- **`queue_merge`** (`pr`, `lowers?`, `owner?`, `deleteBranch?`; model only): one pull request, or a
+  stack as `pr` (its top) and `lowers` (the ones under it), which land as one squash through the top
+  after its base is moved to the default branch; the lowers are then closed with "Landed in #N".
+  Refuses at once, as `merge_when_green` does, without maintain or admin, for a draft or a closed pull
+  request, and for a top based on a branch none of its lowers has. A pull request is in one item only.
+  `owner` names the queuing session (default a new id); the answer gives the watch command.
+- **`merge_queue`** (`all?`; read-only, agents and the screen) and **`unqueue`** (`pr`; changes nothing
+  on GitHub).
+- **Each poll** reads one item (`decideBefore`, `decideCi`): no maintain or admin, a draft, DIRTY,
+  BEHIND, BLOCKED, a squash subject over 72 characters, or a base that is not the default branch or a
+  lower's branch → attention. Only the CI workflows' own checks count (`readWorkflowChecks`, their
+  check suites: a release job of the same name is not CI, #624), and the run to rerun is the PR's own
+  pull_request run when a push run shares the commit (`latestRuns`). A cancelled run is rerun once per
+  head and failed jobs once per head (`gh api …/rerun`, `…/rerun-failed-jobs`), written down before
+  asking and counted as done only once its attempt number moves; GitHub refusing the rerun, failing
+  again or cancelled again → attention, naming the job and its first failing line. No run on a head
+  for 15 minutes, or a required check never reported for 20 minutes while nothing else runs (a renamed
+  job, a path-filtered workflow) → attention. A head that moved starts over (reruns, required set,
+  clocks, attention). Green and **CLEAN only** (an unattended queue is strict: UNSTABLE, HAS_HOOKS and
+  UNKNOWN wait, and after 30 minutes → attention) → every open lower must be inside the top's head
+  (compare), then squash with `--match-head-commit` on the head read, subject `Title (#N)` without
+  attribution lines (`squashMessage`, as `merge_when_green`). Only GitHub's word that it merged counts:
+  `gh pr merge` can exit 0 under GitHub's own merge queue without merging (→ attention, not asked again
+  on that head). A stack lands only when the top merged into the default branch, here or found merged
+  (a driver stopped between the merge and writing it down, or by hand): then each head branch is
+  deleted and the lowers closed, a branch kept when another open pull request is based on it (deleting
+  it would close that one). Found merged into another branch, nothing is closed or deleted. Never
+  `--auto`, never `--delete-branch`, never a force push.
+- **Failures on one item** that are not an outage (a pull request gone, a write GitHub refuses) are
+  counted; three in a row → attention, once.
+- **Gentle on GitHub**: one item per tick (5 s), each item again after its own wait (90 s while CI
+  runs, 2 min while it needs attention), the required set read once per head, the permission once per
+  10 minutes. A rate limit (`rate`, now in `FATAL`), no network or no login pauses the whole queue,
+  from 1 minute doubling to 15, shown in `merge_queue`.
+- **Where it lives**: `merge-queue.json` in the app's data folder, read and written whole and
+  synchronously for each change, so it survives the server restarting. A file that does not read
+  stops the driver, said once in the app's log, then tried again with a growing wait. Centralu stops an app with no
+  open screen and no call after 5 minutes (docs/apps.md §4), and an app cannot message a session on
+  its own (§13), so the queue has two drivers: this server while it runs, and the **watch command** a
+  session runs in the background. One drives at a time through `merge-queue.lease.json` (renewed
+  every tick and before every write, free after 3 minutes of silence or as soon as its process is gone,
+  let go on exit).
+- **Telling the session**: every change worth a message is an event with a sequence number and the
+  item's owner. Attention is one event per change (`noticeKey`: the reason, the head and the job), not
+  one per poll; a merge or a close is one too. `node .centralu/apps/project-board/bin/merge-queue.mjs
+  watch --data <folder> --owner <name> --after <seq>` (queue_merge answers it whole) drives the queue
+  while it waits and exits with that owner's messages: 3 when one needs attention, 0 for a merge or
+  when nothing is left, 6 at its deadline (`--minutes`, default 100), 2 for a wrong argument or an
+  unreadable queue, 130 or 143 when stopped by SIGINT or SIGTERM (the tick in flight finishes and is
+  written down first). It names the command to run again, quoted like queue_merge's (`shellQuote`). A Claude session is woken when a background command ends.
+- **The screen** shows a "Merge queue" section above the board while it has items: needs attention
+  (with why), CI, waiting, merged in the last day, each with Unqueue while active. Nothing tells a
+  screen when the driver moves an item, so it reads `merge_queue` again every 15 s while one is active.
+- `PROJECT_BOARD_QUEUE_TICK_MS` and `PROJECT_BOARD_QUEUE_POLL_MS` shorten the waits only for tests.
+  Tests: `tooling/project-board-queue.test.ts` (the decisions, the app against a fake `gh` that
+  records every write, a restart, the watch command), and the screen in `e2e/fixtures/board-reader.ts`.
+
+## Which tool for which task (#957)
+
+`help` (model only, read-only) answers a fixed table: which of this app's tools to use for a
+repository task instead of `gh` or `git` by hand. It is a tool and not the server's instructions,
+which every session would carry in its cached prompt (#512). The descriptions of the tools that
+replace a `gh` command start "Instead of gh …", so a tool search for the command finds them.
+
 ## Public text, pull requests, commits and stacks (#386 step 2)
 
 The rest of CONTRIBUTING.md as tools. The rules are pure functions in `rules.mjs`; their sources are
@@ -277,7 +348,8 @@ step shows on the screen.
   `reader-tools.mjs` (read_item, read_discussion), `decision-tools.mjs` (the owner's saved answers,
   decision_summaries, list_needs_decision), `contribute-tools.mjs` (comment, edit_comment, file_issue,
   open_pr, commit_check, rebase_stack), `ci-tools.mjs` (ci_status, merge_when_green,
-  read_failed_job), `release-tools.mjs` (release_status, release), `words-tools.mjs` (private_words,
+  read_failed_job), `queue-tools.mjs` (queue_merge, merge_queue, unqueue), `help-tools.mjs` (help),
+  `release-tools.mjs` (release_status, release), `words-tools.mjs` (private_words,
   edit_private_words).
 - What the families share: `config.mjs` (project.json, read once at start), `board.mjs` (the cached
   board, an item's line in answers, `itemOf` for every reference), `threads.mjs` (the reader's cached
@@ -285,6 +357,8 @@ step shows on the screen.
   `forView` and `serially`, which every handler goes through).
 - `github.mjs` — every call to GitHub, through `gh`. `project.json` — which project, and the CI settings.
 - `ci.mjs` — the CI and merge decisions as pure functions (no gh, no IO).
+- `queue.mjs`, `queue-driver.mjs`, `bin/merge-queue.mjs` — the merge queue's decisions (pure), its file,
+  lease and polls, and the watch command.
 - `markdown.mjs` — GitHub Markdown to safe HTML for the reader, and the decision summary parser (pure).
 - `rules.mjs` — the rules for public text, commit messages and the pull request template (pure).
 - `answers.mjs` — the owner's saved answers: save, delete, mark recorded (pure; decision-tools.mjs keeps them in the data folder).
