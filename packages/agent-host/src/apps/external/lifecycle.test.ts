@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ExternalApps, type RuntimeTiming } from './runtime.js'
 import { SECRETS_FILE } from './secrets.js'
 import { PROJECT_APPS, plantApp, until } from './test-helpers.js'
+import { SLOW } from '../../../../../tooling/test-timing.js'
 
 /**
  * An app process's lifecycle (M4 A-3) — exercised **with a real child process.**
@@ -218,10 +219,8 @@ describe('crashing', () => {
     // A large base is chosen — the fixture alone takes roughly 170ms to start, so a small base would be satisfied without any backoff at all
     make({ backoffBaseMs: 400 })
 
-    const failedAt: number[] = []
     for (let i = 0; i < 3; i++) {
       const err = await rt.tools(ref('broken')).catch((e: Error) => e)
-      failedAt.push(Date.now())
       expect(err).toBeInstanceOf(Error)
       // The reason carries the last line the app left on stderr too
       expect((err as Error).message).toContain('fixture: cannot open the thing it needs')
@@ -229,9 +228,15 @@ describe('crashing', () => {
     }
     const s = starts('broken')
     expect(s).toHaveLength(3)
-    // The second only started after 400ms, the third after 800ms (the nth consecutive failure → base × 2^(n-1))
-    expect(s[1]!.at - failedAt[0]!).toBeGreaterThanOrEqual(390)
-    expect(s[2]!.at - failedAt[1]!).toBeGreaterThanOrEqual(790)
+    /*
+     * The second only started after 400ms, the third after 800ms (the nth consecutive failure → base × 2^(n-1)).
+     * Measured between the fixture's own start records: the host counts the backoff from the failure, which
+     * comes after the crashed process wrote its start. The test's own clock after the rejection reached it
+     * came later still, by however long a loaded machine takes, and that delay ate the slack (#845). The few
+     * ms off the bound are Node's timer, which may fire a millisecond early.
+     */
+    expect(s[1]!.at - s[0]!.at).toBeGreaterThanOrEqual(395)
+    expect(s[2]!.at - s[1]!.at).toBeGreaterThanOrEqual(795)
 
     const info = rt.list().find((a) => a.appId === 'broken')!
     expect(info.status).toBe('failed')
@@ -335,7 +340,7 @@ describe('the shutdown rule (S-5)', () => {
       if (alive(grandchild)) process.kill(grandchild, 'SIGKILL')
     }
     // The test's own cap must exceed the wait (6s) for `finally` to run — a shorter one would leave the grandchild orphaned on a failing day
-  }, 15_000)
+  }, 15_000 * SLOW)
 
   /*
    * Windows (#14) has no groups. A child Node spawns without `detached` dies with the app (libuv's job), so the test
@@ -359,7 +364,7 @@ describe('the shutdown rule (S-5)', () => {
     } finally {
       if (alive(grandchild)) process.kill(grandchild)
     }
-  }, 15_000)
+  }, 15_000 * SLOW)
 
   /*
    * Windows (#849): the app does not end once its input closes, so the host ends its tree after the grace period, and
@@ -380,7 +385,7 @@ describe('the shutdown rule (S-5)', () => {
     } finally {
       if (alive(grandchild)) process.kill(grandchild)
     }
-  }, 15_000)
+  }, 15_000 * SLOW)
 
   it('when the host exits (dispose), an old process still waiting to finish a call after its entry was replaced also stops', async () => {
     plant('keeper', 'attach')
@@ -399,7 +404,7 @@ describe('the shutdown rule (S-5)', () => {
     } finally {
       if (alive(pid)) process.kill(-pid, 'SIGKILL')
     }
-  }, 15_000)
+  }, 15_000 * SLOW)
 
   it('when the host exits (dispose), every running app stops', async () => {
     plant('a1')
