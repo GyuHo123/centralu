@@ -54,6 +54,7 @@ import type {
   UiPreferencesPatch,
   SettingsApplied,
   GitSource,
+  FsResolvePurpose,
 } from '@cc/protocol'
 import {
   applyBackgroundTasks,
@@ -131,7 +132,9 @@ import {
   listDir,
   moveEntry,
   readTextFile,
-  resolveExisting,
+  resolveEntry,
+  resolveProjectFolder,
+  resolveTarget,
 } from '../dev-services/fs.js'
 import { DirWatchers } from '../dev-services/watch.js'
 import { invalidateFileIndex } from '../dev-services/file-search.js'
@@ -144,7 +147,7 @@ import { DelegationFlow, type DelegationHost, ASK_THE_PERSON, HUB_SENDER, agentS
 import type { AgentStartFlow } from './start-agent-flow.js'
 import { RestartPolicy, type RestartHost } from './restart-policy.js'
 import { WorktreeSessions, type WorktreeHost } from './worktree-sessions.js'
-import { canonicalPath, isInside } from '../dev-services/path-guard.js'
+import { canonicalPath, isInside, pathParts } from '../dev-services/path-guard.js'
 import { HostCards, type HostAsk, type HostCardsHost } from './host-cards.js'
 import { ExternalConversations, type ExternalConversationsHost, truncate } from './external-conversations.js'
 import { SessionRecord, type SessionRecordHost } from './session-record.js'
@@ -3598,10 +3601,14 @@ export class SessionManager {
   importFile(projectId: string, toDir: string, name: string, dataBase64: string) {
     return importFile(this.cwdOf(projectId), toDir, name, Buffer.from(dataBase64, 'base64'))
   }
-  /** The absolute path handed to the OS by the desktop shell (trash, file manager). Built by the side that
-   * knows the project */
-  resolveFile(projectId: string, path: string) {
-    return resolveExisting(this.cwdOf(projectId), path)
+  /** The absolute path handed to the OS by the desktop shell (trash, file manager, IDE). Built by the side that
+   * knows the project: for the trash the entry itself, a link included; otherwise what it is, a link followed inside the
+   * project; never the project folder (#838) */
+  resolveFile(projectId: string, path: string, purpose?: FsResolvePurpose) {
+    const root = this.cwdOf(projectId)
+    // The project folder for its delete dialog only (#838); an older window's dialog sends the literal root and no purpose
+    if (purpose === 'project' || (purpose === undefined && pathParts(root, path).length === 0)) return resolveProjectFolder(root)
+    return purpose === 'trash' ? resolveEntry(root, path) : resolveTarget(root, path)
   }
 
   saveWorkspace(layout: Record<string, unknown>): void {

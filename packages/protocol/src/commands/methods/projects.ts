@@ -9,7 +9,7 @@ import {
   ProjectId,
   SessionId,
 } from '../../entities.js'
-import { ATTACHMENT_MAX_BASE64, FsEntry, FsFile } from '../files.js'
+import { ATTACHMENT_MAX_BASE64, FsEntry, FsFile, FsResolvePurpose } from '../files.js'
 import { machineParam } from '../machine-fields.js'
 import { ProjectInfo, SavedCommand } from '../projects.js'
 import { SessionInfo } from '../sessions.js'
@@ -111,7 +111,17 @@ export const projectMethods = {
    * to build one — and it refuses paths that leave the project, or that are not there.
    */
   'fs.resolve': {
-    params: z.object({ projectId: ProjectId, path: z.string() }),
+    params: z.object({
+      projectId: ProjectId,
+      path: z.string(),
+      /**
+       * What the path is for (#838). `trash`: the entry itself, a link included, never what it points at. `project`:
+       * the project folder itself, for "Delete project and trash folder" only (the path is ignored). Otherwise (reveal,
+       * open in an IDE, or absent from an older window) what it is, a link followed inside the project. The project
+       * folder only for `project`, and for an older window's literal root (`.`), which only its delete dialog sends.
+       */
+      purpose: FsResolvePurpose.optional(),
+    }),
     result: z.object({ path: z.string() }),
   },
   'projects.add': { params: z.object({ path: z.string(), ...machineParam }), result: ProjectInfo },

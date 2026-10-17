@@ -175,6 +175,46 @@ describe('surface 5 — paths passed through to the OS', () => {
       path: realpathSync(join(root, 'inside.txt')),
     })
   })
+
+  /*
+   * A repository can carry `old-build -> .` (#838): resolved to its target, the trash got the project folder itself.
+   * For the trash the entry is the link; for revealing or opening, the target, never the project folder.
+   */
+  it('a link to the project folder: the trash gets the link, reveal and open are refused', async () => {
+    symlinkSync('.', join(root, 'old-build'), 'dir')
+    await expect(rpc('fs.resolve', { projectId, path: 'old-build', purpose: 'trash' })).resolves.toEqual({ path: join(realpathSync(root), 'old-build') })
+    for (const purpose of [undefined, 'reveal', 'open'] as const) {
+      await expect(rpc('fs.resolve', { projectId, path: 'old-build', ...(purpose ? { purpose } : {}) }), String(purpose)).rejects.toThrow(/project folder itself/)
+    }
+    for (const path of ['', '.', 'sub/..']) {
+      await expect(rpc('fs.resolve', { projectId, path, purpose: 'trash' }), path).rejects.toThrow(/project folder itself/)
+    }
+  })
+
+  // "Delete project and trash folder" has its own door (#838 review): the file tree's trash never reaches the folder
+  it('the project folder goes to the trash only through its own purpose, or an older window’s literal root', async () => {
+    symlinkSync('.', join(root, 'old-build'), 'dir')
+    const folder = { path: realpathSync(root) }
+    await expect(rpc('fs.resolve', { projectId, path: 'anything', purpose: 'project' })).resolves.toEqual(folder)
+    // An older window's dialog sends '.' with no purpose
+    await expect(rpc('fs.resolve', { projectId, path: '.' })).resolves.toEqual(folder)
+    // The file tree never: not with the trash purpose, and not through a link with none
+    await expect(rpc('fs.resolve', { projectId, path: '.', purpose: 'trash' })).rejects.toThrow(/project folder itself/)
+    await expect(rpc('fs.resolve', { projectId, path: 'old-build' })).rejects.toThrow(/project folder itself/)
+  })
+
+  it('the trash gets a link that points outside as the link, and still refuses a folder link in the middle', async () => {
+    await expect(rpc('fs.resolve', { projectId, path: 'leakfile', purpose: 'trash' })).resolves.toEqual({ path: join(realpathSync(root), 'leakfile') })
+    for (const path of ['leak/secret.txt', 'nest/leak/secret.txt', 'link/../evil/secret.txt']) {
+      await expect(rpc('fs.resolve', { projectId, path, purpose: 'trash' }), path).rejects.toThrow(/outside the project/i)
+    }
+  })
+
+  it('reveal and open follow a link inside the project to its target (CLAUDE.md -> AGENTS.md)', async () => {
+    writeFileSync(join(root, 'AGENTS.md'), 'rules\n')
+    symlinkSync('AGENTS.md', join(root, 'CLAUDE.md'))
+    await expect(rpc('fs.resolve', { projectId, path: 'CLAUDE.md', purpose: 'open' })).resolves.toEqual({ path: realpathSync(join(root, 'AGENTS.md')) })
+  })
 })
 
 /**

@@ -3,7 +3,7 @@ import { constants } from 'node:fs'
 import { copyFile, lstat, mkdir, open, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { folderNameError, IMAGE_PREVIEW_MAX_BYTES, wireBaseName, wireJoin, type FsEntry, type FsFile } from '@cc/protocol'
-import { assertCreatePath, assertExistingPath, canonicalPath, isInside, UnsafePathError } from './path-guard.js'
+import { assertCreatePath, assertExistingPath, canonicalPath, isInside, MissingPathError, pathParts, UnsafePathError } from './path-guard.js'
 import { runGit, type GitTrust } from './git-exec.js'
 import { clonesFiles, cpKeepsLinks, hasWindowsFileNames, HOST_PLATFORM, type Platform } from '../os.js'
 import { rpcError } from '../rpc-error.js'
@@ -196,6 +196,57 @@ export async function resolveExisting(root: string, rel: string): Promise<string
     throw new UnsafePathError('Path changed while resolving the file')
   }
   return canonical
+}
+
+/**
+ * The absolute path of an entry of the project, **itself**, for the trash (`fs.resolve` with `purpose: 'trash'`, #838).
+ *
+ * The folder the entry sits in is resolved (links in the middle of the path are followed, inside the project only, as
+ * everywhere), and the last segment is taken as it is after an `lstat`, a link included: trashing a link moves the
+ * link, never what it points at. `resolveExisting` followed the last segment, so an untrusted repository's
+ * `old-build -> .` sent the project folder itself to the trash. The project folder is refused, and so is a path that
+ * folds to it (`''`, `.`, `a/..`). The shell's trash check allows a link only as the last segment.
+ */
+export async function resolveEntry(root: string, rel: string): Promise<string> {
+  const parts = pathParts(root, rel)
+  const name = parts.at(-1)
+  if (name === undefined) throw new UnsafePathError(PROJECT_FOLDER_ITSELF)
+  if (name === '..') throw new UnsafePathError('Path is outside the project')
+  const parentRel = wireJoin(...parts.slice(0, -1))
+  const parent = await resolveExisting(root, parentRel)
+  const parentInfo = await stat(parent, { bigint: true })
+  if (!parentInfo.isDirectory()) throw new UnsafePathError(`${parentRel || '.'} is not a folder`)
+  const entry = join(parent, name)
+  await lstat(entry).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw new MissingPathError(rel)
+    throw error
+  })
+  // The checked string is the used one: a child of a folder inside the project, never the folder itself
+  if (!isInside(parent, entry) || entry === parent) throw new UnsafePathError('Path is outside the project')
+  return entry
+}
+
+/**
+ * The absolute path of what an entry is, for revealing it or opening it in an IDE (`fs.resolve` without a trash
+ * purpose): a link is followed to its target, which has to be inside the project (`CLAUDE.md -> AGENTS.md` opens
+ * `AGENTS.md`), and never the project folder itself (#838: `old-build -> .`).
+ */
+export async function resolveTarget(root: string, rel: string): Promise<string> {
+  const target = await resolveExisting(root, rel)
+  if (target === (await realpath(root))) throw new UnsafePathError(PROJECT_FOLDER_ITSELF)
+  return target
+}
+
+const PROJECT_FOLDER_ITSELF = 'That is the project folder itself, not an entry in it'
+
+/**
+ * The project folder itself, for "Delete project and trash folder" (`fs.resolve` with `purpose: 'project'`, #838): the
+ * one place the trash may be handed the whole folder. Its real path, so no link is handed to the shell.
+ */
+export async function resolveProjectFolder(root: string): Promise<string> {
+  const folder = await realpath(root)
+  if (!(await stat(folder)).isDirectory()) throw new UnsafePathError('The project folder is not a folder')
+  return folder
 }
 
 /**

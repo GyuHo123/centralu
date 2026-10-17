@@ -9,6 +9,7 @@ pub enum NativePathError {
     ParentTraversal(PathBuf),
     Metadata { path: PathBuf, message: String },
     SymlinkComponent(PathBuf),
+    TrailingSeparator(PathBuf),
 }
 
 impl fmt::Display for NativePathError {
@@ -28,17 +29,49 @@ impl fmt::Display for NativePathError {
             Self::SymlinkComponent(path) => {
                 write!(f, "path component is a symbolic link: {}", path.display())
             }
+            Self::TrailingSeparator(path) => {
+                write!(f, "path ends in a separator or `.`: {}", path.display())
+            }
         }
     }
 }
 
+/// Whether the path as written ends in a separator, or in a `.` component.
+fn ends_like_a_folder(path: &Path) -> bool {
+    let text = path.as_os_str().to_string_lossy();
+    // `is_separator` is this platform's own rule (`\\` too on Windows), so no OS is asked here
+    if path.parent().is_some() && text.ends_with(std::path::is_separator) {
+        return true;
+    }
+    let last = text.rsplit(std::path::is_separator).next().unwrap_or("");
+    last == "."
+}
+
 pub fn assert_safe_native_path(path: &Path) -> Result<(), NativePathError> {
+    check_native_path(path, false)
+}
+
+/// The same checks for a path whose **last** component may itself be a symbolic link: the trash
+/// moves an entry, and a link is moved as the link, never what it points at (#838). The host
+/// resolves the folder the entry sits in and hands over the entry itself (`resolveEntry`), so a
+/// link anywhere before the last component is still refused here.
+pub fn assert_safe_native_entry(path: &Path) -> Result<(), NativePathError> {
+    check_native_path(path, true)
+}
+
+fn check_native_path(path: &Path, final_link_allowed: bool) -> Result<(), NativePathError> {
     if !path.is_absolute() {
         return Err(NativePathError::NonAbsolute(path.to_path_buf()));
     }
+    // `components()` drops a trailing separator and a trailing `.`: `link/` and `link/.` would be checked as `link`
+    // (whose final link the entry check allows) while the OS follows the link (#838 review). Refused as written.
+    if ends_like_a_folder(path) {
+        return Err(NativePathError::TrailingSeparator(path.to_path_buf()));
+    }
 
+    let last = path.components().count().saturating_sub(1);
     let mut current = PathBuf::new();
-    for component in path.components() {
+    for (index, component) in path.components().enumerate() {
         match component {
             Component::Prefix(prefix) => current.push(prefix.as_os_str()),
             Component::RootDir => current.push(component.as_os_str()),
@@ -54,7 +87,7 @@ pub fn assert_safe_native_path(path: &Path) -> Result<(), NativePathError> {
                         message: error.to_string(),
                     }
                 })?;
-                if metadata.file_type().is_symlink() {
+                if metadata.file_type().is_symlink() && !(final_link_allowed && index == last) {
                     return Err(NativePathError::SymlinkComponent(current));
                 }
             }
@@ -67,6 +100,8 @@ pub fn assert_safe_native_path(path: &Path) -> Result<(), NativePathError> {
 #[cfg(test)]
 mod tests {
     use super::{assert_safe_native_path, NativePathError};
+    #[cfg(unix)]
+    use super::assert_safe_native_entry;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -245,5 +280,50 @@ mod tests {
         assert!(
             matches!(result, Err(NativePathError::SymlinkComponent(component)) if component == pivot)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trash_entry_accepts_a_final_symlink_but_not_an_intermediate_one() {
+        // Given: a link as the last component (what the trash moves, #838), and one in the middle.
+        let temp = TempTree::new("entry-symlink");
+        let dir = temp.path().join("dir");
+        fs::create_dir(&dir).expect("test directory should be created");
+        let link = temp.path().join("old-build");
+        std::os::unix::fs::symlink(temp.path(), &link).expect("test symlink should be created");
+        let pivot = temp.path().join("pivot");
+        std::os::unix::fs::symlink(&dir, &pivot).expect("test symlink should be created");
+        fs::write(dir.join("file.txt"), b"x").expect("test file should be written");
+
+        // Then: the entry check takes the final link as the entry, still refuses a middle one,
+        // traversal and a relative path; the ordinary check refuses the final link as before.
+        assert_eq!(assert_safe_native_entry(&link), Ok(()));
+        assert!(matches!(assert_safe_native_entry(&pivot.join("file.txt")), Err(NativePathError::SymlinkComponent(p)) if p == pivot));
+        assert!(matches!(assert_safe_native_entry(Path::new("relative")), Err(NativePathError::NonAbsolute(_))));
+        let sep = std::path::MAIN_SEPARATOR;
+        let up = PathBuf::from(format!("{}{sep}..{sep}x", temp.path().display()));
+        assert!(matches!(assert_safe_native_entry(&up), Err(NativePathError::ParentTraversal(_))));
+        assert!(matches!(assert_safe_native_path(&link), Err(NativePathError::SymlinkComponent(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_trailing_separator_or_dot_that_components_would_drop() {
+        // Given: a link to a folder, written with a trailing `/` or `/.`, which the OS follows
+        let temp = TempTree::new("trailing");
+        let dir = temp.path().join("dir");
+        fs::create_dir(&dir).expect("test directory should be created");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).expect("test symlink should be created");
+        let slash = PathBuf::from(format!("{}/", link.display()));
+        let dot = PathBuf::from(format!("{}/.", link.display()));
+
+        // Then: both checks refuse them as written; the plain link is still the entry it was
+        for p in [&slash, &dot] {
+            assert!(matches!(assert_safe_native_entry(p), Err(NativePathError::TrailingSeparator(_))));
+            assert!(matches!(assert_safe_native_path(p), Err(NativePathError::TrailingSeparator(_))));
+        }
+        assert_eq!(assert_safe_native_entry(&link), Ok(()));
+        assert_eq!(assert_safe_native_path(&dir), Ok(()));
     }
 }

@@ -24,7 +24,9 @@ import {
   moveTarget,
   prepareCopyTarget,
   readTextFile,
+  resolveEntry,
   resolveExisting,
+  resolveTarget,
   safeJoin,
 } from './fs.js'
 import { runGit } from './git-exec.js'
@@ -470,6 +472,49 @@ describe('resolveExisting — the absolute path handed to the shell', () => {
 
   it('rejects outside the project (so the trash never swallows someone else\'s file)', async () => {
     await expect(resolveExisting(root, '../..')).rejects.toThrow(/outside the project/)
+  })
+})
+
+/*
+ * The trash acts on the entry the person pointed at, never on where a link leads (#838): an untrusted repository's
+ * `old-build -> .` resolved to its target sent the project folder itself to the trash. Reveal and open follow a link
+ * inside the project, but never to the project folder.
+ */
+describe('resolveEntry — the entry itself, for the trash', () => {
+  it('gives a link as the link: to the project folder, above it, to a file or a folder', async () => {
+    const real = realpathSync.native(root)
+    writeFileSync(join(root, 'a.ts'), 'x')
+    mkdirSync(join(root, 'src'))
+    symlinkSync('.', join(root, 'old-build'), 'dir')
+    symlinkSync('..', join(root, 'up'), 'dir')
+    symlinkSync(join(root, 'a.ts'), join(root, 'alias.ts'))
+    symlinkSync(join(root, 'src'), join(root, 'src-link'), 'dir')
+    for (const name of ['old-build', 'up', 'alias.ts', 'src-link']) expect(await resolveEntry(root, name), name).toBe(join(real, name))
+  })
+
+  it('refuses the project folder itself, however the path spells it', async () => {
+    mkdirSync(join(root, 'a'))
+    for (const rel of ['', '.', 'a/..', './a/../.']) {
+      await expect(resolveEntry(root, rel)).rejects.toThrow(/project folder itself/)
+    }
+  })
+
+  it('still refuses a path outside the project, a folder link in the middle that leaves it, and a missing entry', async () => {
+    await expect(resolveEntry(root, '../x')).rejects.toThrow(/outside the project/)
+    symlinkSync(outsideDir(), join(root, 'out'), 'dir')
+    await expect(resolveEntry(root, 'out/anything')).rejects.toThrow(/outside the project/)
+    await expect(resolveEntry(root, 'gone.ts')).rejects.toThrow(/no longer there/)
+  })
+})
+
+describe('resolveTarget — what an entry is, for reveal and open', () => {
+  it('follows a link inside the project, and refuses one to the project folder', async () => {
+    writeFileSync(join(root, 'AGENTS.md'), 'x')
+    symlinkSync('AGENTS.md', join(root, 'CLAUDE.md'))
+    symlinkSync('.', join(root, 'old-build'), 'dir')
+    expect(await resolveTarget(root, 'CLAUDE.md')).toBe(await resolveExisting(root, 'AGENTS.md'))
+    await expect(resolveTarget(root, 'old-build')).rejects.toThrow(/project folder itself/)
+    await expect(resolveTarget(root, '')).rejects.toThrow(/project folder itself/)
   })
 })
 
