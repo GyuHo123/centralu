@@ -46,6 +46,7 @@ import {
   hostProvesOf,
   heldHere,
   lockHolderIsAlive,
+  lockHolderPid,
   processStartTime,
   // @ts-expect-error — plain .mjs shipped inside the npm shim, no types on purpose
 } from '../packaging/npm/centralu/bin/serve.mjs'
@@ -905,6 +906,26 @@ describe('asking the host on the port without handing the token to anyone else (
     }
   })
 
+  /*
+   * A refusal for another protocol names the host's in `data` for a program to read (server.ts), and in the sentence
+   * for a person. `--stop` read `data` first; the probe behind `--connection` read only the sentence, so a rewording
+   * there would have reported no protocol. Both read it the same way now.
+   */
+  it('reads the host protocol a version_mismatch names in its data, in the probe as in --stop', async () => {
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise<void>((r) => wss.once('listening', () => r()))
+    wss.on('connection', (ws) => ws.on('message', () => {
+      ws.send(JSON.stringify({ kind: 'res', id: null, ok: false, error: { code: 'version_mismatch', message: 'Update Centralu.', retryable: false, data: { protocolVersion: 7 } } }))
+    }))
+    const port = (wss.address() as { port: number }).port
+    try {
+      expect(await probeHost({ port, token: TOKEN, protocolVersion: PROTOCOL_VERSION })).toEqual({ running: true, protocolVersion: 7 })
+      expect(await askHostToStop({ port, token: TOKEN, protocolVersion: PROTOCOL_VERSION })).toMatchObject({ ok: false, protocolVersion: 7 })
+    } finally {
+      await new Promise<void>((r) => wss.close(() => r()))
+    }
+  })
+
   it('takes proof from the installed build: a bundle that says hostProof, or the source', () => {
     const d = tempDir()
     expect(hostProvesOf(join(d, 'main.mjs'))).toBe(false)
@@ -920,6 +941,21 @@ describe('asking the host on the port without handing the token to anyone else (
  * A host.lock a dead host left names a pid another process of the same user may have now (#838 review): counted as the
  * folder's host, `--stop` would signal that stranger. Only the process that started when the lock says counts.
  */
+describe('the pid host.lock names', () => {
+  it('reads it in both forms a host writes, and nothing else', () => {
+    const d = tempDir()
+    expect(lockHolderPid(d)).toBeNull()
+    const at = (text: string) => {
+      writeFileSync(join(d, 'host.lock'), text)
+      return lockHolderPid(d)
+    }
+    expect(at('4242\n')).toBe(4242)
+    expect(at(JSON.stringify({ pid: 4242, started: 'Thu Oct 16 10:00:00 2026' }))).toBe(4242)
+    expect(at(JSON.stringify({ pid: 4242 }))).toBe(4242)
+    for (const bad of ['0', '{"pid":0}', '{"pid":-3}', '{"pid":"4242"}', '{"pid":4.5}', '"4242"', '4.0', 'null', 'not a lock', '']) expect(at(bad), bad).toBeNull()
+  })
+})
+
 describe.skipIf(!POSIX)('the folder’s host, by the lock and the start time it records', () => {
   const lock = (d: string, v: unknown) => writeFileSync(join(d, 'host.lock'), typeof v === 'string' ? v : JSON.stringify(v))
 
