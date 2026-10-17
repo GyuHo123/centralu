@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, readdir, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
-import { IMAGE_PREVIEW_MAX_BYTES, wireBaseName, wireJoin, type FsEntry, type FsFile } from '@cc/protocol'
-import { assertCreatePath, assertExistingPath, isInside, UnsafePathError } from './path-guard.js'
+import { copyFile, lstat, mkdir, open, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { folderNameError, IMAGE_PREVIEW_MAX_BYTES, wireBaseName, wireJoin, type FsEntry, type FsFile } from '@cc/protocol'
+import { assertCreatePath, assertExistingPath, canonicalPath, isInside, UnsafePathError } from './path-guard.js'
 import { runGit, type GitTrust } from './git-exec.js'
-import { clonesFiles } from '../os.js'
+import { clonesFiles, cpKeepsLinks, hasWindowsFileNames, HOST_PLATFORM, type Platform } from '../os.js'
 
 /**
  * The file tree and viewer service (C-1).
@@ -133,9 +133,25 @@ export async function moveEntry(root: string, from: string, toDir: string): Prom
  *
  * `wx` makes the no-overwrite rule atomic here, unlike the move above: the create fails if
  * anything is at that path already.
+ *
+ * On Windows the name must also be one Windows takes as a file's name (#849), checked as a new folder's is. Node
+ * writes through `\\?\` paths, so `nul`, `aux.c` or `notes.` would land as a file of that very name, one Explorer,
+ * cmd and git read as a device or without its trailing dot or space, and cannot open or remove; and
+ * `notes.txt:payload` would write a hidden stream on `notes.txt` past `wx`, not a file of that name.
  */
-export async function importFile(root: string, toDir: string, name: string, data: Buffer): Promise<{ path: string }> {
-  const rel = wireJoin(toDir, baseName(name))
+export async function importFile(
+  root: string,
+  toDir: string,
+  name: string,
+  data: Buffer,
+  platform: Platform = HOST_PLATFORM,
+): Promise<{ path: string }> {
+  const base = baseName(name)
+  if (hasWindowsFileNames(platform)) {
+    const why = folderNameError(base, true)
+    if (why) fail(why)
+  }
+  const rel = wireJoin(toDir, base)
   const dst = safeJoin(root, rel)
   const dirInfo = await assertExistingPath(root, toDir)
   await assertCreatePath(root, rel)
@@ -343,7 +359,7 @@ export async function readTextFile(root: string, rel: string): Promise<FsFile> {
 export async function copyTree(
   src: string,
   dst: string,
-  clone: (src: string, dst: string) => Promise<boolean> = cloneTree,
+  { clone = cloneTree, links = { from: src, to: dst } }: CopyTreeOptions = {},
 ): Promise<void> {
   const existed = await lstat(dst).then(
     () => true,
@@ -358,11 +374,111 @@ export async function copyTree(
    * existed before the copy started is left untouched, since it was never ours to begin with.
    */
   if (!existed) await rm(dst, { recursive: true, force: true })
+  if (!cpKeepsLinks()) return copyTreeWindows(src, dst, links)
   const { cpSync } = await import('node:fs')
   // verbatimSymlinks: without it Node rewrites a relative link into an absolute one pointing back into the
   // source, so dropEscapingLinks then removed every pnpm link in a Linux worktree as leaving it (seen on CI,
   // 2026-10-04). macOS took the clone path above, which keeps links as they are.
   cpSync(src, dst, { recursive: true, verbatimSymlinks: true })
+}
+
+export type CopyTreeOptions = {
+  /** The clone to try first; the ordinary copy runs when it answers false */
+  clone?: (src: string, dst: string) => Promise<boolean>
+  /**
+   * The folder whose copy this is and the one it lands in (the project and its worktree). On Windows a link whose
+   * target is inside `from` is made again pointing at the same place inside `to`; any other link is left out. Without
+   * it, `src` and `dst` themselves.
+   */
+  links?: { from: string; to: string }
+}
+
+/**
+ * The ordinary copy on Windows (#849): a walk that never follows a link.
+ *
+ * `cpSync` cannot be used there. pnpm (without Developer Mode) and npm/yarn workspaces link folders with junctions,
+ * and `cpSync` copied each junction as a real folder holding a copy of its target: dependency resolution broke,
+ * workspace packages froze as copies of the main checkout, a junction pointing outside the project arrived as plain
+ * files that `dropEscapingLinks` could no longer see, and two junctions pointing at each other ended the host with
+ * 0xC0000409 (measured on Windows 11, Node 22.23).
+ *
+ * A junction's target is an absolute path into the project, so it is made again pointing at the same place in the
+ * worktree. A relative symlink is kept as written, as `verbatimSymlinks` does elsewhere. A link whose target is not
+ * inside `links.from`, once resolved, is not made at all: it would be a window out of the worktree.
+ *
+ * What is a link is taken from the folder's listing, never from `lstat`. libuv lists every reparse point as a link,
+ * but `lstat` calls one a link only when it can read the target: a junction to a volume path (`\??\Volume{…}\…`,
+ * `\??\GLOBALROOT\…`), which anyone can make, came back as a plain folder, and the walk copied what it led to (a
+ * folder outside the project as real files, or the project's own node_modules into itself until the path was too
+ * long). A link whose target cannot be read is left out. A folder already walked, too deep a tree and too many
+ * entries stop the copy as a last guard.
+ */
+async function copyTreeWindows(src: string, dst: string, links: { from: string; to: string }): Promise<void> {
+  const from = canonicalPath(links.from)
+  const to = canonicalPath(links.to)
+  // `src` itself is a real path (resolveExisting), so lstat can be asked about it
+  const top = await lstat(src)
+  const kind = (e: { isSymbolicLink(): boolean; isDirectory(): boolean; isFile(): boolean }): CopyKind =>
+    e.isSymbolicLink() ? 'link' : e.isDirectory() ? 'folder' : e.isFile() ? 'file' : 'other'
+  const pending: { source: string; target: string; kind: CopyKind; depth: number }[] = [
+    { source: src, target: dst, kind: kind(top), depth: 0 },
+  ]
+  const walked = new Set<string>()
+  let entries = 0
+  while (pending.length > 0) {
+    const { source, target, kind: what, depth } = pending.pop()!
+    if (++entries > MAX_COPY_ENTRIES) throw new Error(`more than ${MAX_COPY_ENTRIES} entries in ${src}; the copy stopped`)
+    if (what === 'link') {
+      const left = await copyLinkWindows(source, target, from, to)
+      if (left) console.error(`[copy] link left out (${left}): ${source}`)
+    } else if (what === 'folder') {
+      if (depth > MAX_COPY_DEPTH) throw new Error(`${source} is more than ${MAX_COPY_DEPTH} folders deep; the copy stopped`)
+      const real = await realpath(source)
+      if (walked.has(real)) {
+        console.error(`[copy] folder left out (already copied from ${real}): ${source}`)
+        continue
+      }
+      walked.add(real)
+      await mkdir(target, { recursive: true })
+      for (const entry of await readdir(source, { withFileTypes: true })) {
+        pending.push({ source: join(source, entry.name), target: join(target, entry.name), kind: kind(entry), depth: depth + 1 })
+      }
+    } else if (what === 'file') {
+      await copyFile(source, target)
+    }
+    // Anything else (a socket, a device) is not something a copy can carry
+  }
+}
+
+type CopyKind = 'link' | 'folder' | 'file' | 'other'
+
+/** Guards against a walk that never ends; a project's node_modules is far below both (this repository: about 10^5) */
+const MAX_COPY_ENTRIES = 2_000_000
+const MAX_COPY_DEPTH = 256
+
+/** Makes the link `source` again at `target`; or says why it was left out */
+async function copyLinkWindows(source: string, target: string, from: string, to: string): Promise<string | null> {
+  const written = await readlink(source).catch(() => null)
+  if (written === null) return 'its target cannot be read'
+  // Where it really leads, so a short name or another case of the project folder still counts as inside it
+  const real = canonicalPath(resolve(dirname(source), written))
+  if (!isInside(from, real)) return `points outside ${from}`
+  const folder = await stat(real).then(
+    (s) => s.isDirectory(),
+    () => true, // dangling: a junction is the only link made without a privilege, and its target may still appear
+  )
+  if (!isAbsolute(written)) {
+    try {
+      await symlink(written, target, folder ? 'dir' : 'file')
+      return null
+    } catch (e) {
+      // Without Developer Mode or administrator rights a symlink cannot be made; a junction or a copy can
+      if ((e as NodeJS.ErrnoException).code !== 'EPERM') throw e
+    }
+  }
+  if (folder) await symlink(join(to, relative(from, real)), target, 'junction')
+  else await copyFile(real, target)
+  return null
 }
 
 /** A macOS clonefile copy. Returns false wherever it cannot happen (a different volume, not APFS, not macOS) */

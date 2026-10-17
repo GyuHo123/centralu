@@ -149,6 +149,13 @@ JS dependencies are copied into new worktrees before the agent starts when the r
 manifests match the project checkout. APFS clones fall back to ordinary copies, never a shared top-level
 `node_modules` symlink. Workspace package folders are included, existing targets are not overwritten, source
 and destination paths use the project path guards, and dependency links outside the worktree are removed.
+On Windows the copy is a walk that never follows a link (#849): a junction (pnpm without Developer Mode, npm and
+yarn workspaces) is made again as a junction to the same place in the worktree, and a link whose target is outside
+the project is not made at all. `cpSync` had copied every junction as a real folder, an outside one included, and two
+junctions pointing at each other ended the host. What is a link is taken from the folder's listing, not from `lstat`:
+a junction to a volume path (`\??\Volume{…}\…`), which needs no privilege to make, is one `lstat` follows and calls a
+folder, because libuv cannot read its target. Such a link is left out, and a folder walked twice, a tree deeper than
+256 folders or one of more than 2,000,000 entries stops the copy.
 This avoids automatic registry access and install scripts in the host. It does not validate dependency code:
 running tests still executes the project's installed dependencies. Missing or incompatible source dependencies
 need the project's explicit setup command or an install by the child under its preset.
@@ -1528,8 +1535,15 @@ Since the file can be anywhere, the project root is not the boundary here. Three
   resolves to `\\…`: a UNC share (`\\server\share`, `//server/share`, and `file://server/share`, which Node turns into
   that UNC path on Windows rather than refusing it) or a `\\?\` / `\\.\` device path. Reading one would have the host
   reach out to whichever machine a reply named, and Windows offers that machine the person's sign-in. This is decided
-  on the resolved path, so a relative path in a session whose folder is a share is refused too. A drive letter mapped to
-  a share is read like any other drive: the person mapped it.
+  on the resolved path, so a relative path in a session whose folder is a share is refused too. A local link that leads
+  there (`shot.png -> \\host\share\x.png`, or a folder link earlier in the path) is refused as well, before `realpath`
+  follows it, since following it is already the connection. On Windows the path is walked from its drive (`walkLinks`,
+  #849): what each name is comes from its folder's listing (`lstat` follows a link whose target libuv cannot read),
+  and a link is followed by hand only when its target is a drive path or relative to the link's folder
+  (`localLinkTarget`). Any other target is refused, the NT spellings of a share (`\Device\Mup\…`, `\GLOBAL??\UNC\…`)
+  included, and so is a link whose target cannot be read (a junction to a volume with no drive letter), a name its
+  folder does not list (a short name), and more than 64 links. What `realpath` answers must be a drive path too. A
+  drive letter mapped to a share is read like any other drive: the person mapped it.
 
 The path is resolved once (`~`, a path relative to the session's folder, a `file://` URL, then `realpath`), and that
 resolved string is the one opened, with `O_NOFOLLOW`, once; the type, the size and the signature are all read through
@@ -1560,7 +1574,9 @@ tests. What differs from macOS and Linux, and what holds it:
   committed at a repository's root would run on the first status read. `git`, `gh` and an app's
   manifest command are spawned by the absolute path found on PATH (`tool-launch.ts` `programPath`,
   `resolveCommand`; tests in `tool-launch.test.ts`), and PATH lookups skip relative entries
-  (`env-path.ts`, and `node`/`code` in the Rust shell).
+  (`env-path.ts`, and `node`/`code` in the Rust shell). `du`, which sized the copy candidates by
+  bare name with the project as its folder, is not run on Windows at all: the sizes are read from
+  the file system there (`measuresWithDu`, #849; `git.test.ts` plants a `du.exe`).
 - **System programs by their whole path.** taskkill, Windows PowerShell and cmd.exe are named under
   `%SystemRoot%\System32` (`os.ts` `systemTool`, `commandInterpreter`; `%ComSpec%` for cmd). A `SystemRoot` or
   `ComSpec` that is not a whole path from a drive's root (empty, relative, drive-relative like `C:x`, rooted without
@@ -1581,6 +1597,12 @@ tests. What differs from macOS and Linux, and what holds it:
   for a short one, the case on disk, a link resolved, through the nearest folder that exists; #428). The
   copies had drifted: ask_project's read grants compared with case and the JS `realpath`, so a short
   name or another case was refused, and a touched file under a project kept through a link was dropped.
+- **Names that are not file names.** A file dragged into the tree (`importFile`) is refused on
+  Windows when Windows would not make a file of that name, by the rules a new project folder's
+  name follows (`folderNameError`). Node writes through `\\?\` paths, so a device name (`nul`,
+  `aux.c`, `nul .txt`) or a name with a trailing dot or space lands as a file of that very name, which
+  Explorer, cmd and git read as the device or as another name and cannot open or remove; and
+  `notes.txt:payload` writes a hidden stream on `notes.txt` past the no-overwrite flag (#849).
 - **File identity.** A read's opened-file check is the only guard against a swap there, since
   Windows has no `O_NOFOLLOW`. An NTFS file id is 64 bits with the record's reuse count on top, so
   it is above 2^53, and as a Number two files can compare equal: on windows-2022, 1754 of 2000
@@ -1595,7 +1617,9 @@ Limits:
   which has no mode bits; they are as private as the folder they are in. The default data folder
   is in the user's profile, which only that user (and administrators) can read. A `CC_DATA_DIR`
   elsewhere gets that folder's ACL.
-- Junctions are reported as links by `lstat` and so are treated like symlinks, but no containment
-  test creates one yet (creating a symlink on Windows needs Developer Mode or administrator
-  rights; a junction does not).
+- Junctions are reported as links by `lstat` and so are treated like symlinks, except one whose target
+  libuv cannot read (a volume path): `lstat` follows that one and calls it a folder, so the worktree copy and the
+  reply-image walk ask the folder's listing instead. Only the worktree
+  copy has a test that makes them (`worktree-dependencies.test.ts`); no containment test does yet
+  (creating a symlink on Windows needs Developer Mode or administrator rights; a junction does not).
 - The keeper does not run on Windows (no named-pipe control socket), so the direct path is used.

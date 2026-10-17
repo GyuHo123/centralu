@@ -26,7 +26,7 @@ import { clipPreview } from './turn-answer.js'
 import { RECONNECTING_FLAG_MS, interruptionAfter } from './interruptions.js'
 import { homedir } from 'node:os'
 import { basename, join, relative, resolve, sep } from 'node:path'
-import { existsSync, rmSync, statSync } from 'node:fs'
+import { existsSync, realpathSync, rmSync, statSync } from 'node:fs'
 import type {
   RebuildCause,
   AppReach,
@@ -153,6 +153,7 @@ import { appMessageFrame, type AppMessageSource, type AppMessageVia, type AppVie
 import { SessionTrash, type SessionTrashHost } from './session-trash.js'
 import { parseJson, readJsonObjects } from '../dev-services/store/json.js'
 import { isObj } from '../json-value.js'
+import { foldsPathCase } from '../os.js'
 export { appMessageFrame } from './app-messages.js'
 export type { AppMessageSource, AppMessageVia, AppViewPlace } from './app-messages.js'
 export { START_AGENT_CALL_MS, START_AGENT_MODEL_CHECK_MS, START_AGENT_SETUP_MS } from './delegation-flow.js'
@@ -631,10 +632,42 @@ export class SessionManager {
     if (!existsSync(path) || !statSync(path).isDirectory()) {
       throw Object.assign(new Error(`Directory not found: ${path}`), { code: 'internal' })
     }
-    const existing = this.store.findProjectByPath(path)
+    // One folder is one project (#849): `C:\proj\`, `c:\proj` and `C:\Proj` were three. A new one is kept without a
+    // trailing separator and with a capital drive letter; one already kept in another spelling is found and kept as is
+    const spelled = resolve(path).replace(/^[a-z]:/, (drive) => drive.toUpperCase())
+    const existing = this.projectAt(spelled)
+    const at = existing?.path ?? spelled
     const id = existing?.id ?? randomUUID()
-    this.store.addProject({ id, path, name: basename(path), ...(opts.trusted ? { trusted: true } : {}) })
-    return this.projectInfo(id, path)
+    this.store.addProject({ id, path: at, name: basename(at), ...(opts.trusted ? { trusted: true } : {}) })
+    return this.projectInfo(id, at)
+  }
+
+  /**
+   * The project kept for this folder, in whatever spelling it was kept. Where paths fold case (Windows), two spellings
+   * are one folder when their real paths are equal: `realpathSync.native` gives the case on disk and the long name for
+   * a short one. Case is not folded by JS's rules, which join names Windows keeps apart (the Kelvin sign lowers to k)
+   * and would merge two folders of a case-sensitive directory; only a kept path that is gone is matched by ASCII case.
+   * Only a kept path that could name this folder is resolved (equal but for ASCII case, or with a short name in it),
+   * and never one on a share, which may not answer: a registration does not touch every project's folder.
+   */
+  private projectAt(path: string): { id: string; path: string } | undefined {
+    const exact = this.store.findProjectByPath(path)
+    if (exact) return { id: exact.id, path }
+    const kept = this.store.listProjects()
+    if (!foldsPathCase()) return kept.find((p) => resolve(p.path) === path)
+    const ascii = (p: string) => p.replace(/[A-Z]/g, (c) => c.toLowerCase())
+    const real = canonicalPath(path)
+    const near = new Set([ascii(path), ascii(real)])
+    return kept.find((p) => {
+      const spelled = resolve(p.path)
+      if (!near.has(ascii(spelled)) && !spelled.includes('~')) return false
+      if (spelled.startsWith('\\\\')) return ascii(spelled) === ascii(real)
+      try {
+        return realpathSync.native(spelled) === real
+      } catch {
+        return ascii(spelled) === ascii(real)
+      }
+    })
   }
 
   /**

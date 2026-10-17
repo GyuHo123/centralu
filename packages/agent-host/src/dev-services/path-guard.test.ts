@@ -1,6 +1,9 @@
-import { posix, win32 } from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { isInside, pathParts, UnsafePathError } from './path-guard.js'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, posix, win32 } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { assertExistingPath, assertExistingPathSync, isInside, pathParts, UnsafePathError } from './path-guard.js'
 
 /**
  * The segments the guard walks, under Windows path rules (#14), checked with `path.win32` so it
@@ -32,6 +35,32 @@ describe('path segments under Windows rules', () => {
   })
 })
 
+/*
+ * #849: a root spelled with a Windows short name (GitHub's runners give temp folders as `C:\Users\RUNNER~1\…`). The
+ * sync walk used the JS realpath, which keeps the short spelling, while a junction's target comes back in full, so a
+ * link inside the project was refused as leaving it; the async walk's realpath already gave the long name.
+ */
+describe.skipIf(process.platform !== 'win32')('a project root spelled with a short name', () => {
+  const dirs: string[] = []
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+  })
+
+  it('follows a junction inside it, on the async walk and on the sync one', async () => {
+    const long = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-guard-long-folder-name-')))
+    dirs.push(long)
+    mkdirSync(join(long, 'real'))
+    writeFileSync(join(long, 'real', 'a.txt'), 'x')
+    symlinkSync(join(long, 'real'), join(long, 'link'), 'junction')
+    const short = spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `"for %I in ("${long}") do @echo %~sI"`], {
+      windowsVerbatimArguments: true,
+    }).stdout.toString().trim()
+    expect(short, 'this volume makes short names').not.toBe(long)
+    expect((await assertExistingPath(short, 'link/a.txt')).isFile()).toBe(true)
+    expect(assertExistingPathSync(short, 'link/a.txt').isFile()).toBe(true)
+  })
+})
+
 describe('path segments under POSIX rules', () => {
   it('splits only on / (a backslash is part of a file name there)', () => {
     expect(pathParts('/home/me/proj', 'src/a\\b.ts', posix)).toEqual(['src', 'a\\b.ts'])
@@ -56,5 +85,13 @@ describe('isInside (#428)', () => {
     expect(isInside('C:\\Work\\Proj', 'C:\\Work\\Proj-old', win32)).toBe(false)
     expect(isInside('C:\\Work\\Proj', 'D:\\Work\\Proj\\a', win32)).toBe(false)
     expect(isInside('C:\\Work\\Proj', '\\\\evil\\share\\Proj\\a', win32)).toBe(false)
+  })
+
+  // A drive root as the project (#849): judged by a prefix with a separator added, `D:\` became `D:\\` and held nothing
+  it('takes a drive root as holding everything on that drive, and nothing on another', () => {
+    expect(isInside('D:\\', 'D:\\src\\a.ts', win32)).toBe(true)
+    expect(isInside('D:\\', 'd:\\', win32)).toBe(true)
+    expect(isInside('D:\\', 'C:\\src', win32)).toBe(false)
+    expect(pathParts('D:\\', 'src\\a.ts', win32)).toEqual(['src', 'a.ts'])
   })
 })

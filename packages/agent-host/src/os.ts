@@ -165,3 +165,30 @@ export function availableMemorySource(
   if (platform === 'linux' || platform === 'android') return { kind: 'file', path: '/proc/meminfo', parse: 'meminfo' }
   return { kind: 'freemem' }
 }
+
+/**
+ * Node's `cpSync` keeps a link as a link (#849). Not on Windows: there a folder is linked with a junction (pnpm without
+ * Developer Mode, npm and yarn workspaces), and `cpSync` copies a junction as a real folder holding its target, and
+ * walks into two junctions that point at each other until the process dies. A copy there walks the tree itself.
+ */
+export function cpKeepsLinks(platform: Platform = HOST_PLATFORM): boolean {
+  return platform !== 'win32'
+}
+
+/**
+ * Folder sizes are asked of `du` (#849). Not on Windows: it has none on PATH (Git for Windows keeps one in `usr\bin`,
+ * which is not), and given a bare name it looks in the child's working folder first, so a `du.exe` in the project ran.
+ * There the sizes are read from the file system.
+ */
+export function measuresWithDu(platform: Platform = HOST_PLATFORM): boolean {
+  return platform !== 'win32'
+}
+
+/**
+ * A file name has to pass Windows' rules to be one (#849): there `nul` or `aux.c` names a device and a trailing dot or
+ * space is dropped when a program reads the name (Node, writing through `\\?\`, makes a file no other program can open),
+ * and `notes.txt:payload` writes a hidden stream on `notes.txt` instead of a file of that name.
+ */
+export function hasWindowsFileNames(platform: Platform = HOST_PLATFORM): boolean {
+  return platform === 'win32'
+}

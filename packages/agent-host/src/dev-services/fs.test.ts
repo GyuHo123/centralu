@@ -3,6 +3,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -222,7 +223,7 @@ describe('copyTree — the ordinary copy after a clone stops partway (#167)', ()
       return false
     }
 
-    await copyTree(src, dst, halfClone)
+    await copyTree(src, dst, { clone: halfClone })
     expect(readFileSync(join(dst, 'alias', 'index.js'), 'utf8')).toBe('module.exports = 1\n')
     expect(lstatSync(join(dst, 'alias')).isSymbolicLink()).toBe(true)
   })
@@ -433,6 +434,24 @@ describe('importFile — a file dragged in from outside', () => {
 
   it('rejects when the destination is outside the project', async () => {
     await expect(importFile(root, '..', 'evil.txt', Buffer.from('x'))).rejects.toThrow(/outside the project/)
+  })
+
+  /*
+   * #849: on Windows Node writes through `\\?\` paths, so `nul`, `aux.c` or `notes.` lands as a file of that very
+   * name, which Explorer, cmd and git read as a device or without its dot and cannot open or remove; and
+   * `notes.txt:payload` writes a hidden stream on notes.txt past `wx`. Checked here with this host's rules on
+   * Windows, and with Windows' rules given on any machine.
+   */
+  it('refuses on Windows a name Windows does not take as a file\'s, and writes nothing', async () => {
+    const windows = process.platform === 'win32' ? [undefined, 'win32' as const] : ['win32' as const]
+    for (const platform of windows) {
+      for (const bad of ['nul', 'aux.c', 'nul .txt', 'CONOUT$', 'notes.', 'notes ', 'notes.txt:payload']) {
+        await expect(importFile(root, '', bad, Buffer.from('x'), platform), bad).rejects.toThrow(/Windows/)
+      }
+    }
+    expect(readdirSync(root)).toEqual([])
+    // Elsewhere those are names like any other
+    if (process.platform !== 'win32') expect(await importFile(root, '', 'notes.', Buffer.from('x'), 'linux')).toEqual({ path: 'notes.' })
   })
 })
 
