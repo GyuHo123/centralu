@@ -100,12 +100,11 @@ pub fn spawn_pty(
     c.stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
         .stderr(Stdio::from(slave.try_clone()?));
-    // SAFETY: setsid and ioctl are async-signal-safe.
+    crate::os::new_session(&mut c);
+    // SAFETY: ioctl is async-signal-safe. Runs after `new_session`'s `setsid`: pre-exec steps run in
+    // the order they were added.
     unsafe {
         c.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
             // stdin is the slave by now: make it this new session's controlling terminal.
             if libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
                 return Err(io::Error::last_os_error());
@@ -224,12 +223,11 @@ pub fn signal(pid: i32, sig: i32, group: bool) -> io::Result<()> {
     if pid <= 1 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "refusing to signal pid <= 1"));
     }
-    let target = if group { -pid } else { pid };
-    // SAFETY: a plain syscall.
-    if unsafe { libc::kill(target, sig) } == -1 {
-        return Err(io::Error::last_os_error());
+    if group {
+        crate::os::signal_group(pid as u32, sig)
+    } else {
+        crate::os::signal_pid(pid as u32, sig)
     }
-    Ok(())
 }
 
 /**
@@ -246,11 +244,10 @@ pub fn signal(pid: i32, sig: i32, group: bool) -> io::Result<()> {
  */
 pub fn signal_leftovers(pgid: i32, sig: i32) -> bool {
     // SAFETY: getpgrp takes no arguments.
-    if pgid <= 1 || exists(pgid) || pgid == unsafe { libc::getpgrp() } {
+    if pgid <= 1 || number_in_use(pgid) || pgid == unsafe { libc::getpgrp() } {
         return false;
     }
-    // SAFETY: a plain syscall; a negative pid is the group.
-    unsafe { libc::kill(-pgid, sig) == 0 }
+    crate::os::signal_group(pgid as u32, sig).is_ok()
 }
 
 /// Whether any process is still in the group.
@@ -279,8 +276,7 @@ pub fn signal_session(sid: i32, sig: i32, leader_alive: bool) -> bool {
     groups.dedup();
     let mut any = false;
     for pgid in groups {
-        // SAFETY: a plain syscall; a negative pid is the group.
-        any |= unsafe { libc::kill(-pgid, sig) } == 0;
+        any |= crate::os::signal_group(pgid as u32, sig).is_ok();
     }
     any
 }
@@ -305,7 +301,7 @@ fn session_groups(sid: i32, leader_alive: bool) -> Vec<i32> {
 fn session_groups_among(pids: Vec<i32>, sid: i32, leader_alive: bool) -> Vec<i32> {
     // SAFETY: getsid(0) and getpgrp take or need no pointers.
     let (own_session, own_group) = unsafe { (libc::getsid(0), libc::getpgrp()) };
-    if sid <= 1 || sid == own_session || (!leader_alive && exists(sid)) {
+    if sid <= 1 || sid == own_session || (!leader_alive && number_in_use(sid)) {
         return Vec::new();
     }
     // SAFETY (both calls): plain syscalls; a process gone meanwhile answers -1.
@@ -355,8 +351,10 @@ pub fn try_reap(pid: i32) -> Option<ExitStatus> {
     }
 }
 
-/// Whether a process with this pid exists (whoever owns it).
-pub fn exists(pid: i32) -> bool {
+/// Whether anyone holds `pid` as a process id, a zombie included (whoever owns it): while it is held,
+/// the number cannot be given to a new process, and a group or session by that number is the one it
+/// always was. Not whether that process runs (`os::pid_alive`, which reads a zombie as ended).
+pub fn number_in_use(pid: i32) -> bool {
     // SAFETY: signal 0 only checks.
     let rc = unsafe { libc::kill(pid, 0) };
     rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
@@ -408,6 +406,23 @@ pub enum Watch {
     Gone,
     /// The OS cannot watch it: poll.
     Poll,
+}
+
+impl Watch {
+    /**
+     * What a registration that failed with `e` means (#840 item 8, review): `ESRCH`, no process by
+     * that number, is the one answer that says it has gone (kqueue refuses a zombie this way too).
+     * Anything else (a kernel without `pidfd_open`, out of descriptors) says nothing about the
+     * process, which is then polled by its number. Read as "gone", such an error had a handed-over
+     * host that still ran treated as ended.
+     */
+    pub fn after_error(e: io::Error) -> Watch {
+        if e.raw_os_error() == Some(libc::ESRCH) {
+            Watch::Gone
+        } else {
+            Watch::Poll
+        }
+    }
 }
 
 /// A child the backend has news of, or may have.
@@ -498,7 +513,7 @@ impl ExitWatch {
         for pid in polled {
             match try_reap(pid) {
                 Some(st) => out.push((pid, st)),
-                None if !exists(pid) => {
+                None if !number_in_use(pid) => {
                     let st = self.unknown_status(pid);
                     out.push((pid, st))
                 }
@@ -512,6 +527,54 @@ impl ExitWatch {
             self.known.remove(pid);
         }
         out
+    }
+}
+
+/**
+ * One process watched by its identity rather than its number (#840 item 8): a kqueue registration on
+ * macOS, a pidfd on Linux. A process another keeper started (a handed-over host) is not ours to reap,
+ * so once it has ended and its parent has reaped it, its pid may be given to someone else, and
+ * `kill(pid, 0)` would then find that someone: the host would read as running, and a stop would
+ * signal a stranger. The watch is made while the process cannot have been reaped yet (the outgoing
+ * keeper, its parent, reaps only after the commit), and once it reports the end that answer stays.
+ * Where neither is available (a kernel before pidfds, another unix) it falls back to `pid_alive`.
+ */
+pub struct ProcessWatch {
+    pid: i32,
+    backend: ExitBackend,
+    polled: bool,
+    ended: bool,
+}
+
+impl ProcessWatch {
+    pub fn new(pid: u32) -> io::Result<Self> {
+        let pid = i32::try_from(pid).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid out of range"))?;
+        let mut backend = ExitBackend::new()?;
+        let watch = backend.watch(pid);
+        Ok(Self::with(pid, backend, watch))
+    }
+
+    fn with(pid: i32, backend: ExitBackend, watch: Watch) -> Self {
+        let (polled, ended) = match watch {
+            Watch::Registered => (false, false),
+            Watch::Gone => (false, true),
+            Watch::Poll => (true, false),
+        };
+        ProcessWatch { pid, backend, polled, ended }
+    }
+
+    /// Whether the process has ended. Once true, always true, whoever holds the number next.
+    pub fn ended(&mut self) -> bool {
+        if !self.ended {
+            self.ended = if self.polled {
+                !crate::os::pid_alive(self.pid as u32)
+            } else {
+                let pid = self.pid;
+                let seen = self.backend.seen();
+                seen.iter().any(|s| s.pid == pid && (s.exited.is_some() || self.backend.gone(pid)))
+            };
+        }
+        self.ended
     }
 }
 
@@ -770,6 +833,27 @@ mod tests {
         assert!(session_groups_among(Vec::new(), sid, false).is_empty());
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// #840 item 8, review: only "no such process" means gone; any other failure to register
+    /// falls back to polling the number instead of reading as an end.
+    #[test]
+    fn only_esrch_means_a_process_has_gone() {
+        assert!(matches!(Watch::after_error(io::Error::from_raw_os_error(libc::ESRCH)), Watch::Gone));
+        for e in [libc::ENOSYS, libc::EMFILE, libc::EINVAL, libc::EPERM] {
+            assert!(matches!(Watch::after_error(io::Error::from_raw_os_error(e)), Watch::Poll), "errno {e}");
+        }
+    }
+
+    /// The fallback: a process watched by polling its number is running until it ends.
+    #[test]
+    fn a_polled_process_watch_sees_the_process_end() {
+        let mut child = std::process::Command::new("/bin/sh").args(["-c", "sleep 0.2"]).spawn().unwrap();
+        let pid = child.id() as i32;
+        let mut w = ProcessWatch::with(pid, ExitBackend::new().unwrap(), Watch::Poll);
+        assert!(!w.ended(), "a running process read as ended");
+        child.wait().unwrap();
+        assert!(w.ended(), "the end of a polled process was not seen");
     }
 
     #[test]

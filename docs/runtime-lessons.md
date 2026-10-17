@@ -649,10 +649,15 @@ Rule: a group stop ends with KILL to the group, like the children's stop (CH8).
 Guard: **UNGUARDED**.
 Platforms: macOS, Linux.
 
-**SU7. A host the keeper did not start is supervised by pid.**
-Rule: a handed-over host is not the keeper's child: it is watched and waited on by pid; EPERM from `kill(pid, 0)`
-means alive.
-Guard: `keeper/os/unix.rs` `a_process_we_may_not_signal_is_alive`; `scripts/keeper-handoff-integration.mjs` stops a
+**SU7. A host the keeper did not start is supervised by its identity, not its number.**
+Happened: #840 item 8: a handed-over host was watched by its bare pid, so once it ended and its parent reaped it, a
+new process given that pid read as the host still running, and a stop would have sent it SIGKILL.
+Rule: a handed-over host is not the keeper's child: it is watched by a kqueue registration (macOS) or a pidfd
+(Linux) made in the handoff's `prepare`, before `ready` (`os::children::ProcessWatch`), and an end once seen stays
+seen. Only "no such process" (`ESRCH`) at registration means it has gone; any other failure, and a system with
+neither, falls back to the pid, where EPERM from `kill(pid, 0)` means alive.
+Guard: `host_proc/handover.rs` `a_handed_over_host_that_ended_stays_ended_when_its_number_is_reused`;
+`keeper/os/unix.rs` `a_process_we_may_not_signal_is_alive`; `scripts/keeper-handoff-integration.mjs` stops a
 foreign host at its end.
 Platforms: macOS, Linux.
 
@@ -1008,6 +1013,16 @@ Happened: writes are blocking; a peer that stopped reading held its relay thread
 freeze waits for each relay (#392).
 Rule: a 30 s write limit on both relay sockets.
 Guard: `keeper/keeper/front_door.rs` `a_client_that_stops_reading_is_let_go`.
+Platforms: macOS, Linux.
+
+**SW3a. The front door relays at most 1,024 connections, one descriptor per socket.**
+Happened: #840 item 3: each relay held four descriptors (its sockets and a copy of each in the door's table), and any
+local process could open relays without bound until the keeper, and everything it holds, ran out of descriptors.
+Rule: the table shares the relay's sockets, and a connection past `MAX_RELAYS` (1,024) is closed as it is accepted,
+logged once per run. A local process can still hold all 1,024 and lock new clients out of the door until it lets go:
+a contained lockout of the door alone, instead of descriptor exhaustion for the whole keeper.
+Guard: `keeper/keeper/front_door.rs` `a_relay_holds_one_descriptor_per_socket`,
+`connections_past_the_cap_are_closed_until_one_ends`.
 Platforms: macOS, Linux.
 
 **SW4. The next host checks itself before the running one drains.**

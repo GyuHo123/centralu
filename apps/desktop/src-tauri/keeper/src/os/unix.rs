@@ -186,7 +186,9 @@ pub fn hide_console(cmd: &mut Command) {
     let _ = cmd;
 }
 
-/// Whether a process exists and is not a zombie waiting for someone else to reap it.
+/// Whether a process exists and is not a zombie waiting for someone else to reap it: whether it
+/// *runs*. Not whether its number is taken, which a zombie still does (`children::number_in_use`,
+/// the question before signalling a group by a number that may be reused).
 ///
 /// `kill(pid, 0)` alone succeeds on a zombie. A host handed over by the previous keeper is that
 /// keeper's child, not ours: when it died before that keeper reaped it, signal 0 kept saying it
@@ -222,10 +224,43 @@ pub fn group_signal_after_exit_is_safe(pid: u32) -> bool {
 /// SIGTERM to the single host process only — children (codex, etc.) are cleaned up by the
 /// host itself via EOF (#57).
 pub fn kill_pid(pid: u32) {
-    if let Some(pid) = signal_target(pid) {
-        // SAFETY: a plain syscall to one positive pid.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+    let _ = signal_pid(pid, libc::SIGTERM);
+}
+
+/**
+ * Sends `signal` to the one process `pid`. Refused (`InvalidInput`) for a number `kill(2)` reads as
+ * something other than one process (`signal_target`). The one way the keeper signals a single
+ * process: the host, a handed-over host, a child it holds (#840 item 13, which found four signal
+ * helpers, each with guards of its own).
+ */
+pub fn signal_pid(pid: u32, signal: libc::c_int) -> io::Result<()> {
+    let Some(target) = signal_target(pid) else { return Err(refused(pid)) };
+    // SAFETY: a plain syscall to one positive pid.
+    if unsafe { libc::kill(target, signal) } == -1 {
+        return Err(io::Error::last_os_error());
     }
+    Ok(())
+}
+
+/**
+ * Sends `signal` to the process group `pgid`, under `signal_pid`'s rule and never to the caller's own
+ * group. The one way the keeper signals a group: a host's, a child's, a terminal session's.
+ */
+pub fn signal_group(pgid: u32, signal: libc::c_int) -> io::Result<()> {
+    let Some(target) = signal_target(pgid) else { return Err(refused(pgid)) };
+    // SAFETY: getpgrp takes no arguments.
+    if target == unsafe { libc::getpgrp() } {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "refusing to signal the keeper's own process group"));
+    }
+    // SAFETY: a plain syscall; a negative pid is the group, and `signal_target` ruled out 0 and 1.
+    if unsafe { libc::kill(-target, signal) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn refused(pid: u32) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, format!("refusing to signal pid {pid}: it names more than one process"))
 }
 
 /**
@@ -248,13 +283,14 @@ pub fn signal_target(pid: u32) -> Option<i32> {
  * which is why only Linux ever saw it (docs/spikes/2026-10-linux-keeper.md).
  */
 pub fn kill_group(pid: u32) {
-    let Some(pgid) = signal_target(pid) else { return };
-    // SAFETY: getpgrp takes no arguments.
-    if pgid == unsafe { libc::getpgrp() } {
-        return;
-    }
-    // SAFETY: a plain syscall; a negative pid is the group, and `signal_target` ruled out 0 and 1.
-    unsafe { libc::kill(-pgid, libc::SIGTERM) };
+    let _ = signal_group(pid, libc::SIGTERM);
+}
+
+/// SIGKILL to the process group `pid` leads, under `kill_group`'s rules: for a host that ignored
+/// TERM and its grace (#840 item 1). Only while the host is still held unreaped, so its number is
+/// still its group's.
+pub fn kill_group_now(pid: u32) {
+    let _ = signal_group(pid, libc::SIGKILL);
 }
 
 /// Asks the login shell where node is. It has to be interactive (-i) for .zshrc's nvm/mise
@@ -273,7 +309,6 @@ pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 /// `probe_login_shell` with the shell and the bound given, so a test can hand it a shell that hangs
 /// or stops itself.
 pub fn probe_shell(shell: &str, timeout: std::time::Duration) -> Option<String> {
-    use std::io::Read;
     use std::io::BufReader;
     use std::path::Path;
     use std::process::Stdio;
@@ -302,28 +337,57 @@ pub fn probe_shell(shell: &str, timeout: std::time::Duration) -> Option<String> 
     let mut child = cmd.spawn().ok()?;
     let pid = child.id();
     let stdout = child.stdout.take()?;
+    let deadline = std::time::Instant::now() + timeout;
 
     // **Getting stuck here would fail the whole app's launch.** Shell configurations really do
     // sometimes wait forever (waiting on prompt input, for example), so this cuts it off on a
     // timer and kills the whole group.
+    //
+    // The answer is the marked line, not the end of the output (#840 item 12): something the
+    // configuration started in the background (an agent, a version manager's daemon) inherits
+    // stdout and keeps it open after the shell has exited, and waiting for the end then sat out the
+    // whole bound and fell back to the fixed paths with the answer already read. A reader still
+    // blocked on such a pipe ends when that process lets go of it.
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = BufReader::new(stdout).read_to_string(&mut buf);
-        let _ = tx.send(buf);
-    });
-    let out = match rx.recv_timeout(timeout) {
-        Ok(out) => out,
-        Err(_) => {
-            kill_group(pid);
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
+        use std::io::BufRead;
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
         }
-    };
+    });
+    let mut found = None;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) => {
+                found = super::parse_probe_output(&line);
+                if found.is_some() {
+                    break;
+                }
+            }
+            // The output ended: the shell said all it will
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                kill_group(pid);
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    // The shell exits right after the line it was asked for; one that does not is ended at the bound
+    while matches!(child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if matches!(child.try_wait(), Ok(None)) {
+        kill_group(pid);
+        let _ = child.kill();
+    }
     let _ = child.wait();
-
-    super::parse_probe_output(&out)
+    found
 }
 
 
@@ -394,6 +458,18 @@ mod tests {
         let node = fake_shell("node", "exit 0");
         let shell = fake_shell("knows-node", &format!("echo 'noise from a .zshrc'\necho \"__CC_NODE__:{node}\""));
         assert_eq!(probe_shell(&shell, PROBE_TIMEOUT), Some(node));
+    }
+
+    /// #840 item 12: the answer is the marked line, not the end of the output. A process the
+    /// configuration left in the background holds stdout open after the shell has exited; waiting
+    /// for the end sat out the bound and fell back to the fixed paths with the answer already read.
+    #[test]
+    fn the_answer_does_not_wait_for_a_background_process_holding_the_output() {
+        let node = fake_shell("node-bg", "exit 0");
+        let shell = fake_shell("leaves-a-job", &format!("echo \"__CC_NODE__:{node}\"\nsleep 4 &"));
+        let began = std::time::Instant::now();
+        assert_eq!(probe_shell(&shell, std::time::Duration::from_secs(2)), Some(node));
+        assert!(began.elapsed() < std::time::Duration::from_secs(1), "{:?}", began.elapsed());
     }
 
     /// PA2: a shell that never answers is cut off at the bound, and its group with it.

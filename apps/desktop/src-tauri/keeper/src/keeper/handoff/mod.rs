@@ -42,8 +42,9 @@
 //! reverse order. A never closed or moved anything (the snapshot holds duplicates), and while frozen
 //! it read nothing, so it carries on exactly where it stopped. B, on `abort`, exits without acting.
 //! If B instead sees the channel close after `ready` with no `commit`, A died at the worst moment:
-//! B takes over if A is gone (it has the whole state, and nobody else does) and exits if A is
-//! still alive (A must then be resuming).
+//! B takes over once A is gone (it has the whole state, and nobody else does; A's zombie counts as
+//! gone, and B waits up to 5 s for A to finish exiting) and exits if A is still alive after that
+//! (A must then be resuming).
 //!
 //! **The lock** never has a gap: B holds a duplicate of the same open file description, so the
 //! `flock` is held by both until A exits, and by B after. A third keeper starting at any point is
@@ -184,6 +185,9 @@ fn thaw(k: &Keeper, f: &Frozen) {
     if f.keeper {
         k.frozen.store(false, Ordering::SeqCst);
         if let Ok(mut st) = k.state.lock() {
+            for w in &st.subscribers {
+                w.push.thaw();
+            }
             k.broadcast(&mut st);
         }
     }
@@ -344,6 +348,15 @@ fn freeze(k: &Arc<Keeper>, f: &mut Frozen, then_switch: Option<BuildSource>) -> 
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    // The windows' writers: what they queued goes out first, then they stop, so no line is half
+    // written when the sockets change hands. A write in progress ends within the window write
+    // timeout, with the window closed if it failed. The writers are read from the state but waited
+    // for without its lock, which a writer's failure takes.
+    let pushers: Vec<_> = k.state.lock().map_err(|_| "keeper state poisoned")?.subscribers.iter().map(|w| w.push.clone()).collect();
+    let windows_deadline = Instant::now() + server::WINDOW_WRITE_TIMEOUT + Duration::from_secs(1);
+    if !pushers.iter().all(|p| p.freeze(windows_deadline)) {
+        return Err("a window did not take its status in time".into());
+    }
     let door = k.door.freeze(FREEZE_LIMIT)?;
     f.door = true;
     let host = k.sup.freeze(FREEZE_LIMIT)?;
@@ -379,8 +392,8 @@ fn freeze(k: &Arc<Keeper>, f: &mut Frozen, then_switch: Option<BuildSource>) -> 
     });
     let st = k.state.lock().map_err(|_| "keeper state poisoned")?;
     let mut windows = Vec::new();
-    for (_, s) in &st.subscribers {
-        windows.push(pack.fd(s).map_err(e)?);
+    for w in &st.subscribers {
+        windows.push(pack.fd(&w.stream).map_err(e)?);
     }
     let now = Instant::now();
     let snap = KeeperSnap {
@@ -441,12 +454,11 @@ fn spawn_successor(k: &Keeper, exe: &Path, target: &BuildSource) -> std::io::Res
     // first keeper.
     cmd.stdin(Stdio::null());
     let fd = theirs.as_raw_fd();
-    // SAFETY: setsid, dup2 and fcntl are async-signal-safe, which is all pre_exec requires.
+    os::new_session(&mut cmd);
+    // SAFETY: dup2 and fcntl are async-signal-safe, which is all pre_exec requires. Runs after
+    // `new_session`'s step: pre-exec steps run in the order they were added.
     unsafe {
         cmd.pre_exec(move || {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
             if fd == 3 {
                 // Already in place: only the close-on-exec flag has to go
                 if libc::fcntl(3, libc::F_SETFD, 0) == -1 {
@@ -509,6 +521,12 @@ fn prepare(data: &Path, msg: wire::Message) -> Result<Prepared, String> {
     let host = match &snap.host {
         Some(h) => Some(ForeignAdopt {
             pid: h.pid,
+            // Now, before `ready` (#840 item 8). The outgoing keeper is the host's parent only if it
+            // started the host: then it reaps the host after `ready` at the earliest, and the number
+            // is still the host's here. A host handed over before has init (or a subreaper) as its
+            // parent, which reaps it the moment it ends: a host that ended during the freeze could
+            // then have its number taken in between only if the pid space wrapped meanwhile.
+            watch: os::children::ProcessWatch::new(h.pid).map_err(|e| format!("cannot watch the host (pid {}): {e}", h.pid))?,
             stdin: u.fd(h.stdin)?,
             stdout: u.fd(h.stdout)?,
             buffered: u.blob(h.buffered)?,
@@ -523,10 +541,28 @@ fn prepare(data: &Path, msg: wire::Message) -> Result<Prepared, String> {
     Ok(Prepared { snap, lock, listener, door, children, host, windows })
 }
 
-/// Whether a process is still there (the outgoing keeper, when the channel closed unexpectedly).
-fn alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+/// How long an incoming keeper whose channel closed after `ready` with no `commit` waits for the
+/// outgoing keeper to be gone before it concludes that keeper is resuming instead.
+const PREVIOUS_GONE_LIMIT: Duration = Duration::from_secs(5);
+
+/**
+ * Whether the outgoing keeper `pid` has ended within `limit` (#840 item 4). Its channel closes as
+ * its process exits, so at that moment it may still be running out its exit, and once it has
+ * ended it is a zombie until its parent reaps it. A single `kill(pid, 0)` counted both as alive:
+ * the incoming keeper then exited too, and every agent and terminal both held lost its keeper.
+ * `os::pid_alive` reads a zombie as ended, and the question is asked until `limit`.
+ */
+fn previous_keeper_gone(pid: u32, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        if !os::pid_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// A test hook, read only by an incoming keeper: wait this long before saying ready, so a test
@@ -598,7 +634,7 @@ pub(super) fn take(opts: Options, fd: RawFd) -> i32 {
         Err(e) => {
             // After ready the outgoing keeper only commits; the channel closing without a word
             // means it died. With it gone, this keeper holds the only copy of everything.
-            if alive(from) {
+            if !previous_keeper_gone(from, PREVIOUS_GONE_LIMIT) {
                 log(&format!("no commit ({e}) and the previous keeper is still running; exiting"));
                 return EXIT_ABORTED;
             }
