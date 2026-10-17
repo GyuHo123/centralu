@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -32,6 +33,28 @@ export function plantTreeScript(dir: string): string {
     ].join('\n'),
   )
   return script
+}
+
+/**
+ * Windows: the console hosts this process has started, by pid: one per pseudoconsole, `conhost.exe` for the ConPTY of
+ * Windows and `OpenConsole.exe` for the one node-pty ships (#849). Through CIM, the one listing with the parent id.
+ */
+export function consoleHosts(): number[] {
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const query = `Get-CimInstance Win32_Process -Filter "ParentProcessId=${process.pid} AND (Name='conhost.exe' OR Name='OpenConsole.exe')" | ForEach-Object { $_.ProcessId }`
+  const out = execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', query], { encoding: 'utf8', timeout: 60_000, windowsHide: true })
+  return out.split(/\r?\n/).filter(Boolean).map(Number)
+}
+
+/** Windows: this process's threads, handles and private memory (MB), as Task Manager counts them */
+export function processCounters(): { threads: number; handles: number; privateMb: number } {
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const query = `$p = Get-Process -Id ${process.pid}; "$($p.Threads.Count) $($p.HandleCount) $($p.PrivateMemorySize64)"`
+  const [threads, handles, bytes] = execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', query], { encoding: 'utf8', timeout: 60_000, windowsHide: true })
+    .trim()
+    .split(/\s+/)
+    .map(Number)
+  return { threads: threads!, handles: handles!, privateMb: Math.round(bytes! / 1048576) }
 }
 
 /** The pids the tree has written so far */

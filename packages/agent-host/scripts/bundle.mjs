@@ -21,6 +21,7 @@ import { chmodSync, cpSync, mkdirSync, rmSync, existsSync, readFileSync, statSyn
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CONPTY_FILES } from '../../../scripts/conpty-files.mjs'
 
 const require = createRequire(import.meta.url)
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url))
@@ -199,11 +200,17 @@ mkdirSync(join(ptyDest, ptyNativeDir), { recursive: true })
 // (lib/windowsPtyAgent.js picks ConPTY from build 18309), and `conpty_console_list.node` is what
 // lets it find a shell's console processes to end them. Shipping only `pty.node` (the winpty
 // binding) left the packaged terminal dead with "Failed to load native module: conpty.node".
-// `conpty/` (conpty.dll and OpenConsole.exe) and winpty's agent are only used with options we do
-// not pass (`useConptyDll`, or a Windows older than 1809), so they stay out.
-for (const file of ['pty.node', 'spawn-helper', 'conpty.node', 'conpty_console_list.node']) {
+// `conpty/` (conpty.dll and OpenConsole.exe, ~1.2 MB) is the ConPTY a terminal runs on (#849,
+// `useConptyDll` in pty-slot.ts `spawnPty`): Windows' own left a conhost.exe per tab and per command
+// until the host exited. conpty.node loads it from `conpty/` beside itself. winpty's agent is only
+// used on a Windows older than 1809, so it stays out.
+for (const file of ['pty.node', 'spawn-helper', 'conpty.node', 'conpty_console_list.node', 'conpty']) {
   const from = join(ptySrc, ptyNativeDir, file)
-  if (existsSync(from)) cpSync(from, join(ptyDest, ptyNativeDir, file))
+  if (existsSync(from)) cpSync(from, join(ptyDest, ptyNativeDir, file), { recursive: true })
+}
+if (process.platform === 'win32') {
+  const missing = CONPTY_FILES.filter((f) => !existsSync(join(ptyDest, ptyNativeDir, f)))
+  if (missing.length > 0) throw new Error(`node-pty's ${missing.join(', ')} missing from ${join(ptySrc, ptyNativeDir)}: the packaged terminals would not start`)
 }
 
 /**

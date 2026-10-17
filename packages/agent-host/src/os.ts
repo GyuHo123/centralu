@@ -66,6 +66,22 @@ export function locksRunningPrograms(platform: Platform = HOST_PLATFORM): boolea
   return platform === 'win32'
 }
 
+/**
+ * A pty runs on the ConPTY node-pty ships (`useConptyDll`, `conpty/` beside `conpty.node`) rather than the one in the
+ * OS (Windows, #849): Windows' own left a `conhost.exe` per terminal tab and per command until the host exited.
+ */
+export function usesShippedConpty(platform: Platform = HOST_PLATFORM): boolean {
+  return platform === 'win32'
+}
+
+/**
+ * A folder being watched cannot be renamed or moved, and neither can any folder above it (Windows, #849): the watch
+ * holds the folder open. There a project is watched by one recursive watch on its root instead of one per folder.
+ */
+export function locksWatchedFolders(platform: Platform = HOST_PLATFORM): boolean {
+  return platform === 'win32'
+}
+
 /** A program's file name on `platform`: `codex.exe` on Windows, `codex` elsewhere. */
 export function programFile(name: string, platform: Platform = HOST_PLATFORM): string {
   return platform === 'win32' ? `${name}.exe` : name

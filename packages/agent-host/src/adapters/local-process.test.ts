@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -7,6 +7,7 @@ import { KILL_GRACE_MS, type WinProcRow } from '../dev-services/kill-tree.js'
 import { CodexClient } from './codex/client.js'
 import { alive, fakeAgentCli, goneWithin, helperPid, killLeftovers } from './fake-agent-cli.test-helpers.js'
 import { spawnLocalAgent } from './local-process.js'
+import { SLOW } from '../../../../tooling/test-timing.js'
 
 /**
  * An agent CLI this host starts itself, without a keeper (Windows, dev, e2e, a debug app): stopping
@@ -177,6 +178,84 @@ describe.runIf(!unix)('an agent CLI installed as an npm .cmd shim (Windows)', ()
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  /*
+   * #849: Yarn v1's global bin is a .cmd that starts npm's cmd-shim in Yarn's own node_modules/.bin. Only the outer one
+   * was read, so the .cmd itself was spawned: EINVAL, thrown out of CodexClient's constructor.
+   */
+  it('starts a CLI behind a shim that starts another shim (Yarn v1 global bin)', async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-yarn-shim-')))
+    try {
+      const entry = join(dir, 'Data', 'global', 'node_modules', 'fake-cli', 'cli.js')
+      mkdirSync(dirname(entry), { recursive: true })
+      writeFileSync(entry, "require('node:fs').writeFileSync(process.argv[2], 'ran'); process.stdin.on('end', () => process.exit(0)); process.stdin.resume()\n")
+      mkdirSync(join(dir, 'Data', 'global', 'node_modules', '.bin'))
+      writeFileSync(join(dir, 'Data', 'global', 'node_modules', '.bin', 'fake-cli.cmd'), '@ECHO off\r\n"%~dp0\\..\\fake-cli\\cli.js" %*\r\n')
+      mkdirSync(join(dir, 'bin'))
+      const shim = join(dir, 'bin', 'fake-cli.cmd')
+      writeFileSync(shim, '@"%~dp0\\..\\Data\\global\\node_modules\\.bin\\fake-cli.cmd"   %*\r\n')
+      const out = join(dir, 'ran')
+      const ended = new Promise<boolean>((resolve) => {
+        const client = new CodexClient({ onNotification: () => {}, onServerRequest: () => {}, onExit: (_code, expected) => resolve(expected) }, { command: shim, args: [out] })
+        const wait = setInterval(() => {
+          if (!existsSync(out)) return
+          clearInterval(wait)
+          void client.dispose()
+        }, 20)
+      })
+      expect(await ended).toBe(true)
+      expect(readFileSync(out, 'utf8')).toBe('ran')
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+    }
+  })
+
+  it('a .cmd that is not a shim fails the session, never the constructor that starts it', async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-plain-cmd-')))
+    try {
+      const cmd = join(dir, 'codex.cmd')
+      writeFileSync(cmd, '@echo codex\r\n')
+      let client: CodexClient | undefined
+      const exited = new Promise<boolean>((resolve) => {
+        client = new CodexClient({ onNotification: () => {}, onServerRequest: () => {}, onExit: (_code, expected) => resolve(expected) }, { command: cmd })
+      })
+      expect(client).toBeDefined()
+      expect(await exited).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+    }
+  })
+})
+
+/** A command Node refuses outright throws from `spawn` itself: that is reported like a CLI that is not there (#849) */
+describe('an agent CLI that cannot be started at all', () => {
+  it('reports why as an error event, and never throws where it is started', async () => {
+    // A NUL in the command is refused by Node itself, on every OS, before any process exists
+    const p = spawnLocalAgent({ command: 'no\u0000such-cli', args: [], env: process.env })
+    const err = await new Promise<Error>((resolve) => p.once('error', resolve))
+    expect(err).toBeInstanceOf(Error)
+    expect(p.pid).toBeUndefined()
+    expect(p.kill('SIGTERM')).toBe(false)
+    expect(() => p.stdin.write('{}\n')).not.toThrow()
+  })
+
+  /*
+   * And it ends: 'exit' after the 'error', so whoever waits for the exit is not left waiting (a review of #964). Node
+   * sends a never-started process 'error' and 'close' only, so a CLI that is not there needed this as much.
+   */
+  it.each([
+    ['refused outright (a NUL in the name)', 'no\u0000such-cli'],
+    ['not there (ENOENT)', 'cc-no-such-agent-cli'],
+  ])('%s, reports its error, then its exit', async (_what, command) => {
+    const p = spawnLocalAgent({ command, args: [], env: process.env })
+    const seen: string[] = []
+    const exited = new Promise<void>((resolve) => p.once('exit', () => resolve()))
+    p.on('error', () => seen.push('error'))
+    p.on('exit', () => seen.push('exit'))
+    // Bounded, so a missing exit fails here with what was seen rather than at the test's own limit
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000 * SLOW))])
+    expect(seen).toEqual(['error', 'exit'])
+  })
 })
 
 /**
@@ -191,7 +270,11 @@ describe('an agent CLI started without a keeper (Windows)', () => {
     let orphan = 0
     const os = {
       platform: 'win32' as const,
-      taskkill: (pid: number) => void killed.push(pid),
+      taskkill: (pid: number) => {
+        killed.push(pid)
+        // Ends what it names, as taskkill does: a taskkill that succeeded is not followed by a kill of our own (#857)
+        if (pid === p.pid) process.kill(pid)
+      },
       listProcesses: async (): Promise<WinProcRow[]> => {
         listed++
         return [{ pid: orphan, ppid: p.pid!, created: Date.now() - 50 }]

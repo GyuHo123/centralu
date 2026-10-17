@@ -42,7 +42,14 @@ const realDeps = (): Deps => ({
   },
 })
 
-export function launchFor(path: string, deps: Deps = realDeps()): ToolLaunch {
+/**
+ * A batch shim may start another one (#849): Yarn v1's global bin (`%LOCALAPPDATA%\Yarn\bin\claude.cmd`) is one line,
+ * `@"%~dp0\..\Data\global\node_modules\.bin\claude.cmd" %*`, whose target is npm's cmd-shim. That one is followed too, up
+ * to this many shims deep, so a loop of shims ends.
+ */
+const MAX_SHIM_DEPTH = 3
+
+export function launchFor(path: string, deps: Deps = realDeps(), depth = 0): ToolLaunch {
   const plain = { command: path, args: [] }
   if (deps.platform !== 'win32' || !/\.(cmd|bat)$/i.test(path)) return plain
   let text: string
@@ -57,6 +64,10 @@ export function launchFor(path: string, deps: Deps = realDeps()): ToolLaunch {
   if (!target || !deps.exists(target)) return plain
   if (/\.(c|m)?js$/i.test(target)) return { command: deps.node, args: [target] }
   if (/\.exe$/i.test(target)) return { command: target, args: [] }
+  if (/\.(cmd|bat)$/i.test(target) && depth + 1 < MAX_SHIM_DEPTH) {
+    const inner = launchFor(target, deps, depth + 1)
+    if (inner.command !== target) return inner
+  }
   return plain
 }
 
@@ -124,16 +135,36 @@ export function nodeShimEntry(text: string, dir: string, deps: Pick<Deps, 'exist
  * `node` becomes the absolute `node.exe` on PATH. The second matters too: given a bare name,
  * Windows process creation looks in the working directory before PATH, and an app's working
  * directory is its own folder.
+ *
+ * A path (`bin/server`, `.\run.cmd`) is taken from `cwd`, the folder the command will run in, and
+ * on Windows without an extension it is looked up with PATHEXT as cmd.exe does (#849). Read from the
+ * host's own folder instead, a relative `.cmd` was never found and an extensionless one never had
+ * its `.cmd` tried, so an app that started everywhere else failed only on Windows.
  */
 export function resolveCommand(
   command: string,
   env: Record<string, string | undefined> = process.env,
   deps: Deps = realDeps(),
+  cwd?: string,
 ): ToolLaunch {
   if (deps.platform !== 'win32') return { command, args: [] }
-  if (/[\\/]/.test(command)) return launchFor(command, deps)
+  if (/[\\/]/.test(command)) {
+    const path = cwd === undefined ? command : win32.resolve(cwd, command)
+    return launchFor(withPathExt(path, env, deps) ?? path, deps)
+  }
   const found = whichTool(command, env, 'win32', deps.exists)
   return found ? launchFor(found, deps) : { command, args: [] }
+}
+
+/** A Windows path without an extension, with the first PATHEXT extension that exists; null when it has one or none fits */
+function withPathExt(path: string, env: Record<string, string | undefined>, deps: Pick<Deps, 'exists'>): string | null {
+  if (/\.[^\\/.]+$/.test(win32.basename(path))) return null
+  const pathExt = Object.entries(env).find(([k]) => k.toUpperCase() === 'PATHEXT')?.[1] || '.COM;.EXE;.BAT;.CMD'
+  for (const ext of pathExt.split(';').filter(Boolean)) {
+    const candidate = path + ext.toLowerCase()
+    if (deps.exists(candidate)) return candidate
+  }
+  return null
 }
 
 /**
@@ -145,16 +176,33 @@ export function resolveCommand(
  * with the project as its working directory, so a `git.exe` committed at a repository's root would
  * have run on the first status read of a freshly added project (#14). A found path is remembered;
  * a miss is asked again next time, so a git installed while the app runs is picked up.
+ *
+ * **Never a `.cmd` or `.bat`** (#849): Node refuses to spawn one (EINVAL), so a `gh.cmd` or `git.cmd`
+ * first on PATH made every call throw, `gitBranchPr` too, which is documented not to. Such a file is
+ * taken as the `.exe` it starts (a package manager's shim), or else the first `.exe` on PATH.
+ *
+ * With neither, **never the bare name**: given one, Windows would look in the project first and run a
+ * `git.exe` planted there, which is what the absolute path is for. The answer is then the `.exe`
+ * beside that `.cmd`, which the lookup has just found is not there: the spawn reports it missing
+ * (ENOENT, `gitBranchPr`'s 'unavailable'), and nothing is looked for anywhere else. It is not
+ * remembered, so a git installed later is found.
  */
 export function programPath(
   name: string,
   platform: NodeJS.Platform = process.platform,
-  find: (name: string) => string | null = (n) => whichTool(n),
+  find: (name: string, pathExt?: string) => string | null = (n, pathExt) => whichTool(n, pathExt ? { ...process.env, PATHEXT: pathExt } : process.env),
+  launch: (path: string) => ToolLaunch = (p) => launchFor(p),
 ): string {
   if (platform !== 'win32') return name
   const known = programs.get(name)
   if (known) return known
-  const found = find(name)
+  let found = find(name)
+  if (found && /\.(cmd|bat)$/i.test(found)) {
+    const batch = found
+    const started = launch(batch)
+    found = started.args.length === 0 && /\.(exe|com)$/i.test(started.command) ? started.command : find(name, '.COM;.EXE')
+    if (!found) return win32.join(win32.dirname(batch), `${name}.exe`)
+  }
   if (found) programs.set(name, found)
   return found ?? name
 }

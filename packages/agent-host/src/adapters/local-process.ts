@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import type { Readable, Writable } from 'node:stream'
+import { PassThrough, type Readable, type Writable } from 'node:stream'
 import { KILL_GRACE_MS, hasProcessGroups, killTree, stopTree, type KillOs, type LeftoverOs } from '../dev-services/kill-tree.js'
 import { killHandle, spawnGrouped, sweepExited } from '../dev-services/grouped-child.js'
 import { ExitAfterDrain } from '../exit-after-drain.js'
@@ -65,7 +65,15 @@ export class LocalAgentProcess extends EventEmitter implements AgentProcess {
     // Always read: a CLI whose stderr nobody drains blocks once the pipe is full
     child.stderr?.on('data', (d: Buffer) => this.tail.push(d))
     child.stdin?.on('error', () => {})
-    child.on('error', (e) => this.emit('error', e))
+    child.on('error', (e) => {
+      this.emit('error', e)
+      /*
+       * A CLI that never started (no pid: not there, or refused outright, `notStarted`) also ends, after its 'error',
+       * so whoever waits for 'exit' is not left waiting. Node itself sends a never-started process 'error' and 'close'
+       * only, never 'exit' (measured: ENOENT on Windows and Linux).
+       */
+      if (child.pid === undefined) this.onExit()
+    })
     child.once('exit', () => this.onExit())
   }
 
@@ -74,8 +82,13 @@ export class LocalAgentProcess extends EventEmitter implements AgentProcess {
      * A group of its own, which its helpers join. Not on Windows: there `detached` means a process
      * with no console, whose every console child opens a visible window (`spawnGrouped`).
      */
-    const { child, spawnedAt } = spawnGrouped(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ['pipe', 'pipe', 'pipe'] }, os?.platform)
-    const p = new LocalAgentProcess(child, spawnedAt, os)
+    let started: ReturnType<typeof spawnGrouped>
+    try {
+      started = spawnGrouped(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ['pipe', 'pipe', 'pipe'] }, os?.platform)
+    } catch (err) {
+      started = { child: notStarted(err as Error), spawnedAt: Date.now() }
+    }
+    const p = new LocalAgentProcess(started.child, started.spawnedAt, os)
     if (spec.signal) {
       if (spec.signal.aborted) p.kill('SIGTERM')
       else spec.signal.addEventListener('abort', () => p.kill('SIGTERM'), { once: true })
@@ -143,6 +156,21 @@ export class LocalAgentProcess extends EventEmitter implements AgentProcess {
       if (ended.length > 0) console.error(`[agent] ended ${ended.length} process(es) pid ${pid} left running: ${ended.join(', ')}`)
     })
   }
+}
+
+/**
+ * A process that never started, reporting why as an 'error' on the next tick, the way Node reports one that is not there
+ * (ENOENT). Node throws instead for a command it refuses outright: a `.cmd` on Windows (EINVAL), a name with a NUL. That
+ * throw reached the adapters' constructors (`CodexClient`), so a shim we could not read turned into a crash where a
+ * missing CLI is a message (#849). Its streams take writes and end at once, as a dead process's pipes would.
+ */
+function notStarted(err: Error): ChildProcess {
+  const stand = new EventEmitter() as ChildProcess
+  const stdout = new PassThrough()
+  stdout.end()
+  Object.assign(stand, { stdin: new PassThrough(), stdout, stderr: null, pid: undefined, exitCode: null, signalCode: null, kill: () => false })
+  process.nextTick(() => stand.emit('error', err))
+  return stand
 }
 
 export function spawnLocalAgent(spec: LocalSpawnSpec, os?: LocalProcessOs): LocalAgentProcess {

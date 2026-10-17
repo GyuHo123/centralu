@@ -159,6 +159,32 @@ describe('how a tool found on PATH is started', () => {
   it('off Windows nothing is rewritten', () => {
     expect(launchFor('/usr/local/bin/codex', deps({}, 'darwin'))).toEqual({ command: '/usr/local/bin/codex', args: [] })
   })
+
+  /*
+   * #849: Yarn v1's global bin is a shim of a shim, so claude and codex installed with `yarn global add` showed as not
+   * installed, or failed with EINVAL, the outer .cmd being all there was to spawn.
+   */
+  const yarnBin = 'C:\\Users\\me\\AppData\\Local\\Yarn\\bin'
+  const yarnDotBin = 'C:\\Users\\me\\AppData\\Local\\Yarn\\Data\\global\\node_modules\\.bin'
+  const yarnEntry = 'C:\\Users\\me\\AppData\\Local\\Yarn\\Data\\global\\node_modules\\@openai\\codex\\bin\\codex.js'
+  const YARN_SHIM = '@"%~dp0\\..\\Data\\global\\node_modules\\.bin\\codex.cmd"   %*\r\n'
+  const DOT_BIN_SHIM = NPM_SHIM.replace('%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js', '%dp0%\\..\\@openai\\codex\\bin\\codex.js')
+
+  it('a shim that starts another shim (Yarn v1 global bin) is followed to the program', () => {
+    const files = { [`${yarnBin}\\codex.cmd`]: YARN_SHIM, [`${yarnDotBin}\\codex.cmd`]: DOT_BIN_SHIM, [yarnEntry]: '' }
+    expect(launchFor(`${yarnBin}\\codex.cmd`, deps(files))).toEqual({ command: NODE, args: [yarnEntry] })
+  })
+
+  it('a loop of shims, or one deeper than three, is left as it is', () => {
+    const a = `${dir}\\a.cmd`
+    const b = `${dir}\\b.cmd`
+    expect(launchFor(a, deps({ [a]: '@"%~dp0\\b.cmd" %*', [b]: '@"%~dp0\\a.cmd" %*' }))).toEqual({ command: a, args: [] })
+    const chain = (n: number) => `${dir}\\s${n}.cmd`
+    const files: Record<string, string> = { [entry]: '' }
+    for (let n = 0; n < 4; n++) files[chain(n)] = n < 3 ? `@"%~dp0\\s${n + 1}.cmd" %*` : NPM_SHIM
+    expect(launchFor(chain(1), deps(files))).toEqual({ command: NODE, args: [entry] })
+    expect(launchFor(chain(0), deps(files))).toEqual({ command: chain(0), args: [] })
+  })
 })
 
 describe('a program the host runs in a project folder', () => {
@@ -180,6 +206,28 @@ describe('a program the host runs in a project folder', () => {
 
   it('off Windows the bare name, as before', () => {
     expect(programPath('git', 'darwin', () => '/opt/homebrew/bin/git')).toBe('git')
+  })
+
+  /*
+   * #849: Node refuses to spawn a .cmd (EINVAL), so a gh.cmd or git.cmd first on PATH made every call throw, gitBranchPr
+   * too, which is documented not to.
+   */
+  it('never a .cmd: the .exe its shim starts, else the first .exe on PATH, else a path that is not there', () => {
+    const shim = 'C:\\Users\\me\\scoop\\shims\\gh.cmd'
+    const exe = 'C:\\Users\\me\\scoop\\apps\\gh\\current\\bin\\gh.exe'
+    const later = 'C:\\Program Files\\GitHub CLI\\gh.exe'
+    const find = (pathExt: boolean) => (_n: string, exts?: string) => (exts === undefined ? shim : pathExt ? later : null)
+    expect(programPath('gh', 'win32', find(true), () => ({ command: exe, args: [] }))).toBe(exe)
+    __forgetPrograms()
+    expect(programPath('gh', 'win32', find(true), () => ({ command: NODE, args: ['C:\\x\\gh.js'] }))).toBe(later)
+    __forgetPrograms()
+    __forgetPrograms()
+    // Never the bare name, which Windows would look up in the project first (a planted gh.exe), and not remembered
+    let asked = 0
+    const none = (_n: string, exts?: string) => (++asked, exts === undefined ? shim : null)
+    expect(programPath('gh', 'win32', none, (p) => ({ command: p, args: [] }))).toBe('C:\\Users\\me\\scoop\\shims\\gh.exe')
+    expect(programPath('gh', 'win32', none, (p) => ({ command: p, args: [] }))).toBe('C:\\Users\\me\\scoop\\shims\\gh.exe')
+    expect(asked).toBe(4)
   })
 })
 
@@ -235,5 +283,28 @@ describe("an app manifest's command on Windows", () => {
 
   it('off Windows the manifest command is spawned as written', () => {
     expect(resolveCommand('npx', env, deps(files, 'linux'))).toEqual({ command: 'npx', args: [] })
+    expect(resolveCommand('bin/server', env, deps(files, 'linux'), '/apps/a')).toEqual({ command: 'bin/server', args: [] })
+  })
+
+  /*
+   * #849: a path was read from the host's own folder, so a relative `.cmd` was never found (and then refused by the
+   * spawn with EINVAL), and an extensionless one never had its `.cmd` tried: only on Windows, the app did not start.
+   */
+  const app = 'C:\\Users\\me\\apps\\a'
+  const appFiles = { [`${app}\\bin\\server.cmd`]: '@"%~dp0\\..\\server.js" %*\r\n', [`${app}\\server.js`]: '', [`${app}\\run.cmd`]: '@echo run\r\n' }
+
+  it("a relative path is the app folder's, and its shim is read there", () => {
+    expect(resolveCommand('bin\\server.cmd', env, deps(appFiles), app)).toEqual({ command: NODE, args: [`${app}\\server.js`] })
+    expect(resolveCommand('./bin/server.cmd', env, deps(appFiles), app)).toEqual({ command: NODE, args: [`${app}\\server.js`] })
+  })
+
+  it('a path without an extension is tried with PATHEXT, as cmd.exe does', () => {
+    expect(resolveCommand('bin/server', env, deps(appFiles), app)).toEqual({ command: NODE, args: [`${app}\\server.js`] })
+    expect(resolveCommand('bin/server', { ...env, PATHEXT: '.EXE' }, deps(appFiles), app)).toEqual({ command: `${app}\\bin\\server`, args: [] })
+  })
+
+  it('a .cmd that is not a shim is left as the absolute path, for the spawn to refuse', () => {
+    expect(resolveCommand('run.cmd', env, deps(appFiles), app)).toEqual({ command: 'run.cmd', args: [] })
+    expect(resolveCommand('./run', env, deps(appFiles), app)).toEqual({ command: `${app}\\run.cmd`, args: [] })
   })
 })

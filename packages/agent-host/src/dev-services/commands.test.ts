@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CommandRunner } from './commands.js'
-import { alive, cleanUp, plantTreeScript, settle, treePids } from './process-tree.test-helpers.js'
+import { alive, cleanUp, consoleHosts, plantTreeScript, processCounters, settle, treePids } from './process-tree.test-helpers.js'
 import type { PtyModule } from './terminal.js'
 import { SLOW } from '../../../../tooling/test-timing.js'
 
@@ -305,4 +305,90 @@ describe.runIf(process.platform === 'win32')('CommandRunner — the whole tree o
      */
     expect(await settle(r.ended, (x) => x, 10_000)).toBe(true)
   }, 60_000 * SLOW)
+
+  /*
+   * #849: node-pty frees nothing of a Windows pty that has ended. Every one kept a worker thread, its pipes (17 handles)
+   * and 21 MB of private memory in the host until it exited, stopped by taskkill or ended on its own (measured with 20
+   * per round). The slot lets go of them when the pty ends (`releaseEnded`). Ten runs, half of each kind, against a
+   * baseline taken after one warm-up round: what node-pty loads once is not counted.
+   */
+  it('runs that ended, stopped or on their own, leave no threads, handles or memory behind in the host', async () => {
+    dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-cmd-leak-')))
+    let ended = 0
+    const svc = new CommandRunner((f) => {
+      if (f.exitCode !== undefined) ended++
+    }, ptyModule)
+    const long = (i: number) => `ping -n 60 127.0.0.1 >nul & rem ${i}`
+    const round = async (n: number) => {
+      ended = 0
+      for (let i = 0; i < n; i++) svc.run(dir, i % 2 ? `echo run ${i}` : long(i))
+      // Every long one is running (its pty has printed nothing yet, so wait on the short ones' exits)
+      expect(await settle(() => ended, (x) => x >= Math.floor(n / 2), 30_000)).toBeGreaterThanOrEqual(Math.floor(n / 2))
+      for (let i = 0; i < n; i += 2) svc.stop(dir, long(i))
+      expect(await settle(() => ended, (x) => x === n, 30_000)).toBe(n)
+    }
+    await round(2)
+    const before = processCounters()
+    const n = 10
+    await round(n)
+    // The worker threads end asynchronously: wait until the counts are back, or the bound runs out and the check names them
+    const grew = () => {
+      const now = processCounters()
+      return { threads: now.threads - before.threads, handles: now.handles - before.handles, privateMb: now.privateMb - before.privateMb }
+    }
+    const left = await settle(grew, (g) => g.threads <= 2 && g.handles <= n * 5 && g.privateMb <= n * 4, 20_000)
+    // Before the fix, measured on Windows 11: +10 threads, +110 handles, +121 MB
+    expect({ threads: left.threads <= 2, handles: left.handles <= n * 5, privateMb: left.privateMb <= n * 4 }, `grew by ${JSON.stringify(left)}`).toEqual({ threads: true, handles: true, privateMb: true })
+  }, 120_000 * SLOW)
+
+  /*
+   * #849: with the ConPTY of Windows, every command left its console host (`conhost.exe`, ~7 MB) running until the host
+   * exited, also one that ended on its own: node-pty never closes a pseudoconsole whose shell has ended.
+   */
+  it('a command that ends on its own takes its console host with it', async () => {
+    dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-cmd-conhost-')))
+    const before = consoleHosts()
+    let ended = false
+    const svc = new CommandRunner((f) => {
+      if (f.exitCode !== undefined) ended = true
+    }, ptyModule)
+    // Long enough to see its console host while it runs
+    const command = 'ping -n 4 127.0.0.1 >nul && echo done'
+    svc.run(dir, command)
+    const started = consoleHosts().filter((pid) => !before.includes(pid))
+    expect(started).toHaveLength(1)
+    expect(await settle(() => ended, (x) => x, 30_000)).toBe(true)
+    expect(svc.log(dir, command)!.history).toContain('done')
+    expect(await settle(() => started.filter(alive), (left) => left.length === 0, 20_000)).toEqual([])
+  }, 90_000 * SLOW)
+
+  /*
+   * #857. node-pty's own Windows kill(), after our taskkill had ended the tree, forked an agent to list the gone shell's
+   * console ("AttachConsole failed" on the host's stderr) and 5 s later process.kill()ed the shell's pid, which Windows
+   * may have given to another process by then. Both are watched for well past those 5 s.
+   */
+  it('Stop leaves no late kill by pid and no console-list agent behind (#857)', async () => {
+    // node-pty forks through the CommonJS module object, so the spy goes there; it still forks
+    const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process')
+    const fork = vi.spyOn(childProcess, 'fork')
+    const kills: number[] = []
+    const realKill = process.kill.bind(process)
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
+      // Signal 0 only asks whether a pid is alive (this test's own `alive`)
+      if (signal !== 0) kills.push(pid)
+      return realKill(pid, signal)
+    })
+    try {
+      const r = await runTree()
+      const shell = pids[0]!
+      r.svc.stop(dir, r.command)
+      expect(await settle(() => pids.filter(alive), (left) => left.length === 0, 15_000)).toEqual([])
+      expect(await settle(r.ended, (x) => x, 10_000)).toBe(true)
+      await new Promise((done) => setTimeout(done, 7_000))
+      expect({ forks: fork.mock.calls.map((c) => String(c[0])), lateKills: kills.filter((pid) => pid === shell) }).toEqual({ forks: [], lateKills: [] })
+    } finally {
+      fork.mockRestore()
+      kill.mockRestore()
+    }
+  }, 90_000 * SLOW)
 })

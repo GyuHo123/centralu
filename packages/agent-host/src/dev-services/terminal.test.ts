@@ -1,12 +1,13 @@
 import { describe, expect, it, vi, afterEach, onTestFinished } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir, tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
-import { alive as isAlive, cleanUp, plantTreeScript, settle, treePids } from './process-tree.test-helpers.js'
+import { alive as isAlive, cleanUp, consoleHosts, plantTreeScript, settle, treePids } from './process-tree.test-helpers.js'
 import { TerminalService, commandShell, interactiveShell, shellPath, shortCwd, type PtyModule } from './terminal.js'
 import { SLOW } from '../../../../tooling/test-timing.js'
+import { releaseEnded, spawnPty } from './pty-slot.js'
 
 /**
  * The terminal has one core rule: **its identity is its cwd.**
@@ -243,6 +244,26 @@ describe('multiple terminals', () => {
     expect(await settle(() => pids.filter(isAlive), (left) => left.length === 0, 15_000)).toEqual([])
   }, 120_000 * SLOW)
 
+  /*
+   * #849: with the ConPTY of Windows, every tab left its console host (`conhost.exe`, ~7 MB) running until the host
+   * exited, since node-pty never closes a pseudoconsole whose shell has ended.
+   */
+  it.runIf(process.platform === 'win32')('on Windows, closing one ends the console host it started', async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-term-conhost-')))
+    const ptyModule = createRequire(import.meta.url)('node-pty') as PtyModule
+    const before = consoleHosts()
+    let started: number[] = []
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }))
+    const svc = new TerminalService(() => {}, ptyModule)
+    const t = svc.create(dir, 120, 30)
+    await settle(() => t.history(), (h) => /PS .*>/.test(h), 60_000)
+    started = consoleHosts().filter((pid) => !before.includes(pid))
+    expect(started).toHaveLength(1)
+
+    svc.close(t.id)
+    expect(await settle(() => started.filter(isAlive), (left) => left.length === 0, 20_000)).toEqual([])
+  }, 120_000 * SLOW)
+
   it('closing the last one leaves the list empty', () => {
     const fake = fakePty()
     const svc = new TerminalService(() => {})
@@ -386,6 +407,66 @@ describe('shell selection', () => {
       // One string: node-pty passes it verbatim, so the command is not re-quoted on its way to cmd
       args: '/d /s /c "npm run dev -- --port 3000"',
     })
+  })
+
+  /*
+   * #849, simulated: Windows' own ConPTY left a conhost.exe per tab and per command, so a pty on Windows asks for the one
+   * node-pty ships. A bundle without its DLL still starts a shell, on Windows' own.
+   */
+  it("on Windows a pty runs on the ConPTY node-pty ships, and on Windows' own when that one cannot load", () => {
+    const asked: Record<string, unknown>[] = []
+    const mod = (fail: string | null): PtyModule => ({
+      spawn: (_file, _args, opts) => {
+        asked.push(opts)
+        if (fail && opts.useConptyDll) throw new Error(fail)
+        return { onData() {}, onExit() {}, write() {}, resize() {}, kill() {} }
+      },
+    })
+    const launch = { file: 'C:\\Windows\\System32\\cmd.exe', args: '/d /s /c "echo"' }
+    const opts = { cwd: 'C:\\p' }
+    spawnPty(mod(null), launch, opts, false)
+    spawnPty(mod(null), launch, opts, true)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      spawnPty(mod('Cannot find conpty.dll at C:\\host\\conpty\\conpty.dll'), launch, opts, true)
+      expect(error).toHaveBeenCalledOnce()
+    } finally {
+      error.mockRestore()
+    }
+    expect(asked).toEqual([opts, { ...opts, useConptyDll: true }, { ...opts, useConptyDll: true }, opts])
+    // Any other failure is the shell's own and would fail the same way again
+    expect(() => spawnPty(mod('File not found: '), launch, {}, true)).toThrow('File not found')
+  })
+
+  /*
+   * #849, simulated: node-pty frees nothing of a Windows pty that ended (its pipes and its output thread), so the slot
+   * does. Those are node-pty's private fields: a pty without them is left alone, and a missing one is said once, never
+   * thrown. The real thing is measured in commands.test.ts.
+   */
+  it("lets go of an ended Windows pty's pipes and output thread, and never throws over node-pty's internals", () => {
+    const freed: string[] = []
+    const internals = {
+      _inSocket: { destroy: () => void freed.push('in') },
+      _outSocket: { destroy: () => void freed.push('out') },
+      _conoutSocketWorker: { _worker: { terminate: () => (freed.push('worker'), Promise.resolve(1)) } },
+    }
+    const pty = { onData() {}, onExit() {}, write() {}, resize() {}, kill() {} }
+    releaseEnded({ ...pty, _agent: internals } as never)
+    expect(freed).toEqual(['in', 'out', 'worker'])
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      // A Unix pty, the keeper's or a test's: nothing to free, nothing said
+      releaseEnded(pty)
+      expect(error).not.toHaveBeenCalled()
+      // node-pty's Windows pty without what it is expected to have: said once, never thrown
+      class WindowsTerminal {}
+      expect(() => releaseEnded(Object.assign(new WindowsTerminal(), pty))).not.toThrow()
+      expect(() => releaseEnded({ ...pty, _agent: { _inSocket: { destroy: () => { throw new Error('gone') } } } } as never)).not.toThrow()
+      expect(error).toHaveBeenCalledOnce()
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it('shortens the home path to ~', () => {

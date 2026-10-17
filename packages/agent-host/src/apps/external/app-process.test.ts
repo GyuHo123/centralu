@@ -3,10 +3,12 @@
  * the write lands on a closed pipe, and a stream 'error' nobody listens to is an uncaught exception
  * that ends the host and every session. The start fails; nothing escapes.
  */
-import { mkdtempSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { whichTool } from '../../env-path.js'
 import { AppProcess, AppStartError } from './app-process.js'
 import { SLOW } from '../../../../../tooling/test-timing.js'
 
@@ -85,4 +87,116 @@ describe('the stderr lines a failed start carries', () => {
     expect(err).toBeInstanceOf(AppStartError)
     expect(err.stderr).toEqual(['실패: 한글'])
   })
+})
+
+/**
+ * #849: a manifest's relative command was read from the host's own folder, and on Windows an extensionless one never had
+ * its `.cmd` tried: the app started everywhere but there. A `.cmd` the spawn refused threw before there was a process,
+ * outside the start's own failure handling, and left the app's log open for good.
+ */
+describe("a manifest's command as a path in the app folder", () => {
+  const appDir = () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-app-cmd-')))
+    mkdirSync(join(dir, 'bin'))
+    writeFileSync(join(dir, 'server.js'), "process.stderr.write('ran from ' + require('node:path').basename(process.cwd()) + '\\n'); process.exit(3)\n")
+    // npm's shim shape on Windows; a script that runs the same file elsewhere
+    writeFileSync(join(dir, 'bin', 'server.cmd'), '@"%~dp0\\..\\server.js" %*\r\n')
+    writeFileSync(join(dir, 'bin', 'server'), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/../server.js" "$@"\n`)
+    chmodSync(join(dir, 'bin', 'server'), 0o755)
+    return dir
+  }
+  const start = (dir: string, command: string) =>
+    AppProcess.start({
+      command,
+      args: [],
+      cwd: dir,
+      env: process.env,
+      logPath: join(dir, 'logs', 'app.log'),
+      logMaxBytes: 1024 * 1024,
+      redact: (t) => t,
+      probeTimeoutMs: 10_000,
+      connectTimeoutMs: 10_000,
+      exitWaitMs: 10_000,
+    })
+
+  it('starts bin/server from the app folder, its .cmd on Windows', async () => {
+    const dir = appDir()
+    const err = (await start(dir, 'bin/server').catch((e: unknown) => e)) as AppStartError
+    expect(err).toBeInstanceOf(AppStartError)
+    expect(err.head).toBe('exited before it was ready (code 3)')
+    expect(err.stderr).toEqual([`ran from ${basename(dir)}`])
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }, 30_000 * SLOW)
+
+  it.runIf(process.platform === 'win32')('on Windows, starts a relative .cmd shim from the app folder', async () => {
+    const dir = appDir()
+    const err = (await start(dir, '.\\bin\\server.cmd').catch((e: unknown) => e)) as AppStartError
+    expect(err).toBeInstanceOf(AppStartError)
+    expect(err.stderr).toEqual([`ran from ${basename(dir)}`])
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }, 30_000 * SLOW)
+
+  it.runIf(process.platform === 'win32')('on Windows, a .cmd that is not a shim fails the start with the reason, and lets go of the log', async () => {
+    const dir = appDir()
+    writeFileSync(join(dir, 'run.cmd'), '@echo run\r\n')
+    const err = (await start(dir, './run.cmd').catch((e: unknown) => e)) as AppStartError
+    expect(err).toBeInstanceOf(AppStartError)
+    expect(err.message).toMatch(/EINVAL.*needs a shell/)
+    expect(readFileSync(join(dir, 'logs', 'app.log'), 'utf8')).toMatch(/could not run .*run\.cmd/)
+    // Windows refuses to delete a file that is still open: the log is closed, with no retries to wait it out
+    rmSync(join(dir, 'logs'), { recursive: true })
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }, 30_000 * SLOW)
+})
+
+/**
+ * #849: a Python app writes its stderr in the locale's code page, the ANSI one on Windows, and the host reads it as UTF-8:
+ * on a Korean machine every Korean line of its crash reason reached the person as U+FFFD.
+ */
+describe("a Python app's stderr", () => {
+  const found = whichTool(process.platform === 'win32' ? 'python' : 'python3')
+  // Not the Microsoft Store's stand-in, which offers to install Python instead of running anything
+  const python = found && !/[\\/]WindowsApps[\\/]/i.test(found) ? found : null
+  // Each of these apps exits before it is ready: what is read is the failed start's stderr
+  const start = async (command: string, args: string[], env: NodeJS.ProcessEnv): Promise<AppStartError> => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'cc-app-py-')))
+    return (await AppProcess.start({
+      command,
+      args,
+      cwd: dir,
+      env,
+      logPath: join(dir, 'app.log'),
+      logMaxBytes: 1024 * 1024,
+      redact: (t) => t,
+      probeTimeoutMs: 10_000,
+      connectTimeoutMs: 10_000,
+      exitWaitMs: 10_000,
+    }).catch((e: unknown) => e)) as AppStartError
+  }
+  const printEnv = "process.stderr.write([process.env.PYTHONIOENCODING, process.env.PYTHONUTF8].join(' ') + String.fromCharCode(10)); process.exit(3)"
+  const clean = { ...process.env, PYTHONUTF8: undefined, PYTHONIOENCODING: undefined }
+
+  it("an app's Python writes its standard streams in UTF-8, unless the app's own environment chooses", async () => {
+    expect((await start(process.execPath, ['-e', printEnv], clean)).stderr).toEqual(['utf-8 '])
+    expect((await start(process.execPath, ['-e', printEnv], { ...clean, PYTHONIOENCODING: 'cp949' })).stderr).toEqual(['cp949 '])
+    expect((await start(process.execPath, ['-e', printEnv], { ...clean, PYTHONUTF8: '0' })).stderr).toEqual([' 0'])
+  }, 30_000 * SLOW)
+
+  /*
+   * Only the streams (a review of #964): PYTHONUTF8=1 also made UTF-8 what open() and the locale default to, so an app
+   * reading its own code page's files (cp949 on a Korean Windows) without naming an encoding failed. Compared with the
+   * same Python started directly, so the answer is this machine's own.
+   */
+  it.runIf(python !== null)("leaves Python's UTF-8 mode and open()'s default encoding as the machine has them", async () => {
+    const script = "import locale, sys; print(sys.flags.utf8_mode, locale.getpreferredencoding(False), file=sys.stderr); sys.exit(3)"
+    const direct = spawnSync(python!, ['-c', script], { env: clean, encoding: 'utf8', windowsHide: true }).stderr.trim()
+    const err = await start(python!, ['-c', script], clean)
+    expect(err.stderr).toEqual([direct])
+  }, 30_000 * SLOW)
+
+  it.runIf(python !== null)('reaches the log as the app wrote it, Korean included', async () => {
+    const err = await start(python!, ['-c', "import sys; print('실패: 한글 설정 오류', file=sys.stderr); sys.exit(3)"], clean)
+    expect(err).toBeInstanceOf(AppStartError)
+    expect(err.stderr).toEqual(['실패: 한글 설정 오류'])
+  }, 30_000 * SLOW)
 })
