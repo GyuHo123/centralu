@@ -461,6 +461,11 @@ Rows that differ by session:
   last edit, and every edit already went through the builder's own approvals. Builders exist only in
   trusted projects and the user folder, whose apps run anyway once trusted, and `check` reaches its
   own app only (`builder` profile), never another.
+- **"Always allow" on an agent's own card** (#838) is remembered as the host's own key for the card standing
+  (`alwaysAllowKey` of `pendingApproval.detail`), never as the matcher the window sent: a window from an older build,
+  during a swap, could send a wider one. A matcher that is not that key remembers nothing, and the call is allowed
+  once. At startup the host deletes saved rules ending in `*`, which an older build read as prefixes; that only
+  narrows what is allowed.
 
 The **Codex `normal` + bypass** cell follows the person's policy, as Claude's does (owner decision
 2026-10-11, #382). With `writes`, the person's `approval_policy = "never"` turned "needs approval"
@@ -484,7 +489,8 @@ on its card, and a rule an older build saved for one allows nothing now, so it a
 A host from an earlier build, serving the same store during a swap or after a downgrade, would read such a rule as a
 prefix, so this build never writes one. A command the card flags (outside the sandbox, network access, input to a running terminal) has no key
 either: the card offers no "always", and a rule for the same text does not let it through, since the rule cannot tell
-it from the plain command.
+it from the plain command. What the host remembers is its own key for the card, whatever the window sends (see "Always
+allow" on an agent's own card, above).
 
 ### Turning things off
 
@@ -1123,7 +1129,8 @@ then who may call it:
   run records (arguments, errors, kept failures) and error bundles (`secrets.ts` `redactor`,
   `app-process.ts` `AppLog`; test "stderr goes to the app's own log, with secret values masked by
   name"). Each value is also replaced in its JSON-escaped form (#838), since run records keep
-  arguments as JSON, where a multi-line key or one with quotes is spelled differently. Arguments are
+  arguments as JSON, where a multi-line key or one with quotes is spelled differently, and each line of a
+  multi-line value of 16 characters or more on its own, since the app's log is masked a line at a time. Arguments are
   hashed only after redaction. The person enters values through
   `apps.setSecret`, which accepts only names the manifest declares and never returns a value: the
   app list carries only whether each declared name is set, and refusals never quote the value. A
