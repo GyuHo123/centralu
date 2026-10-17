@@ -8,13 +8,13 @@ import { fakeExe, linkNode, rmFakeDir, windowsSystemEnv } from '../packages/agen
 import { ExternalApps, resultText, type AppCaller, type AppRef } from '../packages/agent-host/src/apps/external/runtime.js'
 import { SLOW } from './test-timing.js'
 // @ts-expect-error — plain .mjs of a Centralu app (no installs, no types, by the app rules)
-import { decideBefore, decideCi, emptyQueue, enqueue, noticeKey, dequeue, normalize, onlySupersededFailures, watchState } from '../.centralu/apps/project-board/queue.mjs'
+import { decideBefore, decideCi, emptyQueue, enqueue, lowerFailureCounts, noticeKey, dequeue, normalize, onlySupersededFailures, watchState } from '../.centralu/apps/project-board/queue.mjs'
 // @ts-expect-error — plain .mjs of a Centralu app
 import { evaluateChecks } from '../.centralu/apps/project-board/ci.mjs'
 // @ts-expect-error — plain .mjs of a Centralu app
 import { latestRuns, takeLease, releaseLease } from '../.centralu/apps/project-board/queue-driver.mjs'
 // @ts-expect-error — plain .mjs of a Centralu app
-import { batchCandidates, decideLanding, endBatch, formBatch, onlyCancelledByBatch, splitBatch } from '../.centralu/apps/project-board/batch.mjs'
+import { batchCandidates, decideLanding, endBatch, formBatch, markBatchless, onlyCancelledByBatch, splitBatch } from '../.centralu/apps/project-board/batch.mjs'
 
 /**
  * The project board app's merge queue (#956): queue_merge, merge_queue, unqueue, the driver that runs
@@ -199,6 +199,26 @@ describe('what the merge queue decides for one poll', () => {
     expect(normalize({ items: [{ repo: R, pr: 1, state: 'ci' }] }).items[0]).toMatchObject({ lowers: [], reruns: {} })
   })
 
+  /*
+   * A lower's failed run against the run that proved its top (#1066): #1072 failed under #1075 on a real Windows bug, after
+   * anything that proved the top; #1039's failure under #1040 came hours before #1040's green run on a newer main.
+   */
+  it("stops a stack on a lower's failure only when it is at least as new as the run that proved the top", () => {
+    const lowerRun = (conclusion: string | null, createdAt: string | null) => ({ status: conclusion ? 'completed' : 'in_progress', conclusion, createdAt })
+    const proved = '2026-10-17T15:00:00Z'
+    // #1072: failed after the top's proof (or at the same time)
+    expect(lowerFailureCounts(lowerRun('failure', '2026-10-17T18:12:16Z'), proved)).toBe(true)
+    expect(lowerFailureCounts(lowerRun('failure', proved), proved)).toBe(true)
+    expect(lowerFailureCounts(lowerRun('timed_out', '2026-10-17T18:00:00Z'), proved)).toBe(true)
+    // #1039: failed before it, on an older main the top's run has outlived
+    expect(lowerFailureCounts(lowerRun('failure', '2026-10-17T11:58:33Z'), proved)).toBe(false)
+    // Not a failure, or not finished
+    for (const c of ['success', 'cancelled', 'skipped', null]) expect(lowerFailureCounts(lowerRun(c, '2026-10-17T18:00:00Z'), proved)).toBe(false)
+    // Not knowing either time, a failure counts
+    expect(lowerFailureCounts(lowerRun('failure', '2026-10-17T11:58:33Z'), null)).toBe(true)
+    expect(lowerFailureCounts(lowerRun('failure', null), proved)).toBe(true)
+  })
+
   it('lets one driver hold the queue at a time, until it lets go or goes quiet', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-queue-lease-'))
     try {
@@ -371,6 +391,99 @@ describe('what the merge queue decides for a batch (#962)', () => {
     const { q, b } = greenBatch()
     b.uncleanSince = waits.patch.uncleanSince
     expect(decideLanding({ b, step: b.steps[0], pr: unstable, item: q.items[0], mainTree: 'T0', prevTree: 'T0', defaultBranch: 'main', checks: [run('failure', 52)], subject: 's', subjectMax: 72, now: NOW + 31 * 60_000, ref })).toMatchObject({ do: 'stop' })
+  })
+})
+
+/*
+ * Two tiers of CI (project.json ci.fullTier, 2026-10-18): a pull request's own run is the quick tier, and a skipped
+ * job counts as passed, so that run alone is green on every check it reports. Nothing lands from it: an item lands from
+ * a batch, run in full (a batch of one included), or from a full run on its own head.
+ */
+describe('what the merge queue decides with two tiers of CI', () => {
+  const TIER = 'full tier'
+  const tiered = (rows: Row[]) => evaluateChecks({ required: ['verify', 'windows tests', TIER, 'e2e (webkit 1/5)'], reported: rows })
+  // What a quick run reports: the full tier's check skipped, the full tier's matrix jobs not at all
+  const QUICK = () => tiered([check(TIER, 'skipped'), check('verify', 'success'), check('windows tests', 'success')])
+  const FULL = () => tiered([check(TIER, 'success'), check('verify', 'success'), check('windows tests', 'success'), check('e2e (webkit 1/5)', 'success')])
+  const ci = (extra: Record<string, unknown> = {}) =>
+    decideCi({ item: fresh(), pr: openPr(), checks: QUICK(), runs: [run('success')], defaultBranch: 'main', now: NOW, ref, fullTier: TIER, canBatch: true, ...extra })
+
+  it('never merges a head whose own run was the quick tier: it waits for a batch, which runs the full tier', () => {
+    expect(QUICK().verdict).toBe('pending') // a quick run never reports the full tier's jobs
+    expect(ci()).toEqual({ state: 'ci', quick: true, patch: { noCiSince: null, missingSince: null } })
+    // Every check it reports passed, the required set naming none of the full tier's jobs: still not a merge
+    const allReported = evaluateChecks({ required: ['verify', TIER], reported: [check(TIER, 'skipped'), check('verify', 'success')] })
+    expect(allReported.verdict).toBe('green')
+    expect(ci({ checks: allReported })).toMatchObject({ state: 'ci', quick: true })
+    expect(ci({ checks: allReported }).action).toBeUndefined()
+    // An older workflow that has no such check, its run finished: not proven full either
+    expect(ci({ checks: evaluateChecks({ required: ['verify'], reported: [check('verify', 'success')] }) })).toMatchObject({ quick: true })
+    // A full run on its own head merges, as before
+    expect(ci({ checks: FULL() })).toMatchObject({ state: 'ci', action: { type: 'merge' } })
+    // Without tiers, the same green run merges
+    expect(ci({ checks: allReported, fullTier: null })).toMatchObject({ action: { type: 'merge' } })
+  })
+
+  it('reruns a quick run that failed, and waits while one still runs', () => {
+    const failed = tiered([check(TIER, 'skipped'), check('verify', 'failure', { jobId: '5' }), check('windows tests', 'success')])
+    expect(ci({ checks: failed, runs: [run('failure')] })).toMatchObject({ state: 'ci', action: { type: 'rerun', failedOnly: true } })
+    const going = tiered([check(TIER, 'skipped'), check('verify', 'success'), check('windows tests', null)])
+    expect(ci({ checks: going, runs: [run(null)] })).toEqual({ state: 'ci', patch: { noCiSince: null, missingSince: null } })
+  })
+
+  it('asks the session when the queue cannot batch it, or its batch of one ended without landing it', () => {
+    const fork = ci({ canBatch: false, pr: openPr({ isCrossRepository: true }) })
+    expect(fork).toMatchObject({ state: 'attention', reason: { kind: 'full-tier' } })
+    expect(fork.reason.text).toContain("a fork's pull request")
+    expect(fork.reason.text).toContain('gh workflow run build.yml --ref feat/queue')
+    const alone = ci({ item: fresh({ alone: { head: SHA, text: 'Batch queue/batch-4: required check "verify" failed twice.' } }) })
+    expect(alone).toMatchObject({ state: 'attention', reason: { kind: 'full-tier' } })
+    expect(alone.reason.text).toContain('its batch of one ended without landing it: Batch queue/batch-4: required check "verify" failed twice.')
+    // On a new head it is batched again
+    expect(ci({ item: fresh({ alone: { head: SHA2, text: 'x' } }) })).toMatchObject({ state: 'ci', quick: true })
+  })
+
+  it('batches items whose quick tier passed, one at a time when one was sent back, and never one alone again on its head', () => {
+    const quick = (pr: number, head: string, extra: Record<string, unknown> = {}) =>
+      waitingItem(pr, head, 'completed', { ci: { head, verdict: 'quick', runs: [{ id: 900 + pr, status: 'completed' }] }, ...extra })
+    const q = queueOf(quick(2, B), quick(1, A), waitingItem(3, C))
+    expect(batchCandidates(q, { max: 6, tiers: true }).map((i: any) => i.pr)).toEqual([1, 2, 3])
+    // Without tiers a finished run is no candidate: it lands on its own
+    expect(batchCandidates(q, { max: 6 }).map((i: any) => i.pr)).toEqual([3])
+    // Sent back from a batch on its head: alone, when it is the oldest; left for later otherwise
+    q.items[1].batchless = A
+    expect(batchCandidates(q, { max: 6, tiers: true }).map((i: any) => i.pr)).toEqual([1])
+    q.items[1].batchless = null
+    q.items[0].batchless = B
+    expect(batchCandidates(q, { max: 6, tiers: true }).map((i: any) => i.pr)).toEqual([1, 3])
+    // Its batch of one ended without landing it: not on this head (#2, sent back and now the oldest, goes alone)
+    q.items[1].alone = { head: A, text: 'x' }
+    expect(batchCandidates(q, { max: 6, tiers: true }).map((i: any) => i.pr)).toEqual([2])
+    q.items[0].alone = { head: B, text: 'x' }
+    expect(batchCandidates(q, { max: 6, tiers: true }).map((i: any) => i.pr)).toEqual([3])
+  })
+
+  it('marks the one member of a batch of one that ended without landing it, with why, and no member of a larger batch', () => {
+    const q = queueOf(waitingItem(1, A), waitingItem(2, B), waitingItem(3, C))
+    const one = formBatch(q, [q.items[0]], { at: 'x', ref })
+    endBatch(q, one, 'dropped', { at: 'y', why: 'it failed.' })
+    expect(q.items[0]).toMatchObject({ batchless: A, alone: { head: A, text: 'it failed.' } })
+    const two = formBatch(q, [q.items[1], q.items[2]], { at: 'x', ref })
+    endBatch(q, two, 'dropped', { at: 'y', why: 'it failed.' })
+    expect(q.items.slice(1).map((i: any) => [i.batchless, i.alone ?? null])).toEqual([
+      [B, null],
+      [C, null],
+    ])
+    // Given back without blame (the batch could not start): nothing marked
+    const again = formBatch(q, [q.items[1]], { at: 'x', ref })
+    endBatch(q, again, 'dropped', { at: 'y', batchless: false, why: 'x' })
+    expect(q.items[1].alone).toBeUndefined()
+    // One that conflicts alone in its batch: marked too, or it would conflict again batch after batch
+    markBatchless(q, R, [3], 'it conflicts with main.')
+    expect(q.items[2].alone).toEqual({ head: C, text: 'it conflicts with main.' })
+    // Queued again, it is tried afresh
+    const { item } = enqueue(q, { repo: R, pr: 1, at: 'z' })
+    expect(item.alone).toBeUndefined()
   })
 })
 
@@ -555,6 +668,12 @@ afterEach(async () => {
 
 const PATH = () => `${join(root, 'bin')}${delimiter}${join(root, 'node')}`
 const FAST = { PROJECT_BOARD_QUEUE_TICK_MS: '50', PROJECT_BOARD_QUEUE_POLL_MS: '50' }
+/**
+ * Without two tiers of CI unless a test asks for them (TIERS): the queue as a repository without them runs it, every
+ * green run a full one. The tiers this repository has (project.json ci.fullTier) have tests of their own below.
+ */
+const NO_TIERS = { PROJECT_BOARD_CI_FULL_TIER: '' }
+const TIERS = { PROJECT_BOARD_CI_FULL_TIER: 'full tier' }
 
 function runtime(state?: Gh, env: Record<string, string> = {}) {
   if (state) writeFileSync(statePath, JSON.stringify(state))
@@ -562,7 +681,7 @@ function runtime(state?: Gh, env: Record<string, string> = {}) {
     projects: () => [{ id: 'p1', path: REPO_ROOT, trusted: true }],
     dataRoot: join(root, 'data'),
     reservedIds: [],
-    env: { PATH: PATH(), HOME: root, ...windowsSystemEnv(), FAKE_GH_STATE: statePath, FAKE_GH_LOG: logPath, ...FAST, ...env },
+    env: { PATH: PATH(), HOME: root, ...windowsSystemEnv(), FAKE_GH_STATE: statePath, FAKE_GH_LOG: logPath, ...FAST, ...NO_TIERS, ...env },
     timing: { idleMs: 60_000, graceMs: 1_000, backoffBaseMs: 20, connectTimeoutMs: 10_000 },
   })
   rt.refresh()
@@ -673,21 +792,49 @@ describe('the project board app: the merge queue', { timeout: 60_000 * SLOW }, (
     expect(notices().at(-1)!.text).toContain('Closed #76 as landed in it.')
   })
 
-  it("lands no stack whose lower's own latest CI run on its head failed, and lands it once that run is no failure", async () => {
+  /*
+   * #1066, seen twice on 2026-10-18: the queue stopped #1040 and #1026 with `lower-failed`, because their lowers #1039 and
+   * #1023 still carried a failed run from hours before, against an older main, for a test main had since fixed. Each top
+   * had a green run on a head containing its lowers' heads: CI tests the whole tree, so that run is the evidence.
+   */
+  it("lands a stack on its top's green run over a lower's old failed run, the lower a draft that runs no CI", async () => {
     runtime(
       ghState({
-        prs: { '76': ghPr(76, { headRefName: 'feat/low', headRefOid: SHA2 }), '77': ghPr(77, { baseRefName: 'main' }) },
-        runs: { [SHA]: [ghRun('success')], [SHA2]: [ghRun('failure', 1, SHA2, { id: 990, head_branch: 'feat/low' })] },
+        prs: { '76': ghPr(76, { headRefName: 'feat/low', headRefOid: SHA2, isDraft: true }), '77': ghPr(77, { baseRefName: 'main' }) },
+        runs: {
+          [SHA]: [ghRun('success')],
+          // The lower's latest run: failed hours before the top's green one
+          [SHA2]: [ghRun('failure', 1, SHA2, { id: 990, head_branch: 'feat/low', created_at: '2026-10-17T02:00:00Z' })],
+        },
+        compare: { [`${SHA2}...${SHA}`]: 'ahead' },
+      }),
+    )
+    await call('queue_merge', { pr: 77, lowers: [76], owner: 'tester' })
+    await until((x) => stateOf(x) === 'merged', 'the stack to land')
+    expect(writes().map((w) => w.slice(0, 2).join(' '))).toEqual(['merge 77', 'delete feat/b77', 'close 76', 'delete feat/low'])
+    expect(notices().filter((e) => e.kind === 'attention')).toEqual([])
+  })
+
+  // #1072 under #1075, 2026-10-18: a real bug (a Windows 8.3 short-name temp path) the lower failed on after the top's run
+  it("lands no stack whose lower failed after the run that proved the top, and lands it once that lower passes", async () => {
+    runtime(
+      ghState({
+        prs: { '76': ghPr(76, { headRefName: 'feat/low', headRefOid: SHA2, isDraft: true }), '77': ghPr(77, { baseRefName: 'main' }) },
+        runs: {
+          // The top's green run, then the lower's failed one an hour later
+          [SHA]: [ghRun('success', 1, SHA, { created_at: '2026-10-17T08:00:00Z' })],
+          [SHA2]: [ghRun('failure', 1, SHA2, { id: 990, head_branch: 'feat/low', created_at: '2026-10-17T09:00:00Z' })],
+        },
         compare: { [`${SHA2}...${SHA}`]: 'ahead' },
       }),
     )
     await call('queue_merge', { pr: 77, lowers: [76], owner: 'tester' })
     const q = await until((x) => stateOf(x) === 'attention', 'attention')
     expect(q.queue[0].reason.kind).toBe('lower-failed')
-    expect(notices().at(-1)!.text).toContain('#76, under #77, has a failed CI run 990 on its head beef000')
+    expect(notices().at(-1)!.text).toContain('#76, under #77, has a CI run 990 on its head beef000 that failed after the run that proved #77 (started 2026-10-17 08:00 UTC)')
     expect(writes()).toEqual([])
-    // Rerun and cancelled (a newer push superseded it): no failure, so the top's green run lands the stack
-    patchGh((s) => (s.runs[SHA2] = [ghRun('cancelled', 2, SHA2, { id: 990, head_branch: 'feat/low' })]))
+    // Fixed and rerun: no failure, so the top's green run lands the stack
+    patchGh((s) => (s.runs[SHA2] = [ghRun('success', 2, SHA2, { id: 990, head_branch: 'feat/low', created_at: '2026-10-17T09:00:00Z' })]))
     await until((x) => stateOf(x) === 'merged', 'the stack to land')
     expect(writes().map((w) => w.slice(0, 2).join(' '))).toEqual(['merge 77', 'delete feat/b77', 'close 76', 'delete feat/low'])
   })
@@ -1191,6 +1338,112 @@ describe('the merge queue batches pull requests waiting for CI into one run (#96
   })
 })
 
+/*
+ * Two tiers of CI (this repository's project.json): what lands, lands from a full run. A pull request's own run is the
+ * quick tier; the queue lands it through a batch built on main and run in full, a batch of one included.
+ */
+describe('the merge queue lands only from a full run, with two tiers of CI', { timeout: 240_000 * SLOW }, () => {
+  /** A pull request's own quick run: finished and green on what it ran, the full tier's check skipped. */
+  const quickChecks = (conclusion = 'success') => [ghCheck('full tier', 'skipped', 10), ghCheck('verify', conclusion, 11), ghCheck('windows tests', 'success', 12)]
+  const fullChecks = (suite: number, conclusion = 'success', tier = 'success') => [
+    suiteCheck('full tier', tier, suite * 10, suite),
+    suiteCheck('verify', 'success', suite * 10 + 1, suite),
+    suiteCheck('windows tests', conclusion, suite * 10 + 2, suite),
+  ]
+  const ONE = `batch-${SHA}`
+  const oneRun = (conclusion: string | null, attempt = 1) => ghRun(conclusion, attempt, ONE, { id: 950, head_branch: 'queue/batch-1', event: 'workflow_dispatch', check_suite_id: 6000 })
+  const tieredState = (patch: Gh = {}) =>
+    ghState({
+      checks: { [SHA]: quickChecks() },
+      on: { 'dispatch:queue/batch-1': { runs: { [ONE]: [oneRun('success')] }, checks: { [ONE]: fullChecks(6000) } } },
+      ...patch,
+    })
+
+  it('lands a pull request whose own run was the quick tier through a batch of one, never from that run', async () => {
+    runtime(tieredState(), TIERS)
+    await call('queue_merge', { pr: 77, owner: 'tester' })
+    await until((x) => stateOf(x) === 'merged', 'the merge', BATCH_WAIT_MS)
+    await until(() => batchesOnDisk()[0]?.state === 'done', 'the batch to end', BATCH_WAIT_MS)
+    // Its own run had finished: nothing to cancel, and it lands on the head the batch tested
+    expect(writes().map(short2)).toEqual(['branch queue/batch-1', `merge-into ${SHA}`, 'dispatch queue/batch-1', `status ${SHA}`, 'merge 77', 'delete feat/b77', 'delete queue/batch-1'])
+    expect(writes().find((w) => w[0] === 'status')).toEqual(['status', SHA, 'success', 'merge-queue', 'Passed CI in queue/batch-1'])
+    expect(notices().map((e) => e.text)).toEqual(['Merge queue: merged #77 (feat(apps): change 77) as abcdef1, "feat(apps): change 77 (#77)". Tested in batch queue/batch-1 with nothing else.'])
+  })
+
+  it('lands nothing when the batch of one fails, and tells the session why', async () => {
+    runtime(
+      tieredState({
+        on: {
+          'dispatch:queue/batch-1': { runs: { [ONE]: [oneRun('failure')] }, checks: { [ONE]: fullChecks(6000, 'failure') } },
+          'rerun-failed:950': { runs: { [ONE]: [oneRun('failure', 2)] } },
+        },
+      }),
+      TIERS,
+    )
+    await call('queue_merge', { pr: 77, owner: 'tester' })
+    await until((x) => stateOf(x) === 'attention', 'attention', BATCH_WAIT_MS)
+    await morePolls(4)
+    const q = await call('merge_queue', { all: true })
+    expect(q.data.queue[0].reason.kind).toBe('full-tier')
+    expect(notices().at(-1)!.text).toContain('its batch of one ended without landing it: Batch queue/batch-1: required check "windows tests" (job 60002) failed twice')
+    expect(writes().map(short2)).toEqual(['branch queue/batch-1', `merge-into ${SHA}`, 'dispatch queue/batch-1', 'rerun-failed 950', 'delete queue/batch-1'])
+    // Not batched again on this head, batch after batch
+    expect(batchesOnDisk()).toHaveLength(1)
+  })
+
+  // A batch's run proves the top as its own run would: a lower that failed before it is outlived, one after it is evidence
+  it.each([
+    ['before', '2026-10-17T07:00:00Z', 'merged'],
+    ['after', '2026-10-17T09:00:00Z', 'attention'],
+  ])("lands a stack's top from its batch over a lower that failed %s the batch's run, or stops for it", async (_when, failedAt, state) => {
+    runtime(
+      tieredState({
+        prs: { '76': ghPr(76, { headRefName: 'feat/low', headRefOid: SHA2, isDraft: true }), '77': ghPr(77) },
+        runs: { [SHA]: [ghRun('success')], [SHA2]: [ghRun('failure', 1, SHA2, { id: 990, head_branch: 'feat/low', created_at: failedAt })] },
+        compare: { [`${SHA2}...${SHA}`]: 'ahead' },
+        on: { 'dispatch:queue/batch-1': { runs: { [ONE]: [oneRun('success')] }, checks: { [ONE]: fullChecks(6000) } } },
+      }),
+      TIERS,
+    )
+    await call('queue_merge', { pr: 77, lowers: [76], owner: 'tester' })
+    const q = await until((x) => stateOf(x) === state, state, BATCH_WAIT_MS)
+    if (state === 'merged') expect(writes().map(short2)).toContain('close 76')
+    else {
+      expect(q.queue[0].reason.kind).toBe('lower-failed')
+      expect(writes().map(short2)).not.toContain('merge 77')
+    }
+  })
+
+  it('lands nothing from a batch whose run did not run the full tier', async () => {
+    runtime(tieredState({ on: { 'dispatch:queue/batch-1': { runs: { [ONE]: [oneRun('success')] }, checks: { [ONE]: fullChecks(6000, 'success', 'skipped') } } } }), TIERS)
+    await call('queue_merge', { pr: 77, owner: 'tester' })
+    await until((x) => stateOf(x) === 'attention', 'attention', BATCH_WAIT_MS)
+    expect(notices().at(-1)!.text).toContain('passed without running the full tier')
+    expect(writes().map(short2)).not.toContain('merge 77')
+    expect(batchesOnDisk().map((b) => b.state)).toEqual(['dropped'])
+  })
+
+  it('lands a full run on its own head without a batch (a release bump), and tells the session about a fork it cannot batch', async () => {
+    runtime(
+      tieredState({
+        prs: {
+          '77': ghPr(77, { headRefName: 'chore/release-9.9.9-beta.1', title: 'chore(release): 9.9.9-beta.1' }),
+          '78': ghPr(78, { headRefOid: B, isCrossRepository: true }),
+        },
+        runs: { [SHA]: [ghRun('success')], [B]: [ownRun(78, B, 902, 5002, 'success')] },
+        checks: { [SHA]: fullChecks(5000), [B]: quickChecks().map((c) => ({ ...c, check_suite: { id: 5002 } })) },
+      }),
+      TIERS,
+    )
+    await call('queue_merge', { pr: 77, owner: 'tester' })
+    await call('queue_merge', { pr: 78, owner: 'tester' })
+    await until((x) => stateOf(x, 77) === 'merged' && stateOf(x, 78) === 'attention', 'the bump to land and the fork to need attention', BATCH_WAIT_MS)
+    expect(writes().map(short2)).toEqual(['merge 77', 'delete chore/release-9.9.9-beta.1'])
+    expect(batchesOnDisk()).toEqual([])
+    expect(notices().find((e) => e.text.includes('#78'))!.text).toContain("ran only the quick tier of CI")
+  })
+})
+
 /**
  * #957: an agent with this app attached typed `gh pr merge` instead of using merge_when_green, because
  * deferred tools show only their names until searched. The descriptions carry the gh command each tool
@@ -1229,7 +1482,7 @@ describe('agents find the board tool for the gh command they would type', { time
 function watch(args: string[]): Promise<{ code: number | null; out: string; err: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [WATCH, ...args], {
-      env: { PATH: PATH(), HOME: root, ...windowsSystemEnv(), FAKE_GH_STATE: statePath, FAKE_GH_LOG: logPath, ...FAST },
+      env: { PATH: PATH(), HOME: root, ...windowsSystemEnv(), FAKE_GH_STATE: statePath, FAKE_GH_LOG: logPath, ...FAST, ...NO_TIERS },
     })
     let out = ''
     let err = ''
