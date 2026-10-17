@@ -118,11 +118,13 @@ centralu/
 │        │                      #   reader (usage.ts) and the orchestrator's MCP server (claude/orchestrator-mcp.ts,
 │        │                      #   codex/orchestrator-bridge.mjs)
 │        │                      #   each tool's index.ts is the adapter, session.ts its session, with the session's
-│        │                      #   parts beside it (#850): claude/ session-cards, session-servers, permissions;
+│        │                      #   parts beside it (#850): claude/ session-cards, session-servers, permissions, sdk-query,
+│        │                      #   refresh-race, tracked-input, schedule-look;
 │        │                      #   codex/ server-requests, thread-servers, child-threads, slash-commands,
-│        │                      #   launch-config. codex/normalize.ts maps notifications, with what it reads beside
+│        │                      #   launch-config, thread-open, turns, background-resume. codex/normalize.ts maps notifications, with what it reads beside
 │        │                      #   it: items, approvals, thread-settings, token-readings, child-tracker,
-│        │                      #   known-notifications. contract.ts re-exports contract/: orchestrator,
+│        │                      #   known-notifications. claude/normalize.ts maps messages, one family per file:
+│        │                      #   cli-messages, model-messages, turn-ending. contract.ts re-exports contract/: orchestrator,
 │        │                      #   session-apps, process. Shared by both: tool-result, file-changes, images, plan,
 │        │                      #   token-usage, tool-titles, retry-activity, session-kit, subagent-steps,
 │        │                      #   history-events (#843)
