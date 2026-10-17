@@ -22,6 +22,9 @@ Who wrote each line travels with it (#838). `read_session` gives a line another 
 sent `fromApp` (`authorOf` in `sessions/transcript-view.ts`); `recall`'s context marks every message
 (`[person]`, `[agent]`, `[session "<name>"]`, `[app "<name>"]`) and indents a message's own later lines, so neither a
 child's report nor an app's text reads as the person's, and no text can start a line with a mark of its own. The
+hit's snippet keeps those lines (`windowAroundLines` in `sessions/snippet.ts`): it used to fold every line break into a
+space, which put a mark an app's text wrote on the same footing as a real one, and a snippet cut inside a message starts
+with that message's mark (`orchestrator-seat.test.ts`). The
 orchestrator's memory of its past conversation (appended to its prompt when it restarts) leaves out app messages as it
 already left out other sessions', and indents a message's later lines, so text cannot start a `Person:` line.
 
@@ -1160,8 +1163,10 @@ then who may call it:
   `app-process.ts` `AppLog`; test "stderr goes to the app's own log, with secret values masked by
   name"). Each value is also replaced in its JSON-escaped form (#838), since run records keep
   arguments as JSON, where a multi-line key or one with quotes is spelled differently, and each line of a
-  multi-line value of 16 characters or more on its own, since the app's log is masked a line at a time. Arguments are
-  hashed only after redaction. The person enters values through
+  multi-line value of 16 characters or more on its own, since the app's log is masked a line at a time. A run record's
+  arguments and kept result are masked string by string before they become JSON, then as JSON (`runs.ts`
+  `maskedJson`): a value holding the secret already JSON-escaped (JSON passed as text) was escaped a second time,
+  a spelling neither form matched (`redactor.test.ts`). Arguments are hashed only after redaction. The person enters values through
   `apps.setSecret`, which accepts only names the manifest declares and never returns a value: the
   app list carries only whether each declared name is set, and refusals never quote the value. A
   test looks for the value, as a string, in the app log, run records, kept failures, error bundles,
@@ -1230,7 +1235,10 @@ Limits:
 - The data folder is outside the repository so that runtime files are never committed. It is not
   an isolation boundary between apps: they all run as the same user.
 - Redaction is literal string replacement. Values shorter than 4 characters, and values the app
-  transforms (encodes, splits), are not caught.
+  transforms (encodes, splits), are not caught. Neither are JSON spellings other than the raw value, its
+  `JSON.stringify` form and one more level of escaping: a value escaped with `\uXXXX` where JSON.stringify writes
+  the character itself (.NET writes `+` as `+`), or JSON nested two levels deep in text, keeps the secret in a
+  run record.
 - Visibility decides who may call a tool, not what the tool does.
 - Sharing an app and allowing a pair of projects are about which sessions may call it, not what it
   does with what they send: an attached app receives whatever the calling session's agent passes it,
@@ -1572,12 +1580,15 @@ Since the file can be anywhere, the project root is not the boundary here. Three
   reach out to whichever machine a reply named, and Windows offers that machine the person's sign-in. This is decided
   on the resolved path, so a relative path in a session whose folder is a share is refused too. A local link that leads
   there (`shot.png -> \\host\share\x.png`, or a folder link earlier in the path) is refused as well, before `realpath`
-  follows it, since following it is already the connection. On Windows the path is walked from its drive (`walkLinks`,
+  follows it, since following it is already the connection. On Windows the path is walked from its drive (`link-walk.ts` `walkLinks`,
   #849): what each name is comes from its folder's listing (`lstat` follows a link whose target libuv cannot read),
   and a link is followed by hand only when its target is a drive path or relative to the link's folder
   (`localLinkTarget`). Any other target is refused, the NT spellings of a share (`\Device\Mup\…`, `\GLOBAL??\UNC\…`)
   included, and so is a link whose target cannot be read (a junction to a volume with no drive letter), a name its
-  folder does not list (a short name), and more than 64 links. What `realpath` answers must be a drive path too. A
+  folder does not list and that names none of its entries (a trailing dot or space, a stream), and more than 64 links.
+  A short name (`RUNNER~1`, how a temp folder or a link's target may be spelled) is matched to the entry it names by
+  file identity from `lstat`, which does not follow a link, and that entry is judged as itself: a short name of a link
+  to a share is that link, refused. What `realpath` answers must be a drive path too. A
   drive letter mapped to a share is read like any other drive: the person mapped it.
 
 The path is resolved once (`~`, a path relative to the session's folder, a `file://` URL, then `realpath`), and that
@@ -1608,8 +1619,15 @@ tests. What differs from macOS and Linux, and what holds it:
   child's working directory before PATH. Every git call runs in the project, so a `git.exe`
   committed at a repository's root would run on the first status read. `git`, `gh` and an app's
   manifest command are spawned by the absolute path found on PATH (`tool-launch.ts` `programPath`,
-  `resolveCommand`; tests in `tool-launch.test.ts`), and PATH lookups skip relative entries
-  (`env-path.ts`, and `node`/`code` in the Rust shell). `du`, which sized the copy candidates by
+  `resolveCommand`; tests in `tool-launch.test.ts`). A program not on PATH at all is never spawned by its bare
+  name either: `git`, `gh`, `codex` and `claude` are then a path under `%SystemRoot%\System32` that only an
+  administrator can make (`notOnPath`, `toolCommand`), so the spawn reports the tool missing. The bare name had been
+  the answer there, and on a machine without git, gh or codex a `git.exe`, `gh.exe` or `codex.exe` committed to a
+  project ran on its first status read, pull request look or listing of past Codex conversations, before any trust
+  (#838; `git-exec.test.ts`, `git-pr.test.ts`, `codex/not-installed.test.ts` plant one). PATH lookups skip relative entries
+  (`env-path.ts`, and `node`/`code` in the Rust shell), and are otherwise no narrower than Windows' own search, so a
+  tool it would start is found: a quoted entry is read without its quotes, and an App Execution Alias counts as there
+  (`env-path.test.ts`). `du`, which sized the copy candidates by
   bare name with the project as its folder, is not run on Windows at all: the sizes are read from
   the file system there (`measuresWithDu`, #849; `git.test.ts` plants a `du.exe`).
 - **System programs by their whole path.** taskkill, Windows PowerShell and cmd.exe are named under
@@ -1626,7 +1644,12 @@ tests. What differs from macOS and Linux, and what holds it:
   because the command is the person's own text.
 - **Paths.** `path-guard.ts` refuses a path whose `relative()` from the root is absolute (another
   drive, a UNC share), instead of walking its segments inside the root (`path-guard.test.ts`, with
-  `path.win32`). Windows paths ignore case; containment uses `relative()`, which does too. Every
+  `path.win32`). A link along the path is not followed to see whether it stays inside before the walk of
+  `link-walk.ts` (the one a reply's image takes) has read where it leads: a symlink to a share (`docs -> \\host\share`),
+  or a chain of local links ending in one, is refused unread, since `realpath` following it is already the SMB
+  connection with the person's sign-in offered; the guard used to refuse it only afterwards, as outside the project
+  (`path-guard-share.test.ts`). A project that is itself on a share (opened from one, a mapped drive, `\\wsl.localhost`)
+  keeps its links on that one share: they are followed, and a link to another host or share is refused. Windows paths ignore case; containment uses `relative()`, which does too. Every
   "inside" test in the host is `isInside` in `path-guard.ts`, and every comparison that must see one
   place in two spellings canonicalizes with `canonicalPath` there (`realpathSync.native`: the long name
   for a short one, the case on disk, a link resolved, through the nearest folder that exists; #428). The
@@ -1646,15 +1669,15 @@ tests. What differs from macOS and Linux, and what holds it:
 
 Limits:
 
-- If git is not installed at all, the bare name is used, and a planted `git.exe` in the project
-  folder would run. The same holds for `codex` when it is not installed.
 - The files written `0600` here (`app-secrets.json`, `app-imports.json`) get no mode on Windows,
   which has no mode bits; they are as private as the folder they are in. The default data folder
   is in the user's profile, which only that user (and administrators) can read. A `CC_DATA_DIR`
   elsewhere gets that folder's ACL.
 - Junctions are reported as links by `lstat` and so are treated like symlinks, except one whose target
-  libuv cannot read (a volume path): `lstat` follows that one and calls it a folder, so the worktree copy and the
-  reply-image walk ask the folder's listing instead. Only the worktree
-  copy has a test that makes them (`worktree-dependencies.test.ts`); no containment test does yet
-  (creating a symlink on Windows needs Developer Mode or administrator rights; a junction does not).
+  libuv cannot read (a volume path, `\\?\Volume{…}\…`, which anyone can make): `lstat` follows that one and calls it a
+  folder, so the worktree copy and the reply-image walk ask the folder's listing instead, and the path guard checks
+  where every entry `lstat` does not call a link really is (`realpath`), which has to be inside the project too. It
+  had walked on inside such a junction as if it were the project: the file tree listed the folder it led to and a
+  dropped file was written there (`path-guard.test.ts`, also by a short name and another case). Creating a symlink on
+  Windows needs Developer Mode or administrator rights; a junction does not.
 - The keeper does not run on Windows (no named-pipe control socket), so the direct path is used.
