@@ -109,7 +109,7 @@ import {
   resolveProjectFolder,
   resolveTarget,
 } from '../dev-services/fs.js'
-import { DirWatchers } from '../dev-services/watch.js'
+import { DirWatchers, type WatchHolder } from '../dev-services/watch.js'
 import { invalidateFileIndex } from '../dev-services/file-search.js'
 import { writeHandoffNoteSync } from '../dev-services/handoff-notes.js'
 import { attachCommitSessions, looksLikeGitCommit, parseCommitSha } from '../dev-services/git-attrib.js'
@@ -2176,9 +2176,8 @@ export class SessionManager {
           const ref = this.appSessions.builderRefOf(m)
           if (ref) this.apps.appsHub?.rt.builderTurnEnded(ref)
         }
+        // An image takes its row here too, in order; its file is written after (#40 part 2, #868: `persistImage`)
         seq = this.record.persistMessage(e, m)
-        // An image is persisted as a file (#40, part 2) — it is async, so no seq is taken here
-        if (e.type === 'message_image') void this.record.persistImage(e, m)
         // Commit attribution (#50) — caught in passing whenever a git commit tool call goes by
         if (e.type === 'tool_call' || e.type === 'tool_result') this.observeCommit(e, m)
         this.store.sessions.upsertSession(m)
@@ -2941,8 +2940,13 @@ export class SessionManager {
    * is round-trip: the request arrives via RPC, but the answer (a change) goes out through the same
    * broadcast path as a session event.
    */
-  watchDirs(projectId: string, paths: readonly string[]): number {
-    return this.watchers.setWatched(projectId, this.cwdOf(projectId), paths)
+  watchDirs(projectId: string, paths: readonly string[], holder?: WatchHolder): number {
+    return this.watchers.setWatched(projectId, this.cwdOf(projectId), paths, holder)
+  }
+
+  /** A window's connection closed: the folders only it had open stop being watched (#842 item 6) */
+  forgetWatchHolder(holder: WatchHolder): void {
+    this.watchers.forgetHolder(holder)
   }
   readTextFile(projectId: string, path: string) {
     return readTextFile(this.cwdOf(projectId), path)
