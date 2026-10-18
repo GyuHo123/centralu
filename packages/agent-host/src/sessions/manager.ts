@@ -1163,6 +1163,16 @@ export class SessionManager {
     return this.trash.purgeSession(...a)
   }
 
+  /** `SessionTrash.readTrashedRun` (session-trash.ts), kept on the manager for its callers */
+  readTrashedRun(...a: Parameters<SessionTrash['readTrashedRun']>): ReturnType<SessionTrash['readTrashedRun']> {
+    return this.trash.readTrashedRun(...a)
+  }
+
+  /** `SessionTrash.purgeTrashedRuns` (session-trash.ts), kept on the manager for its callers */
+  purgeTrashedRuns(...a: Parameters<SessionTrash['purgeTrashedRuns']>): ReturnType<SessionTrash['purgeTrashedRuns']> {
+    return this.trash.purgeTrashedRuns(...a)
+  }
+
   /** `SessionTrash.emptyTrash` (session-trash.ts), kept on the manager for its callers */
   emptyTrash(...a: Parameters<SessionTrash['emptyTrash']>): ReturnType<SessionTrash['emptyTrash']> {
     return this.trash.emptyTrash(...a)
@@ -1332,6 +1342,8 @@ export class SessionManager {
      */
     from?: { sessionId: string; name: string },
   ): Promise<void> {
+    // The person wrote to it (#378): an app's agent session they wrote to becomes theirs
+    if (!from) this.appSessions.noteTookPart(sessionId, 'wrote')
     return this.deliver(sessionId, text, attachments, from, false)
   }
 
@@ -2263,6 +2275,9 @@ export class SessionManager {
         return d.installed && d.loggedIn ? null : `${tool} cannot start a session here: ${d.detail}`
       },
       trashSession: (...a) => self.trashSession(...a),
+      purgeSession: (...a) => self.purgeSession(...a),
+      trashIf: (...a) => self.trash.trashIf(...a),
+      agentRunEnded: (...a) => self.appSessions.agentRunEnded(...a),
       get trashing() {
         return self.trash.trashing
       },
@@ -2790,6 +2805,8 @@ export class SessionManager {
   markRead(sessionId: string, seq: number): void {
     const m = this.meta.get(sessionId)
     if (!m) return
+    // The person has this session open (#378): an app's agent session they read becomes theirs
+    this.appSessions.noteTookPart(sessionId, 'opened')
     m.lastReadSeq = Math.max(m.lastReadSeq, seq)
     this.store.sessions.markRead(sessionId, seq)
   }
