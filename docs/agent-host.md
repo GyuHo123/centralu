@@ -471,7 +471,7 @@ below retained for `safe` and `normal`:
    back: "Started by …"), under **the caller's permission preset**:
    never more, and no argument or tool of the caller changes it. The task goes in a frame (`agentFrame`: who asks,
    and that the final message is the answer) recorded as sent by the caller (`from`).
-6. **The answer.** Waited for by the same wait as ask_project's (`DelegationFlow.awaitTurn`, #428, each wording its own result; paths an answer names are granted by `grantReads`), up to 240 s; past it, or with `wait: false` at once, the answer is
+6. **The answer.** Waited for by the same wait as ask_project's (`DelegationWaits.awaitTurn`, #428, each wording its own result; paths an answer names are granted by `grantReads`), up to 240 s; past it, or with `wait: false` at once, the answer is
    `working` and the caller is told when the turn ends through the report the orchestrator's `reportBack` uses
    (`awaitingReport` → `deliverReport`, which reaches the model as an untrusted-source notice it reads with
    `read_session`). A call waiting at that moment takes the answer instead, so it does not arrive twice. The marker
@@ -546,6 +546,37 @@ worktree become readable to the caller. A boolean and a name rather than a `work
 either alone says what is meant. A worktree child hangs under the session that started it in the sidebar,
 as a same-folder child does: the sidebar groups by who started a session (`askedBy`, `orderAsTree` in
 `ui/features/sidebar/tree.ts`), and `parentSessionId` still places a former worktree manager's sessions.
+
+**On a linked machine** (#1038, `sessions/remote-agents.ts`). `machine` (a linked machine's id or name) starts the
+child on that machine, in its project that is a checkout of the caller's repository: the same `origin` remote on both
+sides (`projects.origin`, compared by `gitRemoteKey`, so `git@github.com:me/app.git` and `https://github.com/me/app` are
+one repository). No such checkout is refused with that machine's projects and their origins; two checkouts are
+refused unless one has the caller's project's name; a machine that cannot be reached is refused as unreachable. The
+caller's gates are the same (an ordinary session of a trusted project, above the agent depth) and are read again after
+the card. The card is `agent_start` with `machine`: it names the computer, is raised every time (an `auto` caller
+included), and offers no "always", as ask_project's card for another machine's project (#700); it is bounded like a
+local start's setup (`START_AGENT_SETUP_MS`). The child is made over the link (`agents.createSession` there) under
+the caller's preset capped at `normal` (as create_session over a link, #838), with the model, effort and worktree
+branch asked for (the machine's own rules apply: a worktree needs a project trusted there; `lsp` is not passed, and
+the answer says so), and kept one level below the caller in the agent depth on that machine (`agentDepth`, and the
+task's turn is sent with that depth too); a machine whose build would drop it is refused, with a line to update it.
+Only network remotes match (`gitRemoteKey`), and a refusal names repositories, never the addresses as written. Its
+task goes in `remoteAgentFrame`, sent as from the caller ("… on <hub>"); a call that waits opens its wait before the
+send, so a turn that ends at once is its answer, not a report. The hub records it (`remote_agents`, an app setting) and arms a linked report for the
+caller before the send (`LinkedReport`, as the orchestrator's `reportBack`), so the end of its turn comes back as a
+local child's does, with the same pause over its own background work (#723); a call waiting on it (`wait`,
+`agent_session wait`) reads the answer instead (`RemoteAgents.observe`, read before the reports). `agent_session`
+works on it through the link: `status` and `wait` (the machine's state and last words), `send` (refused while it is in
+a turn: no note crosses machines yet), `stop` (`agents.interrupt` there; nothing more is owed), `delete` (to that
+machine's trash, its worktree left there), and `list` names its machine. `answer` does not reach another machine yet:
+its cards are answered there or in the session's own window. When the link drops, a waiting call returns with that
+said, and a caller still owed a report is told once that the child cannot be followed until the link is back; when it
+is back, a child whose turn ended meanwhile is reported then. The paths its answer names are that machine's, and none
+is made readable here. Not yet: the child is not counted under this host's per-project ceiling (it runs on the other
+computer), and a linked report lives in the hub's memory, so a hub restart still finds the child (the record is
+stored; `list` reads its state from the machine) but no longer owes its report. A child deleted there, or whose
+machine was removed, while the hub could not see it is cleared by `list` and `delete`; the caller's trash clears its
+children's records, and a handoff gives them to the heir.
 
 **Creator and worktree ancestry** (#637). `askedBy` records who started an agent, regardless of its folder.
 `parentSessionId` records worktree ancestry (including former manager children); `start_agent` sets it only
@@ -1364,7 +1395,7 @@ Implementation rules:
 `ClaudeSession.start` is the single SDK `query({ options })` construction site. Both
 `SessionManager.createSession` and the resume/wake path use it, for ordinary sessions,
 orchestrators, coordinators, worktree managers, builders, app agents and `start_agent` children.
-The two build the adapter's options in one place (`SessionManager.launchOptions`, #428), so an option
+The two build the adapter's options in one place (`SessionStarts.launchOptions` in `sessions/session-start.ts`, #428), so an option
 added there reaches a new session and a wake alike (`sessions/launch-options.test.ts`).
 Its `spawnClaudeCodeProcess` callback sends the SDK's flags and environment to either the local
 spawn or the keeper; a fresh keeper replacement therefore receives the same options.

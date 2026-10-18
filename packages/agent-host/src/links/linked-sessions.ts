@@ -262,9 +262,48 @@ export function linkedSessions(
           tool,
           // The caller's cap (#838): never above the seat that asked, `normal` when it says nothing
           permissionPreset: opts.preset ?? 'normal',
+          ...(opts.model ? { model: opts.model } : {}),
+          ...(opts.effort ? { effort: opts.effort } : {}),
+          ...(opts.worktreeBranch ? { worktree: true, worktreeBranch: opts.worktreeBranch } : {}),
+          ...(opts.agentDepth ? { agentDepth: opts.agentDepth } : {}),
         })) as { id: string; name: string }
         if (opts.name) await route('sessions.rename', { sessionId: info.id, name: opts.name })
         return { sessionId: info.id, name: opts.name ?? info.name }
+      })
+    },
+
+    async origin(project) {
+      const m = owner(project.id)
+      if (!m) return { ok: false, error: `Not a project of a linked machine: ${project.id}` }
+      // A build from before #1038 has no `projects.origin`, and drops `agentDepth` too: said as such, not as a failure
+      let older = false
+      const r = await attempt(m, async () => {
+        try {
+          const r = (await route('projects.origin', { projectId: project.id })) as { origin?: unknown }
+          return { origin: typeof r?.origin === 'string' ? r.origin : null }
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('Unknown method: projects.origin')) older = true
+          throw err
+        }
+      })
+      return older ? { ok: false, error: `${m.name} runs a Centralu from before #1038`, olderBuild: true } : r
+    },
+
+    async interrupt(sessionId) {
+      const m = owner(sessionId)
+      if (!m) return { ok: false, error: `Not a session of a linked machine: ${sessionId}` }
+      return attempt(m, async () => {
+        await route('agents.interrupt', { sessionId })
+        return {}
+      })
+    },
+
+    async deleteSession(sessionId) {
+      const m = owner(sessionId)
+      if (!m) return { ok: false, error: `Not a session of a linked machine: ${sessionId}` }
+      return attempt(m, async () => {
+        await route('agents.deleteSession', { sessionId })
+        return {}
       })
     },
 

@@ -94,8 +94,24 @@ export type LinkedSessions = {
   projects(): Promise<{ projects: LinkedProject[]; away: { machine: string; machineId: string; why: string }[] }>
   /** A machine project's ordinary sessions (its workers, not an app's) as that machine reports them now; ids qualified */
   projectSessions(project: LinkedProject): Promise<Outcome<{ sessions: { id: string; name: string; state: string }[] }>>
-  /** A new session in a machine's project, under `preset` (`normal` when none is given; the caller caps it, #838), named if a name is given */
-  createSession(project: LinkedProject, opts: { tool?: ToolName; name?: string; preset?: PermissionPreset }): Promise<Outcome<{ sessionId: string; name: string }>>
+  /**
+   * A new session in a machine's project, under `preset` (`normal` when none is given; the caller caps it, #838), named
+   * if a name is given. For start_agent's child there (#1038): its model and effort, a new worktree on `worktreeBranch`,
+   * and the agent depth it is kept at (`CreateSessionParams.agentDepth`)
+   */
+  createSession(
+    project: LinkedProject,
+    opts: { tool?: ToolName; name?: string; preset?: PermissionPreset; model?: string; effort?: string; worktreeBranch?: string; agentDepth?: number },
+  ): Promise<Outcome<{ sessionId: string; name: string }>>
+  /**
+   * A machine project's `origin` remote, as git there has it (`projects.origin`, #1038); null with none. `olderBuild`: the
+   * machine runs a Centralu from before it, which also drops `createSession`'s `agentDepth`
+   */
+  origin(project: LinkedProject): Promise<Outcome<{ origin: string | null }> | { ok: false; error: string; olderBuild: true }>
+  /** Stops a machine's session's running turn (`agents.interrupt` there, #1038) */
+  interrupt(sessionId: string): Promise<Outcome>
+  /** Moves a machine's session to that machine's trash, its worktree left in place (`agents.deleteSession` there, #1038) */
+  deleteSession(sessionId: string): Promise<Outcome>
   /** A linked machine by its id or the name the person gave it, case aside */
   machineNamed(ref: string): { id: string; name: string } | null
   /** Whether the machine with this id is still linked: a removed machine is not (#723) */
@@ -267,6 +283,8 @@ export type StartAgentOpts = {
   lsp?: boolean
   /** A short name for the new session (#861), shown in the sidebar; a new worktree's branch is made from it */
   name?: string
+  /** A linked machine to start it on (#1038), by its id or name: in that machine's checkout of the caller's repository */
+  machine?: string
 }
 
 /**
@@ -283,6 +301,8 @@ export type AgentListRow = {
   asleep: boolean
   lastActive?: string
   worktree?: { branch: string; unmerged: boolean }
+  /** The linked machine it runs on (#1038), by name; absent: this computer */
+  machine?: string
 }
 
 /** agent_session's arguments (#561) */
