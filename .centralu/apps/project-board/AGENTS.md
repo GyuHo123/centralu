@@ -236,12 +236,15 @@ file and polls; `queue-tools.mjs` has the tools; `bin/merge-queue.mjs` is the wa
   An item that needs attention keeps no driver: its session acts and runs a watch again, and the
   attention texts say the queue goes on while the board app or a watch command drives it. When this
   app's `.mjs` files change under it (a pull, a branch switch; the same for one pass, not a checkout
-  half written), it starts a new driver on the new code and ends, so a driver never runs old code for
-  a day. One runs at a time: `merge-queue.drive.json` holds its pid and `at`, renewed every pass, made
-  whole and linked into place so two cannot both make it; a record older than the lease (3 minutes)
-  or of a process gone is stale and taken over, since after a SIGKILL or a power loss its pid can
-  belong to another process. What it says (started, ended and why) goes to `merge-queue.drive.log`,
-  started afresh past 1 MB; both are in the data folder. `merge_queue` names it when it holds the
+  half written), it starts a new driver on the new code, with what is left of its `--hours`, and ends,
+  so a driver never runs old code for a day. Files it cannot read (the folder moved or gone) are no
+  change: it drives on from the code it has loaded, where a new driver would not start. One runs at
+  a time: `merge-queue.drive.json` holds its pid and `at`, renewed every pass, made whole and linked
+  into place so two cannot both make it; a record older than the lease (3 minutes) or of a process
+  gone is stale and taken over, since after a SIGKILL or a power loss its pid can belong to another
+  process. What it says (started, until when, ended and why) goes to `merge-queue.drive.log`,
+  emptied in place past 1 MB and only ever appended to, so a driver still writing to it never writes
+  over another's lines; both are in the data folder. `merge_queue` names it when it holds the
   lease. This is not the app kept alive: the app's server still stops on the idle rule (docs/apps.md
   §4), and while a driver holds the lease the server waits; keeping an app's process alive while it
   has work is the issue's open proposal for the host.

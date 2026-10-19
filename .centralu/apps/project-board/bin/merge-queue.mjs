@@ -26,7 +26,7 @@
 // switch), it starts a new one on the new code and ends. One runs at a time (`merge-queue.drive.json`:
 // its pid, renewed every pass); what it says goes to `merge-queue.drive.log` there.
 import { spawn } from 'node:child_process'
-import { openSync, readdirSync, statSync } from 'node:fs'
+import { openSync, readdirSync, statSync, truncateSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { backgroundDriver, beat, claimBackground, releaseBackground, releaseLease, readQueue, startDriver, TICK_MS } from '../queue-driver.mjs'
@@ -79,8 +79,8 @@ function sources() {
   }
 }
 
-/** Starts a background driver; answers its pid, or null when it could not be started. */
-function spawnDrive() {
+/** Starts a background driver (`args` after `--data`); answers its pid, or null when it could not be started. */
+function spawnDrive(args = []) {
   let log = 'ignore'
   try {
     const path = join(opts.data, LOG_FILE)
@@ -90,12 +90,15 @@ function spawnDrive() {
     } catch {
       // no log yet
     }
-    log = openSync(path, big ? 'w' : 'a')
+    // Emptied in place and always appended to: a driver still writing through its own descriptor
+    // (one ending after it started this one) then writes at the end, never over another's lines
+    if (big) truncateSync(path)
+    log = openSync(path, 'a')
   } catch {
     // no log, then
   }
   try {
-    const child = spawn(process.execPath, [process.argv[1], 'drive', '--data', opts.data], { detached: true, stdio: ['ignore', 'ignore', log], windowsHide: true })
+    const child = spawn(process.execPath, [process.argv[1], 'drive', '--data', opts.data, ...args], { detached: true, stdio: ['ignore', 'ignore', log], windowsHide: true })
     child.on('error', () => {})
     child.unref()
     return child.pid ?? null
@@ -107,9 +110,9 @@ function spawnDrive() {
 function drive() {
   // Another one drives already: nothing to do
   if (!claimBackground(opts.data)) process.exit(0)
-  console.error(`[merge-queue drive] pid ${process.pid} started at ${new Date().toISOString()}`)
-  const driver = startDriver(opts.data, { holder: `drive:${process.pid}` })
   const until = Date.now() + opts.hours * 3_600_000
+  console.error(`[merge-queue drive] pid ${process.pid} started at ${new Date().toISOString()}, until ${new Date(until).toISOString()}`)
+  const driver = startDriver(opts.data, { holder: `drive:${process.pid}` })
   const code = sources()
   let seen = code
   let ending = false
@@ -119,7 +122,9 @@ function drive() {
     // Let go first, so a watch that ends meanwhile hands off to a new one
     releaseBackground(opts.data)
     await driver.stop()
-    const next = again ? spawnDrive() : null
+    // The next one keeps this one's deadline: a restart is not a new day
+    const hours = (until - Date.now()) / 3_600_000
+    const next = again && hours > 0 ? spawnDrive(['--hours', String(hours)]) : null
     console.error(`[merge-queue drive] pid ${process.pid} ended at ${new Date().toISOString()}: ${why}${again ? (next ? `; pid ${next} goes on` : '; could not start the next one') : ''}`)
     process.exit(0)
   }
@@ -133,10 +138,12 @@ function drive() {
     }
     if (!unattended(q)) return end('nothing waits or runs CI')
     if (Date.now() > until) return end(`${opts.hours} hours`)
-    // Changed, and the same for one pass (not a checkout half written): go on with the new code
+    // Changed, and the same for one pass (not a checkout half written): go on with the new code. Not
+    // readable (the folder moved or gone) is no change: this one drives on from what it has loaded,
+    // where a new one would not even start
     const now = sources()
-    if (now !== code && now === seen) return end("this app's code changed", { again: true })
-    seen = now
+    if (now !== null && now !== code && now === seen) return end("this app's code changed", { again: true })
+    if (now !== null) seen = now
     if (!beat(opts.data)) return end('another background driver runs')
     setTimeout(look, TICK_MS)
   }

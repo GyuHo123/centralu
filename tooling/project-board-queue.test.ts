@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -2485,10 +2485,16 @@ describe('the watch command: the queuing session hears about its items', { timeo
     // A driver killed long ago left its record, and its pid is another process's now (this one's)
     const old = new Date(Date.now() - 60 * 60_000).toISOString()
     writeFileSync(join(dir, 'merge-queue.drive.json'), JSON.stringify({ pid: process.pid, since: old, at: old }))
+    // And a log past 1 MB
+    const log = join(dir, 'merge-queue.drive.log')
+    writeFileSync(log, 'x'.repeat(1_000_001))
     const r = await watch(['watch', '--data', dir, '--owner', 'tester', '--after', String(seq)])
     expect(r.code).toBe(0)
     expect(r.out).toContain('Merge queue: merged #77')
     expect(r.out).toContain('Nothing left queued.')
+    // The log was emptied for it; another writer's line after its own stays, whatever it writes next
+    await waitFor(() => readFileSync(log, 'utf8').includes('started at'), 'the driver to say it started')
+    appendFileSync(log, 'a line of another driver\n')
     // No session runs a watch again and nothing opens the app: #78's CI passes, and it still lands
     greenAt78()
     await waitFor(merged78, `#78 merged with the watch gone (${r.out})`)
@@ -2499,9 +2505,14 @@ describe('the watch command: the queuing session hears about its items', { timeo
     expect(queueOnDisk().items.find((i: any) => i.pr === 78).state).toBe('merged')
     expect(filesNamed(dir, 'merge-queue.lease.json')).toEqual([])
     expect(filesNamed(dir, 'merge-queue.drive.json')).toEqual([])
-    const log = readFileSync(join(dir, 'merge-queue.drive.log'), 'utf8')
-    expect(log).toMatch(new RegExp(`pid ${pid} started at \\d{4}-`))
-    expect(log).toMatch(new RegExp(`pid ${pid} ended at .*: nothing waits or runs CI`))
+    const said = readFileSync(log, 'utf8')
+    expect(said).not.toMatch(/x{10}|\0/)
+    expect(said.split('\n')).toEqual([
+      expect.stringMatching(new RegExp(`pid ${pid} started at \\d{4}-.*, until \\d{4}-`)),
+      'a line of another driver',
+      expect.stringMatching(new RegExp(`pid ${pid} ended at .*: nothing waits or runs CI$`)),
+      '',
+    ])
   })
 
   it('runs one background driver at a time, however many start at once (#1236)', async () => {
@@ -2543,12 +2554,36 @@ describe('the watch command: the queuing session hears about its items', { timeo
     await drivesEnd()
   })
 
+  it("drives on from the code it has loaded when this app's folder is gone, where a new driver would not start (#1236)", async () => {
+    const { dir } = await oneLeftInCi()
+    const app = join(root, 'app-copy')
+    cpSync(join(REPO_ROOT, '.centralu/apps/project-board'), app, { recursive: true })
+    const first = command(['drive', '--data', dir], join(app, 'bin/merge-queue.mjs'))
+    drives.push(first.child.pid!)
+    await waitFor(() => readJsonIn(dir, 'merge-queue.drive.json')?.pid === first.child.pid, 'the driver')
+    // The folder moves away: its files no longer read, which is no change of code
+    renameSync(app, join(root, 'app-moved'))
+    const beats = new Set<string>()
+    await waitFor(() => {
+      beats.add(readJsonIn(dir, 'merge-queue.drive.json')?.at)
+      return beats.size >= 6 || !running(first.child.pid!)
+    }, 'the driver to renew its record')
+    expect(running(first.child.pid!)).toBe(true)
+    expect(readJsonIn(dir, 'merge-queue.drive.json')?.pid).toBe(first.child.pid)
+    greenAt78()
+    await waitFor(merged78, '#78 merged by the same driver')
+    const ended = await first.done
+    expect(ended.code).toBe(0)
+    expect(ended.err).toMatch(new RegExp(`pid ${first.child.pid} ended at .*: nothing waits or runs CI`))
+  })
+
   it("starts a driver on the new code when this app's code changes under it, and the queue goes on (#1236)", async () => {
     const { dir } = await oneLeftInCi()
     // A copy of the app, so the change touches no file of this checkout (Centralu restarts an app whose folder changes)
     const app = join(root, 'app-copy')
     cpSync(join(REPO_ROOT, '.centralu/apps/project-board'), app, { recursive: true })
-    const first = command(['drive', '--data', dir], join(app, 'bin/merge-queue.mjs'))
+    // Two hours, not the default: the next one must keep what is left of them, not start a new day
+    const first = command(['drive', '--data', dir, '--hours', '2'], join(app, 'bin/merge-queue.mjs'))
     drives.push(first.child.pid!)
     await waitFor(() => readJsonIn(dir, 'merge-queue.drive.json')?.pid === first.child.pid, 'the first driver')
     const later = new Date(Date.now() + 60_000)
@@ -2559,7 +2594,12 @@ describe('the watch command: the queuing session hears about its items', { timeo
     expect(next, ended.err).toBeGreaterThan(0)
     drives.push(next)
     await waitFor(() => readJsonIn(dir, 'merge-queue.drive.json')?.pid === next, 'the driver on the new code')
-    expect(readFileSync(join(dir, 'merge-queue.drive.log'), 'utf8')).toContain(`pid ${next} started at`)
+    // It keeps the first one's deadline: a restart is not a new day
+    const until = (text: string, pid: number) => Date.parse(new RegExp(`pid ${pid} started at [^,]+, until (\\S+)`).exec(text)?.[1] ?? '')
+    const deadline = until(ended.err, first.child.pid!)
+    expect(deadline).toBeGreaterThan(Date.now() + 1.9 * 3_600_000)
+    expect(deadline).toBeLessThan(Date.now() + 2 * 3_600_000)
+    expect(Math.abs(until(readFileSync(join(dir, 'merge-queue.drive.log'), 'utf8'), next) - deadline)).toBeLessThan(2_000)
     greenAt78()
     await waitFor(merged78, '#78 merged by the driver on the new code')
     await drivesEnd()
