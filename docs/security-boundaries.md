@@ -1444,13 +1444,20 @@ Limits:
   an inode came from (the same limit as "Project files and native handoff"). Same-user races
   between checking a file and opening it remain.
 - If `app-imports.json` cannot be read, the marks cannot be used, and the file is also the only
-  record of which apps were imported. So while it cannot be read, or a moved-aside copy
-  (`app-imports.json.unreadable-<ms>`) is in the data folder, every user-folder app without a mark is
-  `unconfirmed`, the person's own apps too, with a reason naming the file (`ImportBook.doubt`,
-  #1172): an app asks once more rather than running unasked. Enabling one gives it a mark of its own;
-  restoring or removing the copy ends the asking for the rest. The host logs the file once
-  (`imports.test.ts` "a marks file that cannot be read holds every unmarked app instead of running
-  it").
+  record of which apps were imported (#1172). When it is gone and a moved-aside copy
+  (`app-imports.json.unreadable-<ms>`) is in the data folder, every app then in the user folder, the
+  person's own apps too, gets a mark (`lost`) in a new file written at once, and asks once before it
+  runs again, with a reason naming both files: an app asks once more rather than running unasked. The
+  new file is the record from then on, so an app made later is not held and removing the copy is
+  safe; a mended copy put back is read as soon as the file changes. While the file cannot be read at
+  all, or the data folder cannot be listed, every app without a mark is held instead
+  (`ImportBook.doubt`). The host logs it (`imports.test.ts` "a marks file that cannot be read holds
+  the apps instead of running them").
+- **An older build ignores the copy.** A build before #1172 (a rollback, or the older host still
+  serving during a swap) reads a missing `app-imports.json` as no imports and runs every imported app
+  unasked, as it always did. Once this build has written the file of `lost` marks, an older build
+  reads them as imports not yet enabled and holds those apps too. A file an older build writes in
+  the meantime, from its empty view of the marks, is taken as the record.
 - An unreadable `app-secrets.json` is moved aside the same way, and its values stay in the
   moved-aside copy. For both files, only a file that
   does not parse, or parses to the wrong shape, is moved aside; one that cannot be read at all (no

@@ -105,13 +105,17 @@ export class AppHandover {
     // No mark is the person's own app only while the marks can be trusted to be complete (#1172)
     if (!mark) return this.book.doubt()
     if (mark.confirmed && mark.confirmed.key === reviewKey(manifest)) return null
-    return mark.confirmed ? CHANGED : NOT_ENABLED
+    if (mark.confirmed) return CHANGED
+    return mark.lost !== undefined ? this.book.lostReason(mark.lost) : NOT_ENABLED
   }
 
-  /** The mark shown in the list — absent if the app was not imported */
+  /**
+   * The mark shown in the list — absent if the app was not imported. A mark written because the marks were lost
+   * (`ImportMark.lost`, #1172) is not shown: the app may be the person's own, so the list does not call it imported
+   */
   imported(appId: string, dir: string): ExternalAppInfo['imported'] {
     const mark = this.book.get(appId, dir)
-    return mark ? { source: mark.source, at: mark.importedAt, confirmedAt: mark.confirmed?.at ?? null } : undefined
+    return mark && mark.lost === undefined ? { source: mark.source, at: mark.importedAt, confirmedAt: mark.confirmed?.at ?? null } : undefined
   }
 
   /**
