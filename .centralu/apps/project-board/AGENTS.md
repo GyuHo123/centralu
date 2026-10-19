@@ -227,23 +227,32 @@ file and polls; `queue-tools.mjs` has the tools; `bin/merge-queue.mjs` is the wa
   let go on exit).
 - **The background driver** (#1236): the watch command exits with its session's news, and the queue
   then stood still: the app went idle, the session that heard about a merge started no new watch, and
-  three pull requests waited 6.5 hours. So a watch that ends (any exit but 2, a signal included) while
-  a pull request in the queue, anyone's, waits or runs CI, or a batch runs (`unattended`), leaves
-  `merge-queue.mjs drive --data <folder>` behind, detached, and says so with its pid. It drives under
-  the same lease and ends once nothing waits or runs CI (an item that needs attention waits for a
-  session, which runs a watch again), or after `--hours` (default 24). One runs at a time
-  (`merge-queue.drive.json`, its pid); its errors go to `merge-queue.drive.log`, both in the data
-  folder. `merge_queue` names it when it holds the lease. This is not the app kept alive: the app's
-  server still stops on the idle rule (docs/apps.md §4); keeping an app's process alive while it has
-  work is the issue's open proposal for the host.
+  three pull requests waited 6.5 hours. So a watch that ends (any exit but 2: its news, its deadline,
+  SIGINT, SIGTERM or SIGHUP) while a pull request in the queue, anyone's, waits or runs CI, or a batch
+  runs (`unattended`), leaves `merge-queue.mjs drive --data <folder>` behind, detached, and says so
+  with its pid and `kill <pid>` to stop it (or that it could not start one). It drives under the same
+  lease and ends, always with exit 0, once nothing waits or runs CI, after `--hours` (default 24), on
+  SIGINT, SIGTERM or SIGHUP (the tick in flight finishes first), or when the queue file does not read.
+  An item that needs attention keeps no driver: its session acts and runs a watch again, and the
+  attention texts say the queue goes on while the board app or a watch command drives it. When this
+  app's `.mjs` files change under it (a pull, a branch switch; the same for one pass, not a checkout
+  half written), it starts a new driver on the new code and ends, so a driver never runs old code for
+  a day. One runs at a time: `merge-queue.drive.json` holds its pid and `at`, renewed every pass, made
+  whole and linked into place so two cannot both make it; a record older than the lease (3 minutes)
+  or of a process gone is stale and taken over, since after a SIGKILL or a power loss its pid can
+  belong to another process. What it says (started, ended and why) goes to `merge-queue.drive.log`,
+  started afresh past 1 MB; both are in the data folder. `merge_queue` names it when it holds the
+  lease. This is not the app kept alive: the app's server still stops on the idle rule (docs/apps.md
+  §4), and while a driver holds the lease the server waits; keeping an app's process alive while it
+  has work is the issue's open proposal for the host.
 - **Telling the session**: every change worth a message is an event with a sequence number and the
   item's owner. Attention is one event per change (`noticeKey`: the reason, the head and the job), not
   one per poll; a merge or a close is one too. `node .centralu/apps/project-board/bin/merge-queue.mjs
   watch --data <folder> --owner <name> --after <seq>` (queue_merge answers it whole) drives the queue
   while it waits and exits with that owner's messages: 3 when one needs attention, 0 for a merge or
   when nothing is left, 6 at its deadline (`--minutes`, default 100), 2 for a wrong argument or an
-  unreadable queue, 130 or 143 when stopped by SIGINT or SIGTERM (the tick in flight finishes and is
-  written down first). It names the command to run again, quoted like queue_merge's (`shellQuote`). A Claude session is woken when a background command ends.
+  unreadable queue, 130, 143 or 129 when stopped by SIGINT, SIGTERM or SIGHUP (the tick in flight
+  finishes and is written down first). It names the command to run again, quoted like queue_merge's (`shellQuote`). A Claude session is woken when a background command ends.
 - **The screen** shows a "Merge queue" section above the board while it has items: needs attention
   (with why), CI, waiting, merged in the last day, each with Unqueue while active. Nothing tells a
   screen when the driver moves an item, so it reads `merge_queue` again every 15 s while one is active.

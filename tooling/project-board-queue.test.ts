@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,7 +9,7 @@ import { ExternalApps, resultText, type AppCaller, type AppRef } from '../packag
 import { fakeGh, type FakeGh } from './fake-gh.test-helpers.js'
 import { SLOW } from './test-timing.js'
 // @ts-expect-error — plain .mjs of a Centralu app (no installs, no types, by the app rules)
-import { decideBefore, decideCi, emptyQueue, enqueue, handoffReason, lowerFailureCounts, noticeKey, dequeue, normalize, onlySupersededFailures, queueOrder, watchState } from '../.centralu/apps/project-board/queue.mjs'
+import { decideBefore, decideCi, emptyQueue, enqueue, handoffReason, lowerFailureCounts, noticeKey, dequeue, normalize, onlySupersededFailures, queueOrder, unattended, watchState } from '../.centralu/apps/project-board/queue.mjs'
 // @ts-expect-error -- a plain .mjs module of the board app, without types
 import { commandEnv, conflictPlan } from '../.centralu/apps/project-board/queue-conflict.mjs'
 // @ts-expect-error -- a plain .mjs module of the board app, without types
@@ -17,7 +17,7 @@ import { pathMatches } from '../.centralu/apps/project-board/versions.mjs'
 // @ts-expect-error — plain .mjs of a Centralu app
 import { evaluateChecks } from '../.centralu/apps/project-board/ci.mjs'
 // @ts-expect-error — plain .mjs of a Centralu app
-import { latestRuns, takeLease, releaseLease } from '../.centralu/apps/project-board/queue-driver.mjs'
+import { backgroundDriver, beat, claimBackground, latestRuns, releaseBackground, takeLease, releaseLease } from '../.centralu/apps/project-board/queue-driver.mjs'
 // @ts-expect-error — plain .mjs of a Centralu app
 import { classifyRun, onFlakyList } from '../.centralu/apps/project-board/run-failure.mjs'
 // @ts-expect-error — plain .mjs of a Centralu app
@@ -315,6 +315,50 @@ describe('what the merge queue decides for one poll', () => {
       // A holder killed before it let go (its pid is gone) holds nothing, however fresh its lease
       writeFileSync(join(dir, 'merge-queue.lease.json'), JSON.stringify({ holder: 'server:dead', pid: deadPid(), until: new Date(NOW + 60 * 60_000).toISOString() }))
       expect(takeLease(dir, 'watch:3', NOW)).toBe(true)
+    } finally {
+      rmFakeDir(dir)
+    }
+  })
+
+  it('leaves a background driver only for pull requests that move without a session: waiting, in CI, or a batch (#1236)', () => {
+    const q = (states: string[], batches: any[] = []) => ({ ...emptyQueue(), items: states.map((state, i) => fresh({ pr: 80 + i, state })), batches })
+    // An item that needs attention waits for its session, which runs a watch again
+    expect(unattended(q(['attention', 'attention', 'merged', 'closed']))).toBe(false)
+    expect(unattended(q([]))).toBe(false)
+    expect(unattended(q(['attention', 'waiting']))).toBe(true)
+    expect(unattended(q(['ci']))).toBe(true)
+    expect(unattended(q(['merged'], [{ n: 1, state: 'landing', members: [] }]))).toBe(true)
+    expect(unattended(q(['merged'], [{ n: 1, state: 'landed', members: [] }]))).toBe(false)
+  })
+
+  it('lets one background driver run at a time, and trusts its record only while it renews it (#1236)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-queue-drive-'))
+    const file = join(dir, 'merge-queue.drive.json')
+    const record = (pid: number, at: number) => writeFileSync(file, JSON.stringify({ pid, since: new Date(at).toISOString(), at: new Date(at).toISOString() }))
+    try {
+      const now = Date.now()
+      // Another driver, running and renewing: this process stays out of the way
+      record(process.ppid, now)
+      expect(backgroundDriver(dir, now)).toBe(process.ppid)
+      expect(claimBackground(dir, now)).toBe(false)
+      expect(beat(dir, now)).toBe(false)
+      // The same pid, silent past the lease: after a SIGKILL or a power loss the number may be another
+      // process's now (one of another user counts as running), so the record is stale and taken over
+      record(process.ppid, now - 3 * 60_000 - 1)
+      expect(backgroundDriver(dir, now)).toBeNull()
+      expect(claimBackground(dir, now)).toBe(true)
+      expect(backgroundDriver(dir, now)).toBe(process.pid)
+      expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ pid: process.pid })
+      expect(beat(dir, now + 1_000)).toBe(true)
+      expect(JSON.parse(readFileSync(file, 'utf8')).at).toBe(new Date(now + 1_000).toISOString())
+      releaseBackground(dir)
+      expect(existsSync(file)).toBe(false)
+      // A process gone holds nothing, however fresh its record
+      record(deadPid(), now)
+      expect(backgroundDriver(dir, now)).toBeNull()
+      expect(claimBackground(dir, now)).toBe(true)
+      // Nothing is left half made beside it
+      expect(readdirSync(dir)).toEqual(['merge-queue.drive.json'])
     } finally {
       rmFakeDir(dir)
     }
@@ -872,8 +916,13 @@ beforeEach(() => {
   fake = fakeGh(root, FAKE_GH)
 })
 
-/** The background drivers watch commands said they left (#1236): each test ends with them ended. */
+/**
+ * The background drivers watch commands said they left (#1236): each test ends with them ended. Never
+ * this process or its parent: a watch that trusted a stale record (the bug a test here guards) names
+ * whatever pid the record holds, and the tests that write one write this process's.
+ */
 let drives: number[] = []
+const ours = (pid: number) => Number.isInteger(pid) && pid > 0 && pid !== process.pid && pid !== process.ppid
 const running = (pid: number) => {
   try {
     process.kill(pid, 0)
@@ -895,7 +944,7 @@ afterEach(async () => {
   await rt?.dispose()
   rt = null
   // Only the ones these tests' watch commands started; they let their lease go on SIGTERM
-  for (const pid of drives.filter(running)) process.kill(pid, 'SIGTERM')
+  for (const pid of drives.filter((p) => ours(p) && running(p))) process.kill(pid, 'SIGTERM')
   await drivesEnd()
   drives = []
   rmFakeDir(root)
@@ -1156,7 +1205,7 @@ describe('the project board app: the merge queue', { timeout: 60_000 * SLOW }, (
     await morePolls()
     expect(writes()).toEqual([])
     expect(notices().map((e) => e.text)).toEqual([
-      'Merge queue: #77 (feat(apps): change 77) needs attention: conflict. #77 conflicts with main at c0ffee0. The queue has no checkout to merge it in. Author session: tester. Relay this to it (the queue cannot message a session yet, #1173): "Merge main into feat/b77 and push again; conflicted files: not known (GitHub says it conflicts)." The queue takes the new head by itself, at the front of the queue. Or take it out with unqueue.',
+      'Merge queue: #77 (feat(apps): change 77) needs attention: conflict. #77 conflicts with main at c0ffee0. The queue has no checkout to merge it in. Author session: tester. Relay this to it (the queue cannot message a session yet, #1173): "Merge main into feat/b77 and push again; conflicted files: not known (GitHub says it conflicts)." The queue takes the new head, at the front of the queue, while the board app or a watch command drives it. Or take it out with unqueue.',
     ])
     const listed = await call('merge_queue')
     expect(listed.text).toContain('Merge queue: 1 need attention.')
@@ -2340,24 +2389,71 @@ describe('agents find the board tool for the gh command they would type', { time
   })
 })
 
-/** Runs the watch command with the fake gh on its PATH; answers its exit code and output. */
-function watch(args: string[]): Promise<{ code: number | null; out: string; err: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [WATCH, ...args], {
-      env: fake.env({ ...FAST, ...NO_TIERS, ...NO_CHECKOUT }),
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    const t = setTimeout(() => (child.kill(), reject(new Error(`watch did not end: ${out} ${err}`))), 30_000 * SLOW)
-    child.on('close', (code) => {
+/**
+ * Starts the watch command (or `drive`, or the command of a copy of the app: `script`) with the fake gh
+ * on its PATH; `done` answers its exit code, the signal that ended it, and its output.
+ */
+function command(args: string[], script = WATCH) {
+  const child = spawn(process.execPath, [script, ...args], {
+    env: fake.env({ ...FAST, ...NO_TIERS, ...NO_CHECKOUT }),
+  })
+  let out = ''
+  let err = ''
+  child.stdout.on('data', (d) => (out += d))
+  child.stderr.on('data', (d) => (err += d))
+  const done = new Promise<{ code: number | null; signal: string | null; out: string; err: string }>((resolve, reject) => {
+    const t = setTimeout(() => (child.kill(), reject(new Error(`${args[0]} did not end: ${out} ${err}`))), 30_000 * SLOW)
+    child.on('close', (code, signal) => {
       clearTimeout(t)
-      for (const m of out.matchAll(/in the background \(pid (\d+)\)/g)) drives.push(Number(m[1]))
-      resolve({ code, out, err })
+      for (const m of out.matchAll(/in the background \(pid (\d+)\)/g)) if (ours(Number(m[1]))) drives.push(Number(m[1]))
+      resolve({ code, signal, out, err })
     })
   })
+  return { child, done }
 }
+/** Runs the watch command to its end. */
+const watch = (args: string[]) => command(args).done
+
+/** Polls `ok` until it holds, for at most `ms` (20 s): a wait for an event, never for a time. */
+async function waitFor<T>(ok: () => T, what: string, ms = 20_000): Promise<NonNullable<T>> {
+  const end = Date.now() + ms * SLOW
+  for (;;) {
+    const v = ok()
+    if (v) return v as NonNullable<T>
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`)
+    await new Promise((r) => setTimeout(r, 50))
+  }
+}
+const readJsonIn = (dir: string, name: string): any => {
+  try {
+    return JSON.parse(readFileSync(join(dir, name), 'utf8'))
+  } catch {
+    return null
+  }
+}
+/** #77 green, #78 left in CI, the app gone: what the background driver is for. */
+async function oneLeftInCi() {
+  runtime(
+    ghState({
+      prs: { '77': ghPr(77), '78': ghPr(78, { headRefOid: SHA2 }) },
+      checks: { [SHA]: green(), [SHA2]: [ghCheck('verify', null, 11)] },
+      runs: { [SHA]: [ghRun('success')], [SHA2]: [ghRun(null, 1, SHA2)] },
+    }),
+    IDLE_SERVER,
+  )
+  const mine = await call('queue_merge', { pr: 77, owner: 'tester' })
+  await call('queue_merge', { pr: 78, owner: 'someone else' })
+  // The app goes away (Centralu stops an idle one)
+  await rt!.dispose()
+  rt = null
+  return { seq: mine.data.seq as number, dir: queueFile().replace(/[\\/]merge-queue\.json$/, '') }
+}
+const greenAt78 = () =>
+  patchGh((s) => {
+    s.checks[SHA2] = green('2026-10-17T09:00:00Z')
+    s.runs[SHA2] = [ghRun('success', 1, SHA2)]
+  })
+const merged78 = () => writes().some((w) => w[0] === 'merge' && w[1] === '78')
 
 describe('the watch command: the queuing session hears about its items', { timeout: 60_000 * SLOW }, () => {
   it('drives the queue while the app is stopped, and exits 3 with the attention message for its owner only', async () => {
@@ -2385,40 +2481,88 @@ describe('the watch command: the queuing session hears about its items', { timeo
   })
 
   it('leaves a driver behind when it ends with pull requests still in CI, which lands them with the app and the watch gone (#1236)', async () => {
-    runtime(
-      ghState({
-        prs: { '77': ghPr(77), '78': ghPr(78, { headRefOid: SHA2 }) },
-        checks: { [SHA]: green(), [SHA2]: [ghCheck('verify', null, 11)] },
-        runs: { [SHA]: [ghRun('success')], [SHA2]: [ghRun(null, 1, SHA2)] },
-      }),
-      IDLE_SERVER,
-    )
-    const mine = await call('queue_merge', { pr: 77, owner: 'tester' })
-    await call('queue_merge', { pr: 78, owner: 'someone else' })
-    // The app goes away (Centralu stops an idle one), and the watch ends with its owner's merge
-    await rt!.dispose()
-    rt = null
-    const dir = queueFile().replace(/[\\/]merge-queue\.json$/, '')
-    const r = await watch(['watch', '--data', dir, '--owner', 'tester', '--after', String(mine.data.seq)])
+    const { seq, dir } = await oneLeftInCi()
+    // A driver killed long ago left its record, and its pid is another process's now (this one's)
+    const old = new Date(Date.now() - 60 * 60_000).toISOString()
+    writeFileSync(join(dir, 'merge-queue.drive.json'), JSON.stringify({ pid: process.pid, since: old, at: old }))
+    const r = await watch(['watch', '--data', dir, '--owner', 'tester', '--after', String(seq)])
     expect(r.code).toBe(0)
     expect(r.out).toContain('Merge queue: merged #77')
     expect(r.out).toContain('Nothing left queued.')
     // No session runs a watch again and nothing opens the app: #78's CI passes, and it still lands
-    patchGh((s) => {
-      s.checks[SHA2] = green('2026-10-17T09:00:00Z')
-      s.runs[SHA2] = [ghRun('success', 1, SHA2)]
-    })
-    const end = Date.now() + 20_000 * SLOW
-    while (!writes().some((w) => w[0] === 'merge' && w[1] === '78')) {
-      if (Date.now() > end) throw new Error(`#78 was not merged with the watch gone: ${r.out}`)
-      await new Promise((res) => setTimeout(res, 100))
-    }
-    expect(r.out).toMatch(/^The queue goes on in the background \(pid \d+\) while pull requests in it wait or run CI\.$/m)
+    greenAt78()
+    await waitFor(merged78, `#78 merged with the watch gone (${r.out})`)
+    const pid = Number(/^The queue goes on in the background \(pid (\d+)\) while pull requests in it wait or run CI; kill \1 stops it\.$/m.exec(r.out)?.[1])
+    expect(pid).not.toBe(process.pid)
     // Nothing left to drive: it ends by itself and lets go of its lease and its file
     await drivesEnd()
     expect(queueOnDisk().items.find((i: any) => i.pr === 78).state).toBe('merged')
     expect(filesNamed(dir, 'merge-queue.lease.json')).toEqual([])
     expect(filesNamed(dir, 'merge-queue.drive.json')).toEqual([])
+    const log = readFileSync(join(dir, 'merge-queue.drive.log'), 'utf8')
+    expect(log).toMatch(new RegExp(`pid ${pid} started at \\d{4}-`))
+    expect(log).toMatch(new RegExp(`pid ${pid} ended at .*: nothing waits or runs CI`))
+  })
+
+  it('runs one background driver at a time, however many start at once (#1236)', async () => {
+    const { dir } = await oneLeftInCi()
+    const [a, b] = [command(['drive', '--data', dir]), command(['drive', '--data', dir])]
+    drives.push(a.child.pid!, b.child.pid!)
+    // One of them finds the other and ends at once; the other drives
+    const first = await Promise.race([a.done.then(() => a), b.done.then(() => b)])
+    expect((await first.done).code).toBe(0)
+    const other = first === a ? b : a
+    expect(readJsonIn(dir, 'merge-queue.drive.json')?.pid).toBe(other.child.pid)
+    expect(running(other.child.pid!)).toBe(true)
+    greenAt78()
+    await waitFor(merged78, '#78 merged by the driver left')
+    expect((await other.done).code).toBe(0)
+    expect(writes().filter((w) => w[0] === 'merge' && w[1] === '78')).toHaveLength(1)
+  })
+
+  it.skipIf(process.platform === 'win32')('hands off when stopped by SIGTERM or SIGHUP, a session ended or its terminal gone (#1236)', async () => {
+    const { seq, dir } = await oneLeftInCi()
+    for (const [sig, code] of [
+      ['SIGTERM', 143],
+      ['SIGHUP', 129],
+    ] as const) {
+      // The driver a watch before left ends on SIGTERM and lets go of the lease, for this one to take
+      for (const pid of drives.filter((p) => ours(p) && running(p))) process.kill(pid, 'SIGTERM')
+      await drivesEnd()
+      // #78's owner: one item left for it, so it waits
+      const w = command(['watch', '--data', dir, '--owner', 'someone else', '--after', String(seq)])
+      // Its handlers are on once it drives: the lease is its own
+      await waitFor(() => readJsonIn(dir, 'merge-queue.lease.json')?.holder === `watch:${w.child.pid}`, `${sig}: the watch driving`)
+      w.child.kill(sig)
+      const r = await w.done
+      expect(r.code, `${sig}: ${r.out} ${r.err}`).toBe(code)
+      expect(r.out).toMatch(/^The queue goes on in the background \(pid \d+\)/m)
+    }
+    greenAt78()
+    await waitFor(merged78, '#78 merged after the watches were stopped')
+    await drivesEnd()
+  })
+
+  it("starts a driver on the new code when this app's code changes under it, and the queue goes on (#1236)", async () => {
+    const { dir } = await oneLeftInCi()
+    // A copy of the app, so the change touches no file of this checkout (Centralu restarts an app whose folder changes)
+    const app = join(root, 'app-copy')
+    cpSync(join(REPO_ROOT, '.centralu/apps/project-board'), app, { recursive: true })
+    const first = command(['drive', '--data', dir], join(app, 'bin/merge-queue.mjs'))
+    drives.push(first.child.pid!)
+    await waitFor(() => readJsonIn(dir, 'merge-queue.drive.json')?.pid === first.child.pid, 'the first driver')
+    const later = new Date(Date.now() + 60_000)
+    utimesSync(join(app, 'queue.mjs'), later, later)
+    const ended = await first.done
+    expect(ended.code).toBe(0)
+    const next = Number(new RegExp(`pid ${first.child.pid} ended at .*: this app's code changed; pid (\\d+) goes on`).exec(ended.err)?.[1])
+    expect(next, ended.err).toBeGreaterThan(0)
+    drives.push(next)
+    await waitFor(() => readJsonIn(dir, 'merge-queue.drive.json')?.pid === next, 'the driver on the new code')
+    expect(readFileSync(join(dir, 'merge-queue.drive.log'), 'utf8')).toContain(`pid ${next} started at`)
+    greenAt78()
+    await waitFor(merged78, '#78 merged by the driver on the new code')
+    await drivesEnd()
   })
 
   it('exits 0 with the merge, and 6 when nothing happens before its deadline', async () => {
@@ -2446,5 +2590,6 @@ describe('the watch command: the queuing session hears about its items', { timeo
     // #78 is still in CI: the queue goes on without it
     expect(quiet.out).toContain('The queue goes on in the background')
     expect((await watch(['watch'])).code).toBe(2)
+    expect((await watch(['drive', '--data', dir, '--hours', 'Infinity'])).code).toBe(2)
   })
 })

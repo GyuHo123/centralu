@@ -14,7 +14,7 @@
 // Gentle on GitHub: one item per tick (a few seconds), each item again only after its own wait
 // (queue.mjs POLL_MS: 90 s while CI runs), the required checks read once per head, and a rate limit
 // or an outage pauses the whole queue with a growing wait.
-import { readFileSync, renameSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs'
+import { linkSync, readFileSync, renameSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { evaluateChecks, firstFailure, squashMessage, workflowCheckNames } from './ci.mjs'
 import { CI, config, QUEUE } from './config.mjs'
@@ -176,32 +176,83 @@ export function releaseLease(dir, holder) {
 
 // --- The background driver (#1236) -------------------------------------------------------------------
 // A watch command that ends while pull requests still wait or run CI leaves `merge-queue.mjs drive`
-// behind, detached, so the queue does not stop with it while the app is idle. One at a time.
+// behind, detached, so the queue does not stop with it while the app is idle. One at a time, through
+// `merge-queue.drive.json`: its pid, and `at`, renewed every pass. A pid alone is not enough: after a
+// SIGKILL or a power loss the number can belong to another process (or one of another user, which
+// `alive` counts as running), and every later hand-off would then trust it and start nothing.
 
 export const DRIVE_FILE = 'merge-queue.drive.json'
 
-/** The pid of the background driver while one runs, else null. */
-export function backgroundDriver(dir) {
+function readDrive(dir) {
   try {
-    const { pid } = JSON.parse(readFileSync(join(dir, DRIVE_FILE), 'utf8'))
-    return Number.isInteger(pid) && pid > 0 && alive(pid) ? pid : null
+    const v = JSON.parse(readFileSync(join(dir, DRIVE_FILE), 'utf8'))
+    return Number.isInteger(v?.pid) && v.pid > 0 ? v : null
   } catch {
     return null
   }
 }
 
-/** Makes this process the background driver; false when another one runs already. */
-export function claimBackground(dir) {
-  const cur = backgroundDriver(dir)
-  if (cur && cur !== process.pid) return false
+/** A record that still stands for a running driver: its process runs and it renewed `at` within LEASE_MS. */
+const standing = (v, now) => v !== null && Date.parse(v.at) > now - LEASE_MS && alive(v.pid)
+
+/** The pid of the background driver while one runs, else null. */
+export function backgroundDriver(dir, now = Date.now()) {
+  const v = readDrive(dir)
+  return standing(v, now) ? v.pid : null
+}
+
+/**
+ * Makes this process the background driver; false when another one runs already. The file is made
+ * whole and then linked into place, which fails when one exists, so two drivers starting at once
+ * cannot both make it. A record that no longer stands is taken over.
+ */
+export function claimBackground(dir, now = Date.now()) {
   mkdirSync(dir, { recursive: true })
-  writeAtomic(join(dir, DRIVE_FILE), { pid: process.pid, since: new Date().toISOString() })
-  // Two that started at once: the last write wins, and the other sees it here
-  return backgroundDriver(dir) === process.pid
+  const path = join(dir, DRIVE_FILE)
+  const tmp = `${path}.${process.pid}.tmp`
+  const at = new Date(now).toISOString()
+  writeFileSync(tmp, `${JSON.stringify({ pid: process.pid, since: at, at })}\n`)
+  try {
+    for (let i = 0; i < 2; i++) {
+      try {
+        linkSync(tmp, path)
+        return true
+      } catch (e) {
+        if (e.code !== 'EEXIST') throw e
+      }
+      const cur = readDrive(dir)
+      if (cur?.pid === process.pid) return true
+      if (standing(cur, now)) return false
+      // Stale: two that found it so at once may both remove and link; beat() tells the one that lost
+      try {
+        unlinkSync(path)
+      } catch {
+        // gone already
+      }
+    }
+    return false
+  } finally {
+    try {
+      unlinkSync(tmp)
+    } catch {
+      // gone already
+    }
+  }
+}
+
+/**
+ * Renews this driver's `at`. False when the file is another running driver's (two took over a stale
+ * one at once): this one then ends, and the queue keeps one.
+ */
+export function beat(dir, now = Date.now()) {
+  const cur = readDrive(dir)
+  if (cur && cur.pid !== process.pid && standing(cur, now)) return false
+  writeAtomic(join(dir, DRIVE_FILE), { pid: process.pid, since: cur?.pid === process.pid ? cur.since : new Date(now).toISOString(), at: new Date(now).toISOString() })
+  return true
 }
 
 export function releaseBackground(dir) {
-  if (backgroundDriver(dir) !== process.pid) return
+  if (readDrive(dir)?.pid !== process.pid) return
   try {
     unlinkSync(join(dir, DRIVE_FILE))
   } catch {

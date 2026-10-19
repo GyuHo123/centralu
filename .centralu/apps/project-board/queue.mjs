@@ -20,6 +20,11 @@ import { short } from './util.mjs'
 /** What an item can be in. The first three are active (the driver polls them); the last two are done. */
 export const STATES = ['waiting', 'ci', 'attention', 'merged', 'closed']
 export const ACTIVE = new Set(['waiting', 'ci', 'attention'])
+/**
+ * What an attention text promises once the session has acted (#1236): the queue moves only while it is
+ * driven, and no background driver stays for an item that needs attention.
+ */
+const DRIVEN = 'while the board app or a watch command drives it'
 /** The squash subject's limit, in characters (docs/commit-conventions.md). */
 export const SUBJECT_MAX = 72
 /** How long after a poll the item is read again, by what it is waiting on. */
@@ -201,12 +206,12 @@ export function decideBefore({ item, permissions, pr, defaultBranch, ref }) {
   // Landed only into the default branch: merged into a lower's branch, its lowers are not landed
   if (pr.state === 'MERGED') return { state: 'merged', landed: pr.baseRefName === defaultBranch }
   if (pr.state !== 'OPEN') return { state: 'closed' }
-  if (pr.isDraft) return attention('draft', `${n} is a draft, and the queue never merges a draft. Mark it ready for review; the queue carries on by itself.`)
+  if (pr.isDraft) return attention('draft', `${n} is a draft, and the queue never merges a draft. Mark it ready for review; the queue carries on ${DRIVEN}.`)
   // A conflict: the driver merges the default branch in itself, or hands it to the author (#1182)
   if (pr.mergeStateStatus === 'DIRTY' || pr.mergeable === 'CONFLICTING')
     return attention(
       'dirty',
-      `${n} conflicts with ${pr.baseRefName} (GitHub: DIRTY) at ${short(pr.headRefOid)}. Rebase it onto ${pr.baseRefName} and push (rebase_stack if the PR under it merged); the queue takes the new head by itself.`,
+      `${n} conflicts with ${pr.baseRefName} (GitHub: DIRTY) at ${short(pr.headRefOid)}. Rebase it onto ${pr.baseRefName} and push (rebase_stack if the PR under it merged); the queue takes the new head ${DRIVEN}.`,
     )
   return null
 }
@@ -245,7 +250,7 @@ export function handoffReason({ item, pr, files = [], why, ref, instruction = nu
     : `No author session is recorded for ${n} (queue_merge author). Start a session on its branch ${branch} with this instruction: "${text}"`
   return {
     state: 'attention',
-    reason: { kind: 'conflict', text: `${n} conflicts with ${pr.baseRefName} at ${short(pr.headRefOid)}${where}. ${why} ${to} The queue takes the new head by itself, at the front of the queue.`, files, relay: { to: author, branch, text } },
+    reason: { kind: 'conflict', text: `${n} conflicts with ${pr.baseRefName} at ${short(pr.headRefOid)}${where}. ${why} ${to} The queue takes the new head, at the front of the queue, ${DRIVEN}.`, files, relay: { to: author, branch, text } },
   }
 }
 
@@ -322,7 +327,7 @@ export function decideRun({ subject, head, checks, runs = [], failures = {}, now
     if (verdict === 'none' && !runs.length) {
       const since = subject.head === head && subject.noCiSince ? subject.noCiSince : at
       if (now - Date.parse(since) > NO_CI_MS)
-        return attention('no-ci', `${n}: no CI run has started on ${short(head)} in ${Math.round(NO_CI_MS / 60_000)} minutes. Push again, or start the build on GitHub; the queue carries on once checks report.`)
+        return attention('no-ci', `${n}: no CI run has started on ${short(head)} in ${Math.round(NO_CI_MS / 60_000)} minutes. Push again, or start the build on GitHub; the queue carries on once checks report, ${DRIVEN}.`)
       return { state: 'ci', patch: { noCiSince: since } }
     }
     // A required check not reported while nothing runs will not report by itself
@@ -396,7 +401,7 @@ export function decideCi({ item, pr, checks, runs = [], failures = {}, defaultBr
   }
   const subject = squashMessage({ number: pr.number, title: pr.title, description: pr.body }).subject
   if ([...subject].length > SUBJECT_MAX)
-    return attention('subject', `${n}: the squash subject "${subject}" is ${[...subject].length} characters, over ${SUBJECT_MAX}. Shorten the PR title; the queue carries on by itself.`)
+    return attention('subject', `${n}: the squash subject "${subject}" is ${[...subject].length} characters, over ${SUBJECT_MAX}. Shorten the PR title; the queue carries on ${DRIVEN}.`)
   if (pr.mergeStateStatus === 'BEHIND') return attention('behind', `${n} is behind ${defaultBranch}, and GitHub requires it up to date. Rebase it onto ${defaultBranch} and push.`)
   if (pr.mergeStateStatus === 'BLOCKED') return attention('blocked', `${n} is green, but GitHub blocks merging it (a required review or rule). Look at the PR on GitHub.`)
   // UNSTABLE only from a run a successful one made moot (a cancelled duplicate, #1015): as CLEAN
