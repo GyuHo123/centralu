@@ -232,7 +232,7 @@ What one call does (`SessionManager.askProject`, which runs `AskProjectFlow` in 
    `agentNoteFrame` is, #428), and appears in the target conversation with `from` identifying the asking session. An idle
    session resumes as needed, and once it is awake (a wake or a deferred restart takes seconds) the caller's trust and
    depth and the target project are read once more before the task is written (`deliver`'s `stillAllowed`): an `auto`
-   caller still goes through (#606). A session busy with a turn that is not the caller's (the person's,
+   caller's untrusted project still lets it through (#606); its depth and a removed project still refuse. A session busy with a turn that is not the caller's (the person's,
    another delegation, or requests queued ahead) returns the choices instead (§1.2.3, #677): the
    caller passes `ifBusy` `note` (an `auto` caller only, through the adapter's tracked mid-turn input
    path, #594, on a CLI that takes it, and never into another caller's delegation) or `queue`; no

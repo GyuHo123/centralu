@@ -751,13 +751,35 @@ describe('asking another project', () => {
       expect(await p).toMatchObject({ ok: false, error: expect.stringContaining("This session's project is not trusted") })
     })
 
-    it('is still delivered for an auto caller whose project loses trust while the asked session wakes (#606)', async () => {
+    /** How many times auto's open trust boundary was logged for an ask (`autoBoundaryOpen`) */
+    const boundaryLogs = (log: { mock: { calls: unknown[][] } }) =>
+      log.mock.calls.filter((c) => String(c[0]).includes('delegate from an untrusted project allowed')).length
+
+    it('is still delivered for an auto caller whose project loses trust while the asked session wakes, and says so once (#606)', async () => {
+      const log = vi.spyOn(console, 'error')
+      onTestFinished(() => log.mockRestore())
       const { p, wake, delivered } = await askIntoSleeper('auto')
       void w.mgr.setProjectTrusted(w.caller.id, false)
       wake()
       expect((await delivered())[0]).toContain('export the sprites')
+      // The boundary was first open at delivery, and that read logs it
+      expect(boundaryLogs(log)).toBe(1)
       handleOf(targetSession)!.answer('exported')
       expect(await p).toMatchObject({ ok: true, state: 'done', answer: 'exported' })
+    })
+
+    it("does not log an auto caller's open boundary again at delivery when the reads before it already did", async () => {
+      void w.mgr.setProjectTrusted(w.caller.id, false)
+      const log = vi.spyOn(console, 'error')
+      onTestFinished(() => log.mockRestore())
+      const { p, wake, delivered } = await askIntoSleeper('auto')
+      const before = boundaryLogs(log)
+      expect(before).toBeGreaterThan(0)
+      wake()
+      expect((await delivered())[0]).toContain('export the sprites')
+      expect(boundaryLogs(log)).toBe(before)
+      handleOf(targetSession)!.answer('exported')
+      expect(await p).toMatchObject({ ok: true, state: 'done' })
     })
   })
 })
