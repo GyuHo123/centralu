@@ -225,6 +225,17 @@ file and polls; `queue-tools.mjs` has the tools; `bin/merge-queue.mjs` is the wa
   session runs in the background. One drives at a time through `merge-queue.lease.json` (renewed
   every tick and before every write, free after 3 minutes of silence or as soon as its process is gone,
   let go on exit).
+- **The background driver** (#1236): the watch command exits with its session's news, and the queue
+  then stood still: the app went idle, the session that heard about a merge started no new watch, and
+  three pull requests waited 6.5 hours. So a watch that ends (any exit but 2, a signal included) while
+  a pull request in the queue, anyone's, waits or runs CI, or a batch runs (`unattended`), leaves
+  `merge-queue.mjs drive --data <folder>` behind, detached, and says so with its pid. It drives under
+  the same lease and ends once nothing waits or runs CI (an item that needs attention waits for a
+  session, which runs a watch again), or after `--hours` (default 24). One runs at a time
+  (`merge-queue.drive.json`, its pid); its errors go to `merge-queue.drive.log`, both in the data
+  folder. `merge_queue` names it when it holds the lease. This is not the app kept alive: the app's
+  server still stops on the idle rule (docs/apps.md §4); keeping an app's process alive while it has
+  work is the issue's open proposal for the host.
 - **Telling the session**: every change worth a message is an event with a sequence number and the
   item's owner. Attention is one event per change (`noticeKey`: the reason, the head and the job), not
   one per poll; a merge or a close is one too. `node .centralu/apps/project-board/bin/merge-queue.mjs
@@ -238,7 +249,8 @@ file and polls; `queue-tools.mjs` has the tools; `bin/merge-queue.mjs` is the wa
   screen when the driver moves an item, so it reads `merge_queue` again every 15 s while one is active.
 - `PROJECT_BOARD_QUEUE_TICK_MS` and `PROJECT_BOARD_QUEUE_POLL_MS` shorten the waits only for tests.
   Tests: `tooling/project-board-queue.test.ts` (the decisions, the app against a fake `gh` that
-  records every write, a restart, the watch command), and the screen in `e2e/fixtures/board-reader.ts`.
+  records every write, a restart, the watch command and the driver it leaves), and the screen in
+  `e2e/fixtures/board-reader.ts`.
 
 ### Reruns (2026-10-19)
 
@@ -675,9 +687,10 @@ step shows on the screen.
 - `github.mjs` — every call to GitHub, through `gh`. `project.json` — which project, and the CI settings.
 - `ci.mjs` — the CI and merge decisions as pure functions (no gh, no IO).
 - `queue.mjs`, `queue-driver.mjs`, `bin/merge-queue.mjs` — the merge queue's decisions (pure), its file,
-  lease and polls, and the watch command. `batch.mjs`, `queue-batch.mjs` — its batches: the rules
-  (pure) and their steps on GitHub. `run-failure.mjs` — why a CI run failed, real or infrastructure
-  (pure: the rerun policy). `queue-conflict.mjs` — the git work of a conflict.
+  lease and polls, and the watch command (and the background driver it leaves). `batch.mjs`,
+  `queue-batch.mjs` — its batches: the rules (pure) and their steps on GitHub. `run-failure.mjs` —
+  why a CI run failed, real or infrastructure (pure: the rerun policy). `queue-conflict.mjs` — the
+  git work of a conflict.
 - `markdown.mjs` — GitHub Markdown to safe HTML for the reader, and the decision summary parser (pure).
 - `rules.mjs` — the rules for public text, commit messages and the pull request template (pure).
 - `answers.mjs` — the owner's saved answers: save, delete, mark recorded (pure; decision-tools.mjs keeps them in the data folder).

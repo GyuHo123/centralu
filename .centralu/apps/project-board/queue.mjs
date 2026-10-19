@@ -509,6 +509,15 @@ export function watchState(q, { owner = null, after }) {
   return { news, left, batchPending, done }
 }
 
+/**
+ * Whether the queue has work that moves without a session (#1236): an item waiting or in CI, or a batch
+ * still running. An item that needs attention waits for a session (a push, queue_merge again, unqueue),
+ * and that session runs a watch command again, which drives.
+ */
+export function unattended(q) {
+  return q.items.some((i) => i.state === 'waiting' || i.state === 'ci') || (q.batches ?? []).some((b) => BATCH_ACTIVE.has(b.state))
+}
+
 /** The text the queuing session gets for an item that needs it. */
 export function attentionText(item, reason, ref = refIn(item.repo)) {
   const title = item.title ? ` (${item.title})` : ''

@@ -34,14 +34,16 @@ export function startQueue() {
   return driver
 }
 
-/** Who drives the queue now, in words: this server, a watch command, or nobody. */
+/** Who drives the queue now, in words: this server, a watch command, the background driver one left, or nobody. */
 function driverLine(q, now = Date.now()) {
   const lease = readLease(dataDir())
   const active = q.items.some((i) => ACTIVE.has(i.state))
   const pause = q.pause && Date.parse(q.pause.until) > now ? ` Paused until ${q.pause.until.slice(11, 19)} UTC: ${q.pause.reason}` : ''
   if (!active) return `Nothing queued.${pause}`
-  if (lease && Date.parse(lease.until) > now) return `Driven by ${String(lease.holder).startsWith('server:') ? 'the board app' : 'a watch command'}.${pause}`
-  return `Driven by the board app while it runs, and by a watch command while one runs.${pause}`
+  const holder = String(lease?.holder ?? '')
+  const who = holder.startsWith('server:') ? 'the board app' : holder.startsWith('drive:') ? `the background driver a watch command left (pid ${holder.slice(6)})` : 'a watch command'
+  if (lease && Date.parse(lease.until) > now) return `Driven by ${who}.${pause}`
+  return `Driven by the board app while it runs, and by a watch command or the background driver it leaves while one runs.${pause}`
 }
 
 const COUNTS = [

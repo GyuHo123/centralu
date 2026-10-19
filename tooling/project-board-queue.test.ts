@@ -872,9 +872,32 @@ beforeEach(() => {
   fake = fakeGh(root, FAKE_GH)
 })
 
+/** The background drivers watch commands said they left (#1236): each test ends with them ended. */
+let drives: number[] = []
+const running = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+/** Waits for every background driver left so far to end, for at most `ms` (20 s). */
+async function drivesEnd(ms = 20_000) {
+  const end = Date.now() + ms * SLOW
+  while (drives.some(running)) {
+    if (Date.now() > end) throw new Error(`a background driver did not end: ${drives.filter(running).join(', ')}`)
+    await new Promise((r) => setTimeout(r, 50))
+  }
+}
+
 afterEach(async () => {
   await rt?.dispose()
   rt = null
+  // Only the ones these tests' watch commands started; they let their lease go on SIGTERM
+  for (const pid of drives.filter(running)) process.kill(pid, 'SIGTERM')
+  await drivesEnd()
+  drives = []
   rmFakeDir(root)
 })
 
@@ -2328,7 +2351,11 @@ function watch(args: string[]): Promise<{ code: number | null; out: string; err:
     child.stdout.on('data', (d) => (out += d))
     child.stderr.on('data', (d) => (err += d))
     const t = setTimeout(() => (child.kill(), reject(new Error(`watch did not end: ${out} ${err}`))), 30_000 * SLOW)
-    child.on('close', (code) => (clearTimeout(t), resolve({ code, out, err })))
+    child.on('close', (code) => {
+      clearTimeout(t)
+      for (const m of out.matchAll(/in the background \(pid (\d+)\)/g)) drives.push(Number(m[1]))
+      resolve({ code, out, err })
+    })
   })
 }
 
@@ -2351,8 +2378,47 @@ describe('the watch command: the queuing session hears about its items', { timeo
     expect(lines[1]).toBe('1 still queued for tester. To hear about them, run again in the background:')
     // Quoted only where the shell needs it, as queue_merge's own command is
     expect(lines[2]).toMatch(/merge-queue\.mjs"? watch --data "?.+"? --owner tester --after \d+$/)
-    // Its lease is let go: the next driver need not wait for it
+    // Its lease is let go: the next driver need not wait for it (nor the background one, had #78 not
+    // been read yet when it ended: that one ends once #78 needs attention too)
+    await drivesEnd()
     expect(filesNamed(dir, 'merge-queue.lease.json')).toEqual([])
+  })
+
+  it('leaves a driver behind when it ends with pull requests still in CI, which lands them with the app and the watch gone (#1236)', async () => {
+    runtime(
+      ghState({
+        prs: { '77': ghPr(77), '78': ghPr(78, { headRefOid: SHA2 }) },
+        checks: { [SHA]: green(), [SHA2]: [ghCheck('verify', null, 11)] },
+        runs: { [SHA]: [ghRun('success')], [SHA2]: [ghRun(null, 1, SHA2)] },
+      }),
+      IDLE_SERVER,
+    )
+    const mine = await call('queue_merge', { pr: 77, owner: 'tester' })
+    await call('queue_merge', { pr: 78, owner: 'someone else' })
+    // The app goes away (Centralu stops an idle one), and the watch ends with its owner's merge
+    await rt!.dispose()
+    rt = null
+    const dir = queueFile().replace(/[\\/]merge-queue\.json$/, '')
+    const r = await watch(['watch', '--data', dir, '--owner', 'tester', '--after', String(mine.data.seq)])
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('Merge queue: merged #77')
+    expect(r.out).toContain('Nothing left queued.')
+    // No session runs a watch again and nothing opens the app: #78's CI passes, and it still lands
+    patchGh((s) => {
+      s.checks[SHA2] = green('2026-10-17T09:00:00Z')
+      s.runs[SHA2] = [ghRun('success', 1, SHA2)]
+    })
+    const end = Date.now() + 20_000 * SLOW
+    while (!writes().some((w) => w[0] === 'merge' && w[1] === '78')) {
+      if (Date.now() > end) throw new Error(`#78 was not merged with the watch gone: ${r.out}`)
+      await new Promise((res) => setTimeout(res, 100))
+    }
+    expect(r.out).toMatch(/^The queue goes on in the background \(pid \d+\) while pull requests in it wait or run CI\.$/m)
+    // Nothing left to drive: it ends by itself and lets go of its lease and its file
+    await drivesEnd()
+    expect(queueOnDisk().items.find((i: any) => i.pr === 78).state).toBe('merged')
+    expect(filesNamed(dir, 'merge-queue.lease.json')).toEqual([])
+    expect(filesNamed(dir, 'merge-queue.drive.json')).toEqual([])
   })
 
   it('exits 0 with the merge, and 6 when nothing happens before its deadline', async () => {
@@ -2377,6 +2443,8 @@ describe('the watch command: the queuing session hears about its items', { timeo
     const quiet = await watch(['watch', '--data', dir, '--owner', 'tester', '--after', String(p.data.seq), '--minutes', '0.01'])
     expect(quiet.code).toBe(6)
     expect(quiet.out).toContain('No news in 0.01 minutes.')
+    // #78 is still in CI: the queue goes on without it
+    expect(quiet.out).toContain('The queue goes on in the background')
     expect((await watch(['watch'])).code).toBe(2)
   })
 })

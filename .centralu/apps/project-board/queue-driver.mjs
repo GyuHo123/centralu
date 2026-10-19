@@ -6,7 +6,10 @@
 // call for 5 minutes, docs/apps.md §4), and the watch command (bin/merge-queue.mjs) a session runs in
 // the background. Both take the same lease (`merge-queue.lease.json`), so one of them polls at a
 // time, and both read and write the same file, so the queue carries on in whichever is alive, and
-// after either restarts.
+// after either restarts. A watch command exits with its session's news, so when it ends with pull
+// requests still waiting or in CI it leaves a background driver (`merge-queue.mjs drive`) under the
+// same lease, which ends once none is (#1236: with the app idle and no watch, the queue stood still
+// for 6.5 hours).
 //
 // Gentle on GitHub: one item per tick (a few seconds), each item again only after its own wait
 // (queue.mjs POLL_MS: 90 s while CI runs), the required checks read once per head, and a rate limit
@@ -166,6 +169,41 @@ export function releaseLease(dir, holder) {
   if (readLease(dir)?.holder !== holder) return
   try {
     unlinkSync(join(dir, LEASE_FILE))
+  } catch {
+    // gone already
+  }
+}
+
+// --- The background driver (#1236) -------------------------------------------------------------------
+// A watch command that ends while pull requests still wait or run CI leaves `merge-queue.mjs drive`
+// behind, detached, so the queue does not stop with it while the app is idle. One at a time.
+
+export const DRIVE_FILE = 'merge-queue.drive.json'
+
+/** The pid of the background driver while one runs, else null. */
+export function backgroundDriver(dir) {
+  try {
+    const { pid } = JSON.parse(readFileSync(join(dir, DRIVE_FILE), 'utf8'))
+    return Number.isInteger(pid) && pid > 0 && alive(pid) ? pid : null
+  } catch {
+    return null
+  }
+}
+
+/** Makes this process the background driver; false when another one runs already. */
+export function claimBackground(dir) {
+  const cur = backgroundDriver(dir)
+  if (cur && cur !== process.pid) return false
+  mkdirSync(dir, { recursive: true })
+  writeAtomic(join(dir, DRIVE_FILE), { pid: process.pid, since: new Date().toISOString() })
+  // Two that started at once: the last write wins, and the other sees it here
+  return backgroundDriver(dir) === process.pid
+}
+
+export function releaseBackground(dir) {
+  if (backgroundDriver(dir) !== process.pid) return
+  try {
+    unlinkSync(join(dir, DRIVE_FILE))
   } catch {
     // gone already
   }
