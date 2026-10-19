@@ -58,7 +58,7 @@ export type AppSessionsHost = {
   createSession: (params: Omit<CreateSessionParams, "projectId" | "tool"> & { projectId: string | null; tool: ToolName | null; kind?: Exclude<SessionInfo["kind"], "coordinator">; roleAppend?: string; appId?: string | null; builderOf?: AppRef; appAgent?: { outputSchema?: Record<string, unknown>; }; askedBy?: string; forkedFrom?: string; lsp?: boolean; }) => Promise<SessionInfo>
   defaultToolFor: (projectId: string | null) => ToolName | null
   readonly delegationFlow: DelegationFlow
-  deliver: (sessionId: string, text: string, attachments: Attachment[] | undefined, from: { sessionId: string; name: string; } | undefined, relayed: boolean, fromApp?: AppMessageSource, fromAppVia?: AppMessageVia, sendInput?: (handle: SessionHandle, text: string) => void) => Promise<void>
+  deliver: (sessionId: string, text: string, attachments: Attachment[] | undefined, from: { sessionId: string; name: string; } | undefined, relayed: boolean, fromApp?: AppMessageSource, fromAppVia?: AppMessageVia, sendInput?: (handle: SessionHandle, text: string) => void, stillAllowed?: () => string | null) => Promise<void>
   readonly handles: Map<string, SessionHandle>
   listSessions: () => SessionInfo[]
   readonly memoryGate: MemoryGate | null

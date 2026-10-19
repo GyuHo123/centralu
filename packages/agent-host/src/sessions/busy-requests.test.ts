@@ -229,6 +229,32 @@ describe('requests to a busy session (#677)', () => {
       expect(handleOf(target).sent[1]).toContain('export it')
     })
 
+    it("is not delivered when the caller's project loses trust while the asked session restarts for it", async () => {
+      const { target, asker } = await queuedAsk()
+      // A conversation the restart resumes
+      handleOf(target).externalId = 'ext-target'
+      // A setting changed during the person's turn restarts the asked session's process when that turn ends
+      expect(await w.mgr.updateSettings(target, { effort: 'high' })).toMatchObject({ applied: 'after_turn' })
+      const create = claude().createSession.bind(claude())
+      let release!: () => void
+      const held = new Promise<void>((r) => (release = r))
+      let restarting = false
+      vi.spyOn(claude(), 'createSession').mockImplementation(async (opts, emit) => {
+        restarting = true
+        await held
+        return create(opts, emit)
+      })
+      handleOf(target).answer("the person's answer")
+      // The queued ask is being delivered now, waiting on the restart, so withdrawing the queue leaves it to delivery
+      await w.until(() => restarting && w.store.children.listQueuedRequests().length === 1)
+      void w.mgr.setProjectTrusted(w.caller.id, false)
+      release()
+      await w.until(() => w.store.children.listQueuedRequests().length === 0)
+      // The process the restart brought up was given nothing
+      expect(handleOf(target).sent).toEqual([])
+      await w.until(() => toldNotDelivered(asker))
+    })
+
     it('is not delivered when the trust is gone by the time the turn ends', async () => {
       const { target, asker } = await queuedAsk()
       // Taken away at the store (as another host would), so only the read at delivery can see it

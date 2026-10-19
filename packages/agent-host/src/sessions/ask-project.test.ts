@@ -708,4 +708,56 @@ describe('asking another project', () => {
       expect(w.store.permissions.listProjectConsents()).toEqual([])
     })
   })
+
+  describe('what an ask rests on, read again once the asked session is awake', () => {
+    /**
+     * The asked session asleep, so the delivery waits for it to wake: its tool's start is held until `wake()` is called.
+     * A remembered consent for the pair, so no card stands in between and the gates were read just before the wait.
+     */
+    const askIntoSleeper = async (preset: 'normal' | 'auto') => {
+      const codex = w.adapters.get('codex')!
+      // A tool that reports its background work can be put to sleep (#568)
+      Object.assign(codex.capabilities, { backgroundTasks: true })
+      expect(await w.mgr.sleepSession(targetSession)).toBe(true)
+      const s = await w.callerSession()
+      if (preset === 'auto') await w.mgr.updateSettings(s, { permissionPreset: 'auto' })
+      w.store.permissions.setProjectConsent(w.caller.id, w.target.id, 'delegate')
+      const create = codex.createSession.bind(codex)
+      let wake!: () => void
+      const held = new Promise<void>((r) => (wake = r))
+      let waking = false
+      vi.spyOn(codex, 'createSession').mockImplementation(async (opts, emit) => {
+        waking = true
+        await held
+        return create(opts, emit)
+      })
+      const p = w.mgr.askProject(s, { project: w.target.name, task: 'export the sprites' })
+      await w.until(() => waking)
+      // Either the call settles or the task reaches the woken session, whichever comes first
+      let settled = false
+      void p.then(() => (settled = true))
+      const delivered = async () => {
+        await w.until(() => settled || (handleOf(targetSession)?.sent.length ?? 0) > 0)
+        return handleOf(targetSession)?.sent ?? []
+      }
+      return { p, wake, delivered }
+    }
+
+    it("is not delivered when the caller's project loses trust while the asked session wakes", async () => {
+      const { p, wake, delivered } = await askIntoSleeper('normal')
+      void w.mgr.setProjectTrusted(w.caller.id, false)
+      wake()
+      expect(await delivered()).toEqual([])
+      expect(await p).toMatchObject({ ok: false, error: expect.stringContaining("This session's project is not trusted") })
+    })
+
+    it('is still delivered for an auto caller whose project loses trust while the asked session wakes (#606)', async () => {
+      const { p, wake, delivered } = await askIntoSleeper('auto')
+      void w.mgr.setProjectTrusted(w.caller.id, false)
+      wake()
+      expect((await delivered())[0]).toContain('export the sprites')
+      handleOf(targetSession)!.answer('exported')
+      expect(await p).toMatchObject({ ok: true, state: 'done', answer: 'exported' })
+    })
+  })
 })

@@ -168,7 +168,16 @@ export class QueuedRequests {
       } else {
         d = this.host.delegationFlow.startDelegation(`${caller.id}>${target.id}>${sessionId}`, caller.id, sessionId, target, false)
         const callerProject = this.host.projectRow(caller.projectId)?.name ?? 'another project'
-        await this.host.deliver(sessionId, askFrame(callerProject, r.text), undefined, from, false, undefined, 'inline', handIn)
+        /*
+         * And once more when the session is awake: a row being delivered is left out of `withdrawReaches`, so trust
+         * taken away while a restart or a wake is waited out is only seen here
+         */
+        const stillAllowed = () => {
+          const callerNow = this.host.meta.get(caller.id)
+          const targetNow = this.host.meta.get(sessionId)
+          return callerNow && targetNow ? this.queuedGateError(r, callerNow, targetNow) : 'The session that asked, or the one asked, is gone.'
+        }
+        await this.host.deliver(sessionId, askFrame(callerProject, r.text), undefined, from, false, undefined, 'inline', handIn, stillAllowed)
       }
       // Its turn may have started without this host seeing the step into it
       if (inTurn(this.host.meta.get(sessionId)?.state ?? 'idle')) this.host.children.queuedTurnStarted(sessionId)

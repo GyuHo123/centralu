@@ -316,6 +316,8 @@ export class AskProjectFlow {
     const callerProject = projects.find((p) => p.id === caller.projectId)?.name ?? 'another project'
     try {
       const from = { sessionId: callerId, name: labelOf(this.host.store.messages, caller) }
+      // Read again once the session is awake: waking or restarting it takes seconds, and the gates can close meanwhile
+      const stillAllowed = () => this.askGateError(callerId) ?? this.projectGoneError(target)
       if (midTurn) {
         const releaseHold = d.wait.holdInput()
         const release = () => { releaseHold(); this.host.applyDeferredRestart(delegatedId) }
@@ -323,9 +325,9 @@ export class AskProjectFlow {
         await this.host.deliver(delegatedId, askFrame(callerProject, opts.task), undefined, from, false, undefined, 'inline', (h, input) => {
           const fail = (e: Error) => { d.wait.fail(e); release() }
           void h.sendTracked!(input, { complete: release, fail }).then(release, fail)
-        })
+        }, stillAllowed)
       } else {
-        await this.host.deliver(delegatedId, askFrame(callerProject, opts.task), undefined, from, false)
+        await this.host.deliver(delegatedId, askFrame(callerProject, opts.task), undefined, from, false, undefined, 'inline', undefined, stillAllowed)
       }
     } catch (e) {
       d.wait.fail(e as Error)
