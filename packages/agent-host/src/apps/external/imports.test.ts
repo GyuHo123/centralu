@@ -16,6 +16,8 @@ import { removeTree, tempRoot } from '../../temp-dir.test-helpers.js'
 const fileIds = vi.hoisted(() => new Map<string, bigint>())
 /** Folders whose listing fails (EMFILE), and how often each was listed */
 const listing = vi.hoisted(() => ({ fails: new Set<string>(), calls: new Map<string, number>() }))
+/** Runs once, just before the next temp file of a marks file is written: what lands in the window before it is put in place */
+const beforeMarksTemp = vi.hoisted(() => ({ run: null as null | (() => void) }))
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
@@ -27,6 +29,14 @@ vi.mock('node:fs', async (importOriginal) => {
       // Simulate Node's rounded Number and exact bigint views of a Windows file id.
       if (id !== undefined) (st as { ino: number | bigint }).ino = options?.bigint ? id : Number(id)
       return st
+    },
+    writeFileSync: (path: string, ...rest: unknown[]) => {
+      const run = beforeMarksTemp.run
+      if (run && /app-imports\.json\.\d+-[0-9a-f]+\.tmp$/.test(String(path))) {
+        beforeMarksTemp.run = null
+        run()
+      }
+      return (actual.writeFileSync as (...a: unknown[]) => void)(path, ...rest)
     },
     readdirSync: (path: string, options?: unknown) => {
       listing.calls.set(String(path), (listing.calls.get(String(path)) ?? 0) + 1)
@@ -116,6 +126,7 @@ afterEach(async () => {
   fileIds.clear()
   listing.fails.clear()
   listing.calls.clear()
+  beforeMarksTemp.run = null
   await rt?.dispose()
   await removeTree(root)
 })
@@ -560,9 +571,31 @@ describe('a marks file that cannot be read holds the apps instead of running the
     await expect(importApp(plantSource('gift-src', 'gift'))).rejects.toThrow('could not be listed')
     expect(existsSync(marksPath())).toBe(false)
     expect(userApps()).toEqual(['mine'])
-    // Listed again at the next lookup: a passing EMFILE does not hold the apps for good
+    // Not tried again at every lookup (a list asks once per app), but a second later: a passing EMFILE does not hold for good
+    const tries = listing.calls.get(dataRoot) ?? 0
+    for (let i = 0; i < 5; i++) rt.list()
+    expect(listing.calls.get(dataRoot) ?? 0).toBe(tries)
     listing.fails.delete(dataRoot)
+    const later = Date.now() + 1_500
+    vi.spyOn(Date, 'now').mockReturnValue(later)
     expect(info('mine')?.status).toBe('stopped')
+  })
+
+  it('a marks file put back while the loss is being recorded is the record: the apps held are not written over it', async () => {
+    make()
+    await importApp(plantSource('tool-src', 'tool'), true)
+    plantOwn('mine')
+    const good = readFileSync(marksPath(), 'utf8')
+    await rt.dispose()
+    writeFileSync(marksPath(), '{"tool": ')
+    // After the host found no file and before its new one is in place, the person (or the other host) puts one there
+    beforeMarksTemp.run = () => writeFileSync(marksPath(), good)
+    make()
+    expect(beforeMarksTemp.run).toBeNull()
+    expect(readFileSync(marksPath(), 'utf8')).toBe(good)
+    expect(info('tool')).toMatchObject({ status: 'stopped', imported: { confirmedAt: expect.any(Number) } })
+    expect(info('mine')?.status).toBe('stopped')
+    expect(readdirSync(dataRoot).filter((n) => n.endsWith('.tmp'))).toEqual([])
   })
 })
 

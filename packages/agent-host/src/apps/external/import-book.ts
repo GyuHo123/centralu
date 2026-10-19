@@ -47,6 +47,9 @@ export type ImportMark = {
 
 type Doc = Record<string, ImportMark>
 
+/** How long a failed attempt to record a loss waits before trying again with nothing changed */
+const RETRY_MS = 1_000
+
 /**
  * The key for what a person has seen — the manifest's `server` (command and args) and `uses`. A
  * hash of the JSON with key order fixed: if the same declaration read as "changed" just because its
@@ -80,6 +83,11 @@ export class ImportBook {
    * what counts, and a write never puts the marks read before over it. A stat per lookup, no read or listing.
    */
   private seen = ''
+  /**
+   * When recording a loss failed (`afterLoss`), the time to try again even if nothing changed: an EMFILE passes. Not at
+   * every lookup: a list asks once per app, and each try lists two folders and stats every app
+   */
+  private retryAt: number | null = null
 
   constructor(private readonly dataRoot: string) {
     this.file = new PrivateJsonFile(join(dataRoot, IMPORTS_FILE), {
@@ -179,7 +187,7 @@ export class ImportBook {
    * puts a document built from the empty stand-in, or from an older read, over them.
    */
   private current(): Doc {
-    if (this.file.unreadable || this.stamp() !== this.seen) this.load()
+    if (this.file.unreadable || this.stamp() !== this.seen || (this.retryAt !== null && Date.now() >= this.retryAt)) this.load()
     return this.doc
   }
 
@@ -189,6 +197,7 @@ export class ImportBook {
     this.doc = this.file.read()
     this.doubtReason = null
     this.seen = before
+    this.retryAt = null
     if (this.file.unreadable) {
       this.doubtReason = `${this.file.path} could not be read, so whether this app was imported is not known. It stays off until that file can be read again`
     } else if (stat(this.file.path) === null) {
@@ -207,23 +216,31 @@ export class ImportBook {
       copy = newestCopy(this.dataRoot)
     } catch (e) {
       this.doubtReason = `The data folder ${this.dataRoot} could not be listed (${errorCode(e)}), so whether this app was imported is not known. It stays off until that folder can be listed`
-      this.seen = '' // tried again at the next lookup: EMFILE passes
+      this.retryLater()
       return
     }
     if (copy === null) return
     try {
       const held = heldMarks(join(this.dataRoot, ...USER_APPS_PARTS), copy)
-      // Written by someone else since the read: that file is the record, and the next lookup reads it (`seen` differs)
-      if (stat(this.file.path) !== null) return
-      this.file.write(held)
+      /*
+       * Only if there is still no file, decided by the link that puts it in place (`create`): a file the other host of a
+       * swap wrote, or the person put back, since the read is the record, and the next lookup reads it (`seen` differs)
+       */
+      if (!this.file.create(held)) return
       this.doc = held
       this.seen = this.stamp()
       const ids = Object.keys(held)
       console.error(`[apps] ${IMPORTS_FILE} was moved to ${copy}; ${ids.length} user-folder app(s) are held until each is reviewed and enabled${ids.length ? `: ${ids.join(', ')}` : ''}`)
     } catch (e) {
       this.doubtReason = `${this.file.path} was moved to ${join(this.dataRoot, copy)}, and the apps it may have held could not be recorded (${errorCode(e)}), so whether this app was imported is not known. Review what it runs, then enable it`
-      this.seen = ''
+      this.retryLater()
     }
+  }
+
+  /** Tried again when the file or the data folder changes, or a second from now, whichever is first */
+  private retryLater(): void {
+    this.seen = this.stamp()
+    this.retryAt = Date.now() + RETRY_MS
   }
 
   private stamp(): string {
