@@ -1443,9 +1443,16 @@ Limits:
 - Hardlinks in a source folder are copied as the files they are; pathname checks cannot tell where
   an inode came from (the same limit as "Project files and native handoff"). Same-user races
   between checking a file and opening it remain.
-- If `app-imports.json` cannot be read, it is moved aside and the marks are lost: imported apps
-  are then treated as the user's own until they are imported again. The host logs this. The same
-  holds for `app-secrets.json`, whose values then stay in the moved-aside copy. Only a file that
+- If `app-imports.json` cannot be read, the marks cannot be used, and the file is also the only
+  record of which apps were imported. So while it cannot be read, or a moved-aside copy
+  (`app-imports.json.unreadable-<ms>`) is in the data folder, every user-folder app without a mark is
+  `unconfirmed`, the person's own apps too, with a reason naming the file (`ImportBook.doubt`,
+  #1172): an app asks once more rather than running unasked. Enabling one gives it a mark of its own;
+  restoring or removing the copy ends the asking for the rest. The host logs the file once
+  (`imports.test.ts` "a marks file that cannot be read holds every unmarked app instead of running
+  it").
+- An unreadable `app-secrets.json` is moved aside the same way, and its values stay in the
+  moved-aside copy. For both files, only a file that
   does not parse, or parses to the wrong shape, is moved aside; one that cannot be read at all (no
   permission, too many open files, held by a scan on Windows) is left in place, reads as empty, and
   writes to it are refused until a read succeeds, as they are while a damaged file cannot be moved.

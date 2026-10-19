@@ -1026,6 +1026,14 @@ review"), and the review shows what it ran and asked for when it was enabled. Ot
 code itself, do not ask again: the confirmation is about what runs and what it may ask for, not a
 review of every edit.
 
+The file is also the only record of which apps were imported, so a broken one must not make an
+import read as the person's own (#1172). While `app-imports.json` cannot be read, or a copy moved
+aside from it (`app-imports.json.unreadable-<ms>`) is in the data folder, every user-folder app
+without a mark is `unconfirmed`, the person's own apps too, and its reason names the file. Enabling
+one gives it a mark of its own; restoring or removing the copy ends the asking for the rest. A file
+that cannot be read at all stays in place and refuses writes, so nothing can be enabled until it
+reads again, and then its marks count as before.
+
 What is refused before anything lands (`imports.test.ts`):
 
 | Refused | Why |

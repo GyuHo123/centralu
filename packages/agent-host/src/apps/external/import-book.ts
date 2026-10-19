@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { statSync } from 'node:fs'
+import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AppManifest } from './manifest.js'
 import { isObj } from '../../json-value.js'
@@ -52,24 +52,43 @@ export function reviewKey(m: Pick<AppManifest, 'server' | 'uses'>): string {
 
 export class ImportBook {
   /*
-   * A corrupt file: losing the marks tips things toward an imported app running without
-   * confirmation. So an unreadable file is moved aside instead, and reported. A person can
-   * recover it from the moved-aside original. (There is no way to forcibly withdraw every
-   * confirmation: which apps were imported at all lives in that same file.) The file is 0600
-   * because a source address might be a link containing a token.
+   * A corrupt file is moved aside, not overwritten, and reported: a person can recover it from the
+   * moved-aside original. But this file is also the only record of which apps were imported at all,
+   * so without it an imported app reads as the person's own and runs unasked (#1172). While the file
+   * cannot be read, or a moved-aside copy is in the data folder, an app with no mark is therefore held
+   * as unconfirmed (`doubt`): it asks once more rather than running unasked. The file is 0600 because
+   * a source address might be a link containing a token.
    */
   private file: PrivateJsonFile<Doc>
   private doc: Doc
 
-  constructor(dataRoot: string) {
+  constructor(private readonly dataRoot: string) {
     this.file = new PrivateJsonFile(join(dataRoot, IMPORTS_FILE), {
       label: IMPORTS_FILE,
       empty: () => ({}),
       valid: (doc): doc is Doc => isObj(doc),
-      lost: 'Imported apps lost their marks',
+      lost: 'Which apps were imported is not known, so every app without a mark stays off until it is reviewed and enabled',
       indent: 2,
     })
     this.doc = this.file.read()
+  }
+
+  /**
+   * Why an app with no mark cannot be taken for the person's own right now, or null (#1172): the file is still in place
+   * and cannot be read (its marks come back once it reads), or it was unreadable and a copy moved aside is in the data
+   * folder. Read from the folder, not kept, so a restart finds it, as `SecretStore.trouble` does. It ends for one app
+   * when that app has a mark again (`confirm`), and for all of them when the copy is restored or removed.
+   */
+  doubt(): string | null {
+    this.current()
+    if (this.file.unreadable) {
+      return `${IMPORTS_FILE} could not be read, so whether this app was imported is not known. It stays off until that file can be read again`
+    }
+    const copy = newestCopy(this.dataRoot)
+    if (copy) {
+      return `${IMPORTS_FILE} was unreadable and was moved to ${copy}, so whether this app was imported is not known. Review what it runs, then enable it`
+    }
+    return null
   }
 
   /**
@@ -98,11 +117,14 @@ export class ImportBook {
     this.write()
   }
 
-  /** Records that the person enabled it — the declaration seen at that time, together with its key */
+  /**
+   * Records that the person enabled it — the declaration seen at that time, together with its key. An app with no mark
+   * is enabled only while the marks are in doubt (`doubt`), and gets one here, so it stays enabled across restarts
+   */
   confirm(appId: string, dir: string, manifest: Pick<AppManifest, 'server' | 'uses'>, at = Date.now()): void {
-    const m = this.current()[appId]
-    if (!m) return
     const ino = statSync(dir, { bigint: true }).ino
+    const m = this.current()[appId] ?? (this.doubt() ? { source: dir, importedAt: at, ino: Number(ino), confirmed: null } : null)
+    if (!m) return
     /*
      * Confirmation is an explicit write path: it binds the mark to this folder only after a fresh review of what the
      * folder holds now (`enable` checks the key against the current manifest), a legacy record or a folder recreated
@@ -145,4 +167,20 @@ export class ImportBook {
   private write(): void {
     this.file.write(this.doc)
   }
+}
+
+/** The newest `app-imports.json.unreadable-<ms>` `PrivateJsonFile` moved aside in the data folder, or null */
+function newestCopy(dataRoot: string): string | null {
+  let names: string[]
+  try {
+    names = readdirSync(dataRoot)
+  } catch {
+    return null
+  }
+  let newest: { name: string; at: number } | null = null
+  for (const name of names) {
+    const at = Number(/^app-imports\.json\.unreadable-(\d+)$/.exec(name)?.[1])
+    if (Number.isSafeInteger(at) && (!newest || at > newest.at)) newest = { name, at }
+  }
+  return newest?.name ?? null
 }

@@ -102,7 +102,8 @@ export class AppHandover {
    */
   gate(appId: string, dir: string, manifest: AppManifest): string | null {
     const mark = this.book.get(appId, dir)
-    if (!mark) return null
+    // No mark is the person's own app only while the marks can be trusted to be complete (#1172)
+    if (!mark) return this.book.doubt()
     if (mark.confirmed && mark.confirmed.key === reviewKey(manifest)) return null
     return mark.confirmed ? CHANGED : NOT_ENABLED
   }
@@ -230,7 +231,7 @@ export class AppHandover {
     const app = this.host.userApp(appId)
     if (!app) throw new ImportRefused(`No app named "${appId}" in your apps`)
     if (!app.manifest) throw new ImportRefused("This app's manifest is invalid; fix it before enabling it")
-    if (!this.book.get(appId, app.dir)) throw new ImportRefused('This app was not imported, so it needs no enabling')
+    if (!this.book.get(appId, app.dir) && !this.book.doubt()) throw new ImportRefused('This app was not imported, so it needs no enabling')
     if (reviewKey(app.manifest) !== key) throw new ImportRefused('This app changed since you reviewed it. Review it again')
     this.book.confirm(appId, app.dir, app.manifest)
     this.host.changed()

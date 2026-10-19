@@ -371,6 +371,117 @@ describe('a replaced folder does not inherit the import, nor escape it', () => {
   })
 })
 
+/*
+ * The marks file is the only record of which apps were imported (#1172). When it could not be read it was moved aside
+ * (or read as empty), every imported app then had no mark, and the gate took each for the person's own and ran it.
+ */
+describe('a marks file that cannot be read holds every unmarked app instead of running it', () => {
+  /** An app the person made in the user folder themselves: it has no mark */
+  const plantOwn = (id: string) => {
+    const dir = join(dataRoot, 'apps', id)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, MANIFEST_FILE), JSON.stringify(manifest(id)))
+  }
+  const copies = () => readdirSync(dataRoot).filter((n) => n.startsWith(`${IMPORTS_FILE}.unreadable-`))
+  const logged = () => vi.mocked(console.error).mock.calls.flat().join('\n')
+
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("with no marks file at all (a first run), an app of the person's own runs without asking; with no file but a copy moved aside, it asks", async () => {
+    plantOwn('mine')
+    make()
+    expect(info('mine')).toMatchObject({ status: 'stopped' })
+    expect(info('mine')?.error).toBeFalsy()
+    expect((await rt.call(userRef('mine'), 'env', {}, { kind: 'view' })).status).toBe('ok')
+    expect(existsSync(join(dataRoot, IMPORTS_FILE))).toBe(false)
+    expect(() => rt.enableApp(userRef('mine'), 'x')).toThrow('This app was not imported, so it needs no enabling')
+
+    // The other host of a swap moved a broken file aside first: no file is left, which alone reads as a first run
+    await rt.dispose()
+    writeFileSync(join(dataRoot, `${IMPORTS_FILE}.unreadable-1700000000000`), '{"mine": ')
+    make()
+    expect(info('mine')).toMatchObject({ status: 'unconfirmed', error: expect.stringContaining(`moved to ${IMPORTS_FILE}.unreadable-1700000000000`) })
+    expect((await rt.call(userRef('mine'), 'env', {}, { kind: 'view' })).status).toBe('rejected')
+  })
+
+  it('a marks file that does not parse holds every app until each is reviewed, across a restart, and its bytes are kept aside', async () => {
+    make()
+    await importApp(plantSource('gift-src', 'gift'))
+    await importApp(plantSource('tool-src', 'tool'), true)
+    plantOwn('mine')
+    rt.refresh()
+    expect(info('tool')?.status).toBe('stopped')
+    expect(info('mine')?.status).toBe('stopped')
+    await rt.dispose()
+    const damaged = '{"tool": {"source": "/somewhere", "confirmed": {"key": "'
+    writeFileSync(join(dataRoot, IMPORTS_FILE), damaged)
+
+    make()
+    for (const id of ['gift', 'tool', 'mine']) {
+      expect(info(id)).toMatchObject({ status: 'unconfirmed', error: expect.stringContaining(`${IMPORTS_FILE} was unreadable and was moved to ${IMPORTS_FILE}.unreadable-`) })
+    }
+    const refused = await rt.call(userRef('tool'), 'env', {}, { kind: 'view' })
+    expect(refused).toMatchObject({ status: 'rejected', error: expect.stringContaining('whether this app was imported is not known') })
+    expect(existsSync(join(dataRoot, 'app-logs', '_user', 'tool.log'))).toBe(false)
+    // Said on the host's log, and the damaged bytes survive in the copy beside it
+    expect(logged()).toContain(`${IMPORTS_FILE} is unreadable; moved to ${IMPORTS_FILE}.unreadable-`)
+    expect(copies()).toHaveLength(1)
+    expect(readFileSync(join(dataRoot, copies()[0]!), 'utf8')).toBe(damaged)
+
+    // A restart finds the copy, so it still asks
+    await rt.dispose()
+    make()
+    expect(info('mine')?.status).toBe('unconfirmed')
+
+    // Enabling one app gives it a mark of its own; the others still ask, and keep asking after another restart
+    const review = rt.reviewApp(userRef('mine'))
+    expect(review.source).toBe(join(dataRoot, 'apps', 'mine'))
+    expect(rt.enableApp(userRef('mine'), review.reviewKey).status).toBe('stopped')
+    expect((await rt.call(userRef('mine'), 'env', {}, { kind: 'view' })).status).toBe('ok')
+    await rt.dispose()
+    make()
+    expect(info('mine')?.status).toBe('stopped')
+    expect(info('tool')?.status).toBe('unconfirmed')
+    expect(info('gift')?.status).toBe('unconfirmed')
+    expect(readFileSync(join(dataRoot, copies()[0]!), 'utf8')).toBe(damaged)
+  })
+
+  it('a marks file that cannot be read at all holds every app, is never written over, and its marks count again once it reads', async () => {
+    make()
+    await importApp(plantSource('tool-src', 'tool'), true)
+    plantOwn('mine')
+    await rt.dispose()
+    const path = join(dataRoot, IMPORTS_FILE)
+    const before = readFileSync(path, 'utf8')
+    // A folder under the file's name: reading it fails (EISDIR) on every platform and for root, unlike chmod
+    rmSync(path)
+    mkdirSync(path)
+
+    make()
+    for (const id of ['tool', 'mine']) {
+      expect(info(id)).toMatchObject({ status: 'unconfirmed', error: expect.stringContaining(`${IMPORTS_FILE} could not be read`) })
+    }
+    expect((await rt.call(userRef('mine'), 'env', {}, { kind: 'view' })).status).toBe('rejected')
+    const review = rt.reviewApp(userRef('mine'))
+    expect(() => rt.enableApp(userRef('mine'), review.reviewKey)).toThrow(/could not be read, so it was not overwritten/)
+    expect(copies()).toEqual([])
+    expect(logged()).toContain(`${IMPORTS_FILE} could not be read`)
+
+    // Readable again: the import's confirmation is back, and an app without a mark is the person's own again
+    rmSync(path, { recursive: true })
+    writeFileSync(path, before)
+    rt.refresh()
+    expect(info('tool')?.status).toBe('stopped')
+    expect(info('mine')?.status).toBe('stopped')
+    expect(readFileSync(path, 'utf8')).toBe(before)
+  })
+})
+
 describe('asks again if server or uses changes after being enabled', () => {
   const edit = (id: string, over: Record<string, unknown>) => {
     const path = join(dataRoot, 'apps', id, MANIFEST_FILE)
